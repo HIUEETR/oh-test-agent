@@ -3,7 +3,7 @@
   "display_name": "知乎++",
   "bundle_name": "com.github.zhuoyi233.zhplus",
   "main_ability": "EntryAbility",
-  "installation_status": "device_installed_unverified",
+  "installation_status": "device_installed_verified",
   "device_selector": { "serial": "127.0.0.1:5555" },
   "launch_strategy": {
     "kind": "hdc_aa_start",
