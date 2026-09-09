@@ -10,7 +10,7 @@ Typical content includes:
 - `agent.db*`: local SQLite metadata and journals.
 - `phase1/`: preserved raw evidence from the legacy feasibility probe.
 
-Git tracks this README only. Reusable, reviewed, non-secret fixtures are stored under
+Git intentionally tracks this README as the only file inside `artifacts/`. This does not mean runtime evidence is unnecessary or deleted; it remains local and ignored. Reusable, reviewed, non-secret fixtures are stored under
 `tests/fixtures/legacy/zhihu-plus/` with a manifest and SHA-256 digests. Do not force-add runtime screenshots,
 logs, databases, browser profiles, or model responses.
 

@@ -1,0 +1,185 @@
+# OpenHarmony Multimodal Test Agent
+
+一个面向 OpenHarmony/HarmonyOS 的受控多模态 UI 测试 Agent：把自然语言任务转换为结构化计划，使用 HDC 采集截图与 UI 层级，通过 LLM/VLM 每轮选择一个类型化工具，保存可复盘 Run Trace，并从已验证动作确定性生成和回放 Hypium Driver 用例。
+
+项目于 2026-09-09 完成真实模型、真实设备、Hypium 三次回放和 Web 全链路验收。详细安装与排错见 [docs/STARTUP_GUIDE.md](docs/STARTUP_GUIDE.md)。
+
+## 核心原则
+
+- **模型负责理解与选择，不负责任意执行。** Agent 没有通用 Shell 工具。
+- **HDC 只能经类型化 Adapter 使用。** 坐标、超时和危险语义在执行前校验。
+- **每轮最多一个工具。** 失败、断言失败、设备断开和连续无变化会停止。
+- **截图必须落到本地。** 每个 Action 关联前后 Snapshot、布局、SHA-256 和命令证据。
+- **Hypium 确定性生成。** Python 使用固定模板，JSON 只写已验证字段；模型不能自由生成可执行代码。
+- **运行产物不进入 Git。** Git 只管理 `artifacts/README.md`；经筛选的稳定 fixture 放在 `tests/fixtures/`。
+
+## 已实现能力
+
+- `HarmonyDeviceAdapter`：连接、健康检查、启动应用、截图、`file recv`、布局、日志、点击、输入、滑动、返回和等待。
+- UI 层级标准化、系统节点过滤、语义目标变体、运行时 `element_id`、稳定定位器优先和 VLM bbox 融合。
+- Pydantic AI OpenAI-compatible Provider、实际 PNG 多模态输入和显式 Mock Provider。
+- 规划对齐：不擅自把“输入文本”扩展为“提交搜索”；软键盘返回流程可被确定性补全。
+- Agent 状态机、安全白名单、模型/设备独立超时、有限重试、停止和失败即停。
+- SQLite + JSON/PNG/日志/HTML 报告、SSE 事件流和页面关系图。
+- Hypium Python、JSON 与元数据生成；动态 key 前缀化；坐标降级显式告警。
+- FastAPI 后端与 React/Vite/TypeScript 控制台。
+- legacy `mvp_phase1` 保留为设备可行性探针，不再继续堆叠新业务。
+
+## 快速开始
+
+### 1. 安装
+
+```powershell
+uv sync --all-groups
+Push-Location web
+npm ci
+Pop-Location
+Copy-Item .env.example .env
+```
+
+在 `.env` 中填写模型、VLM、HDC 和设备配置。若兼容端点报 thinking/tool choice 冲突，设置：
+
+```dotenv
+AGENT_DISABLE_THINKING=true
+```
+
+### 2. 预检
+
+```powershell
+.\.venv\Scripts\harmony-test-agent.exe preflight
+```
+
+### 3. 运行真实 Agent
+
+```powershell
+$task = '打开知乎++，进入搜索，输入 OpenHarmony，返回首页，打开一条内容详情，确认页面存在可见内容后返回首页。'
+.\.venv\Scripts\harmony-test-agent.exe run --provider openai --task $task
+```
+
+成功 Run 默认生成 Hypium 文件。也可单独执行：
+
+```powershell
+.\.venv\Scripts\harmony-test-agent.exe generate --run-id <run-id>
+.\.venv\Scripts\harmony-test-agent.exe execute --run-id <run-id> --attempts 3
+```
+
+### 4. 启动 API 与 Web
+
+```powershell
+# 终端 1
+.\.venv\Scripts\harmony-test-agent.exe serve --host 127.0.0.1 --port 8000
+
+# 终端 2
+Push-Location web
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+若 Windows 保留默认端口，先运行 `netsh interface ipv4 show excludedportrange protocol=tcp`，再选择未被排除的端口并在启动 Vite 前设置 `VITE_API_URL`。完整示例见启动手册。
+
+## CLI
+
+```text
+preflight   检查 Python、依赖、模型、Hypium、HDC、设备、截图和布局
+run         执行自然语言任务，可选 real/mock、模式、设备、生成和回放
+generate    从已有 Run Trace 重新生成 Hypium
+execute     回放生成用例 1—3 次
+serve       启动 FastAPI/SSE
+```
+
+运行模式枚举为 `regression`、`exploration`、`stability`、`reproduction`；当前完整验收链路是 `regression`。
+
+## 架构
+
+```text
+CLI / FastAPI / React
+        ↓
+AgentOrchestrator
+  ├─ Planning + Vision + ToolDecision (Pydantic AI)
+  ├─ SafetyPolicy + ToolExecutor
+  ├─ HarmonyDeviceAdapter (HDC)
+  ├─ PerceptionService (UI hierarchy + VLM)
+  ├─ PageGraphBuilder
+  ├─ ArtifactStore + RunRepository
+  └─ HypiumGenerator + HypiumRunner
+```
+
+详细设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## 安全边界
+
+Agent 工具白名单：
+
+```text
+inspect_screen
+open_app
+click_element
+click_coordinate
+input_text
+swipe
+back
+wait
+assert_visible
+assert_not_visible
+assert_text
+finish
+```
+
+默认禁止登录、支付、验证码、删除、卸载、清除数据和授权。模型失败返回 `failed_model`，设备失败返回 `failed_device`，元素缺失返回 `failed_element`，断言失败返回 `failed_assertion`，不会伪装为成功或继续执行后续危险动作。
+
+## 产物与 Git
+
+本地证据位于：
+
+```text
+artifacts/preflight/
+artifacts/runs/<run-id>/
+artifacts/validation/
+artifacts/agent.db
+```
+
+这些文件包含动态截图、布局 JSON、模型输出、日志、报告和数据库，体积大且依赖本机环境，因此由 `.gitignore` 排除。`artifacts/README.md` 只定义目录契约；可复现 fixture 位于 `tests/fixtures/legacy/zhihu-plus/`。
+
+清理前先预览：
+
+```powershell
+.\scripts\clean-runtime.ps1 -Runs -ToolCaches -WhatIf
+```
+
+脚本不会删除 `artifacts/phase1`。
+
+## 质量门禁
+
+```powershell
+uv lock --check
+.\.venv\Scripts\ruff.exe check .
+.\.venv\Scripts\ruff.exe format --check .
+.\.venv\Scripts\python.exe -m pytest -q
+Push-Location web
+npm run build
+Pop-Location
+git diff --check
+```
+
+真实 Provider 测试默认跳过，显式启用：
+
+```powershell
+$env:RUN_LIVE_TESTS = '1'
+.\.venv\Scripts\python.exe -m pytest -q tests\live\test_real_provider.py -s
+```
+
+## 2026-09-09 验收结果
+
+- 预检：Python 3.14.0、Hypium 6.1.0.210、设备 `127.0.0.1:5555`、1320×2232、截图/布局均通过。
+- 真实模型：`deepseek-v4-flash-vision-exp`，实际截图输入，`model_mock=false`。
+- 最终 Run：`run-20260909T140205Z-e9ada52e`，18 个 Action、19 个 Snapshot、2 个通过断言、19 个状态节点、17 条边。
+- Hypium：连续 3 次 `returncode=0`、`passed=true`。
+- API/SSE：117 个事件按 ID 1—117 顺序读取，Graph/Script/Report/Artifact 均为 200。
+- Web：live/graph/script/report 真浏览器通过；1440px 与 375px 无横向溢出；浏览器按钮触发三次回放并全部成功。
+- 自动测试：33 passed、1 skipped；Ruff、uv lock、Vite production build 和 `git diff --check` 通过。
+
+## 当前限制
+
+- Hypium Driver 模式已真实验证；DevEco Testing 测试工程模式仍为 `not_validated`。
+- 页面签名会受到动态信息流和 VLM 标题变化影响，可能把一个语义页面拆成多个状态。
+- 无稳定 key/id 的控件会降级为经过边界验证的坐标，并在代码、元数据和 Web 中持续告警。
+- FastAPI 当前是本机开发服务，没有鉴权，不应直接暴露到不受信任网络。
