@@ -14,5 +14,6 @@ Git intentionally tracks this README as the only file inside `artifacts/`. This 
 `tests/fixtures/legacy/zhihu-plus/` with a manifest and SHA-256 digests. Do not force-add runtime screenshots,
 logs, databases, browser profiles, or model responses.
 
-Use `scripts/clean-runtime.ps1` to remove selected generated content. The script deliberately never removes
-`artifacts/phase1`.
+Use `scripts/clean-runtime.ps1` to remove selected generated content. For example, `-Runs` can be combined
+with `-KeepLatestSuccessfulRun` and `-KeepLatestPreflight`, while `-WebAcceptanceLogs` removes only `.log`
+files and `pids.json`. Always preview with `-WhatIf`. The script deliberately never removes `artifacts/phase1`.

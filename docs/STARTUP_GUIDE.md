@@ -472,29 +472,74 @@ git check-ignore -v artifacts\agent.db
 
 ## 14. 安全清理
 
-清理脚本支持 `-WhatIf` 和 PowerShell ShouldProcess，并拒绝项目根目录外的路径。先预览：
+清理脚本支持 `-WhatIf` 和 PowerShell ShouldProcess，并拒绝项目根目录外的路径。
+
+### 14.1 保留最终证据，只删除旧 Run 和 Web 临时日志
+
+先预览：
 
 ```powershell
-.\scripts\clean-runtime.ps1 -Runs -ToolCaches -WhatIf
+$finalRun = 'run-20260909T140205Z-e9ada52e'
+.\scripts\clean-runtime.ps1 `
+  -Runs `
+  -KeepRunId $finalRun `
+  -KeepLatestPreflight `
+  -WebAcceptanceLogs `
+  -WhatIf
 ```
 
-确认后按需清理：
+也可以不写固定 Run ID，让脚本从 `trace.json` 中保留最新的 `completed` 且 `model_mock=false` 的 Run：
 
 ```powershell
-.\scripts\clean-runtime.ps1 -Runs -ToolCaches
-.\scripts\clean-runtime.ps1 -Preflight -Validation
-.\scripts\clean-runtime.ps1 -Database
+.\scripts\clean-runtime.ps1 `
+  -Runs `
+  -KeepLatestSuccessfulRun `
+  -KeepLatestPreflight `
+  -WebAcceptanceLogs `
+  -WhatIf
 ```
 
-清理全部新运行产物：
+必须检查 `What if:` 输出确实只包含准备删除的目录。确认后移除 `-WhatIf`：
+
+```powershell
+.\scripts\clean-runtime.ps1 `
+  -Runs `
+  -KeepLatestSuccessfulRun `
+  -KeepLatestPreflight `
+  -WebAcceptanceLogs `
+  -Confirm
+```
+
+`-WebAcceptanceLogs` 只删除 `artifacts/web-acceptance` 下的非 PNG 文件，保留浏览器截图。
+
+### 14.2 其他清理选项
+
+```powershell
+# 只清理工具缓存和 Web build
+.\scripts\clean-runtime.ps1 -ToolCaches -WhatIf
+
+# 删除预检报告或 Provider 验证证据
+.\scripts\clean-runtime.ps1 -Preflight -Validation -WhatIf
+
+# 删除 SQLite 及 journal
+.\scripts\clean-runtime.ps1 -Database -WhatIf
+```
+
+### 14.3 高风险选项
+
+以下命令在没有 keep 参数时会删除整个 `artifacts/runs`：
+
+```powershell
+.\scripts\clean-runtime.ps1 -Runs -WhatIf
+```
+
+`-AllGenerated` 会选择 Runs、Preflight、Validation、Web 临时日志、Database 和 ToolCaches，应始终先运行：
 
 ```powershell
 .\scripts\clean-runtime.ps1 -AllGenerated -WhatIf
-.\scripts\clean-runtime.ps1 -AllGenerated
 ```
 
-脚本刻意不删除 `artifacts/phase1`。若要保留某个最终 Run，不要使用 `-Runs`；先手工备份该 Run，再执行清理。
-
+脚本刻意不删除 `artifacts/phase1`。`-KeepRunId` 会验证目录存在且拒绝路径分隔符；`-KeepLatestPreflight` 或 `-KeepLatestSuccessfulRun` 找不到可保留目录时会先失败，不会继续删除。
 ## 15. 常见问题
 
 ### 15.1 `Thinking mode does not support this tool_choice`

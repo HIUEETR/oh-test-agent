@@ -139,13 +139,19 @@ artifacts/agent.db
 
 这些文件包含动态截图、布局 JSON、模型输出、日志、报告和数据库，体积大且依赖本机环境，因此由 `.gitignore` 排除。`artifacts/README.md` 只定义目录契约；可复现 fixture 位于 `tests/fixtures/legacy/zhihu-plus/`。
 
-清理前先预览：
+清理前先预览，并保留最新真实成功 Run 与最新预检：
 
 ```powershell
-.\scripts\clean-runtime.ps1 -Runs -ToolCaches -WhatIf
+.\scripts\clean-runtime.ps1 `
+  -Runs `
+  -KeepLatestSuccessfulRun `
+  -KeepLatestPreflight `
+  -WebAcceptanceLogs `
+  -ToolCaches `
+  -WhatIf
 ```
 
-脚本不会删除 `artifacts/phase1`。
+确认预览清单后移除 `-WhatIf`。脚本拒绝项目外路径，且不会删除 `artifacts/phase1`。
 
 ## 质量门禁
 
