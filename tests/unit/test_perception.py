@@ -1,5 +1,16 @@
-from harmony_test_agent.models import BoundingBox, ScreenSnapshot, VisionElement, VisionObservation
-from harmony_test_agent.perception import PerceptionService, find_element, normalize_layout
+from harmony_test_agent.models import (
+    BoundingBox,
+    ScreenSnapshot,
+    UIElement,
+    VisionElement,
+    VisionObservation,
+)
+from harmony_test_agent.perception import (
+    PerceptionService,
+    find_element,
+    normalize_layout,
+    target_variants,
+)
 
 
 def sample_layout():
@@ -88,3 +99,43 @@ def test_merge_rejects_out_of_bounds_vlm_element(tmp_path):
         ]
     )
     assert PerceptionService().merge(snapshot, observation).elements == []
+
+
+def test_target_variants_extract_semantic_locator_names() -> None:
+    variants = target_variants("搜索图标/搜索框")
+
+    assert "搜索" in variants
+    assert "输入框" in variants
+    assert "首页" in target_variants("首页界面元素")
+    assert "内容" in target_variants("内容列表中的一条内容")
+
+
+def test_find_element_accepts_descriptive_search_target() -> None:
+    element = UIElement(
+        element_id="search",
+        key="p2_home_titlebar_search",
+        content="搜索",
+        clickable=True,
+        enabled=True,
+    )
+
+    found = find_element([element], "搜索图标/搜索框", clickable=True)
+
+    assert found is not None
+    assert found[0].element_id == "search"
+
+
+def test_find_element_accepts_runtime_element_id() -> None:
+    element = UIElement(
+        element_id="ui-search",
+        key="p2_home_titlebar_search",
+        content="搜索",
+        clickable=True,
+        enabled=True,
+    )
+
+    found = find_element([element], "ui-search", clickable=True)
+
+    assert found is not None
+    assert found[0] is element
+    assert found[1].value == "ui-search"

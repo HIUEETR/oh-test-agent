@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     agent_model: str | None = None
     agent_vision_model: str | None = None
     agent_provider: Literal["auto", "openai", "mock"] = "auto"
+    agent_disable_thinking: bool = False
     hdc_path: str | None = None
     harmony_device: str = "127.0.0.1:5555"
     runtime_dir: Path = Field(default=Path("artifacts/runs"))
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
     runtime_home: Path = Field(default=Path(".runtime-user"))
     agent_max_steps: int = Field(default=20, ge=1, le=100)
     agent_action_timeout: float = Field(default=30, gt=0, le=300)
+    agent_model_timeout: float = Field(default=90, gt=0, le=300)
     agent_retry_limit: int = Field(default=2, ge=0, le=5)
     unchanged_screen_limit: int = Field(default=2, ge=1, le=5)
     vlm_min_confidence: float = Field(default=0.55, ge=0, le=1)

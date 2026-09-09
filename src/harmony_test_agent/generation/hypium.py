@@ -44,7 +44,15 @@ class HypiumGenerator:
             "source_action_count": len(trace.actions),
             "source_assertion_count": len(trace.assertions),
             "coordinate_fallbacks": sum(
-                1 for action in trace.actions if action.locator and action.locator.kind == LocatorKind.COORDINATE
+                1
+                for action in trace.actions
+                if action.tool == ToolName.CLICK_COORDINATE
+                or (
+                    action.tool == ToolName.CLICK_ELEMENT
+                    and action.locator
+                    and action.locator.kind == LocatorKind.SPATIAL
+                    and self._runtime_element_coordinate(trace, action)
+                )
             ),
             "warnings": warnings,
         }
@@ -74,8 +82,14 @@ class HypiumGenerator:
                     lines.append("        driver.stop_app(BUNDLE_NAME)")
                 lines.append("        driver.start_app(BUNDLE_NAME, MAIN_ABILITY)")
             elif tool == ToolName.CLICK_ELEMENT:
-                selector = self._selector(action.locator, action.params.get("target"), warnings)
-                lines.append(f"        driver.touch({selector})")
+                coordinate = self._runtime_element_coordinate(trace, action)
+                if action.locator and action.locator.kind == LocatorKind.SPATIAL and coordinate:
+                    target = action.params.get("target")
+                    lines.append(f"        driver.touch({coordinate!r})  # coordinate fallback for {target!r}")
+                    warnings.append(f"{action.step_id}: runtime element {target!r} uses coordinate {coordinate}")
+                else:
+                    selector = self._selector(action.locator, action.params.get("target"), warnings)
+                    lines.append(f"        driver.touch({selector})")
             elif tool == ToolName.CLICK_COORDINATE:
                 coordinate = action.params.get("coordinate")
                 point = tuple(coordinate) if coordinate else (0, 0)
@@ -107,6 +121,22 @@ class HypiumGenerator:
                 lines.append("        assert driver.device_sn, 'Hypium driver did not connect to a device'")
                 warnings.append("no stable UI assertion was available; generated a connection assertion")
         return lines
+
+    @staticmethod
+    def _runtime_element_coordinate(trace: RunTrace, action) -> tuple[int, int] | None:
+        target = action.params.get("target")
+        if not target or not action.before_snapshot_id:
+            return None
+        snapshot = next(
+            (item for item in trace.snapshots if item.snapshot_id == action.before_snapshot_id),
+            None,
+        )
+        if snapshot is None:
+            return None
+        element = next((item for item in snapshot.elements if item.element_id == target), None)
+        if element is None or element.bbox is None:
+            return None
+        return element.bbox.center
 
     @staticmethod
     def _selector(locator, target: str | None, warnings: list[str]) -> str:

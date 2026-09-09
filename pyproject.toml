@@ -36,6 +36,9 @@ packages = ["src/harmony_test_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "live: uses a configured external model and a connected OpenHarmony device",
+]
 
 [tool.ruff]
 line-length = 120

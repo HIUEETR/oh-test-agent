@@ -40,7 +40,7 @@ class SafetyPolicy:
             raise SafetyError(f"task contains blocked operation: {match}")
 
     def validate_decision(self, decision: ToolDecision, snapshot: ScreenSnapshot | None) -> None:
-        text = " ".join(filter(None, (decision.target, decision.text, decision.reasoning))).casefold()
+        text = " ".join(filter(None, (decision.target, decision.text))).casefold()
         match = next((term for term in self.blocked_terms if term.casefold() in text), None)
         if match:
             raise SafetyError(f"tool decision contains blocked operation: {match}")

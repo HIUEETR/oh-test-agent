@@ -11,11 +11,13 @@ from ..graph import PageGraphBuilder
 from ..models import (
     ActionResult,
     EventType,
+    PlannedStep,
     RunEvent,
     RunRequest,
     RunState,
     RunTrace,
     ScreenSnapshot,
+    ToolDecision,
     ToolName,
     utc_now,
 )
@@ -95,7 +97,7 @@ class AgentOrchestrator:
                 step_limit = min(request.max_steps, self.settings.agent_max_steps)
                 plan = await asyncio.wait_for(
                     self.provider.plan(request.task, profile, step_limit),
-                    timeout=self.settings.agent_action_timeout,
+                    timeout=self.settings.agent_model_timeout,
                 )
             except Exception as exc:
                 await self._fail(trace, emitter, RunState.FAILED_MODEL, f"planning failed: {exc}")
@@ -126,10 +128,16 @@ class AgentOrchestrator:
                 try:
                     decision = await asyncio.wait_for(
                         self.provider.decide(step, current_snapshot),
-                        timeout=self.settings.agent_action_timeout,
+                        timeout=self.settings.agent_model_timeout,
                     )
+                except TimeoutError as exc:
+                    raise ToolExecutionError(
+                        f"model tool decision timed out after {self.settings.agent_model_timeout} seconds",
+                        RunState.FAILED_MODEL,
+                    ) from exc
                 except Exception as exc:
                     raise ToolExecutionError(f"model tool decision failed: {exc}", RunState.FAILED_MODEL) from exc
+                decision = self._constrain_finish_decision(step, decision)
                 emitter.emit(
                     EventType.ACTION_STARTED,
                     step.instruction,
@@ -269,7 +277,7 @@ class AgentOrchestrator:
         try:
             observation = await asyncio.wait_for(
                 self.provider.analyze(snapshot),
-                timeout=self.settings.agent_action_timeout,
+                timeout=self.settings.agent_model_timeout,
             )
         except Exception as exc:
             if not self.provider.mock:
@@ -322,6 +330,27 @@ class AgentOrchestrator:
                     raise
                 await asyncio.sleep(min(0.5 * (attempt + 1), 1.5))
         raise last_error or ToolExecutionError("tool execution failed")
+
+    @staticmethod
+    def _constrain_finish_decision(step: PlannedStep, decision: ToolDecision) -> ToolDecision:
+        planned_finish = step.tool == ToolName.FINISH
+        premature_finish = decision.tool == ToolName.FINISH and not planned_finish
+        missing_finish = planned_finish and decision.tool != ToolName.FINISH
+        if not (premature_finish or missing_finish):
+            return decision
+
+        original_tool = decision.tool
+        updates: dict[str, object] = {
+            "tool": step.tool,
+            "reasoning": (
+                f"execution framework replaced {original_tool} with planned tool {step.tool}; "
+                "finish is only valid for the planned finish step"
+            ),
+        }
+        for field in ("target", "text", "coordinate", "direction", "wait_seconds"):
+            if getattr(decision, field) is None and (planned_value := getattr(step, field)) is not None:
+                updates[field] = planned_value
+        return decision.model_copy(update=updates)
 
     def _save_action_command(self, run_id: str, result: ActionResult) -> None:
         if result.command:

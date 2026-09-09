@@ -16,7 +16,7 @@ from ..models import (
     ToolName,
     utc_now,
 )
-from ..perception import find_element
+from ..perception import find_element, target_variants
 from .safety import SafetyPolicy
 
 
@@ -144,18 +144,52 @@ class ToolExecutor:
             return AssertionResult(
                 kind=decision.tool, target=decision.target or "", passed=False, message="no screenshot"
             ), None
-        target = decision.target or decision.text or ""
-        found = find_element(snapshot.elements, target, stable_locators=self.profile.stable_locator_inventory)
-        visible = found is not None
+        target = (
+            (decision.text or decision.target or "")
+            if decision.tool == ToolName.ASSERT_TEXT
+            else (decision.target or decision.text or "")
+        )
+        candidates = self._assertion_candidates(target)
+        found = None
+        matched_candidate = None
+        for candidate in candidates:
+            found = find_element(
+                snapshot.elements,
+                candidate,
+                stable_locators=self.profile.stable_locator_inventory,
+            )
+            if found:
+                matched_candidate = candidate
+                break
+
+        page_text = " ".join(filter(None, (snapshot.page_title, snapshot.summary))).casefold()
+        summary_candidate = next(
+            (candidate for candidate in candidates if candidate.casefold() in page_text),
+            None,
+        )
+        visible = found is not None or summary_candidate is not None
         if decision.tool == ToolName.ASSERT_NOT_VISIBLE:
             passed = not visible
         elif decision.tool == ToolName.ASSERT_TEXT:
-            passed = visible
+            passed = found is not None
         else:
             passed = visible or (target.casefold() in {"内容", "content"} and bool(snapshot.elements))
+
+        if passed and found:
+            message = f"assertion passed using UI element: {matched_candidate}"
+        elif passed and summary_candidate:
+            message = f"assertion passed using page summary: {summary_candidate}"
+        elif passed:
+            message = "assertion passed using visible screen content"
+        else:
+            message = f"target is not in current screen: {target.casefold()}"
         return AssertionResult(
             kind=decision.tool,
             target=target,
             passed=passed,
-            message="assertion passed" if passed else f"target is not in current screen: {target.casefold()}",
+            message=message,
         ), found[1] if found else None
+
+    @staticmethod
+    def _assertion_candidates(target: str) -> list[str]:
+        return target_variants(target)

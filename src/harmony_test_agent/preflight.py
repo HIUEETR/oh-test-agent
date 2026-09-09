@@ -116,6 +116,7 @@ class PreflightService:
                 "configured": configured,
                 "vision_configured": self.settings.vision_model_configured,
                 "provider": self.settings.agent_provider,
+                "thinking_disabled": self.settings.agent_disable_thinking,
                 "base_url": self.settings.openai_base_url,
                 "api_key": "configured" if self.settings.openai_api_key else "not_configured",
             },

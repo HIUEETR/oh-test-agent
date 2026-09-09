@@ -112,7 +112,7 @@ def _match_score(element: UIElement, target: str) -> float:
     needle = target.casefold().strip()
     if not needle:
         return 0
-    values = (element.key, element.id, element.content, element.description)
+    values = (element.element_id, element.key, element.id, element.content, element.description)
     if any(value.casefold() == needle for value in values if value):
         return 1
     if any(value.casefold().startswith(needle) for value in values if value):
@@ -129,6 +129,46 @@ def _match_score(element: UIElement, target: str) -> float:
     return 0.75 if any(alias in joined for alias in aliases.get(needle, ())) else 0
 
 
+def target_variants(target: str) -> list[str]:
+    normalized = target.strip()
+    if not normalized:
+        return []
+
+    variants = [normalized]
+    variants.extend(part.strip() for part in re.split(r"[/|、]|或", normalized) if part.strip())
+
+    semantic_phrases = ("搜索结果", "搜索", "输入框", "首页", "内容详情", "详情", "内容")
+    if "搜索框" in normalized or "输入" in normalized:
+        variants.append("输入框")
+    variants.extend(phrase for phrase in semantic_phrases if phrase in normalized)
+
+    generic_terms = (
+        "界面",
+        "元素",
+        "页面",
+        "区域",
+        "列表项",
+        "列表",
+        "条目",
+        "卡片",
+        "图标",
+        "按钮",
+        "中的",
+        "一个",
+        "一条",
+        "第一条",
+    )
+    queue = list(variants)
+    while queue:
+        value = queue.pop(0)
+        for term in generic_terms:
+            simplified = value.replace(term, "").strip()
+            if simplified and simplified != value and simplified not in variants:
+                variants.append(simplified)
+                queue.append(simplified)
+    return list(dict.fromkeys(variants))
+
+
 def find_element(
     elements: list[UIElement],
     target: str,
@@ -137,9 +177,10 @@ def find_element(
     clickable: bool | None = None,
     editable: bool | None = None,
 ) -> tuple[UIElement, LocatorCandidate] | None:
-    locator_values: list[str] = [target]
+    locator_values = target_variants(target)
     for locator in stable_locators or []:
-        if locator.name.casefold() == target.casefold() or target.casefold() in locator.name.casefold():
+        locator_name = locator.name.casefold()
+        if any(value.casefold() == locator_name or value.casefold() in locator_name for value in locator_values):
             locator_values.extend(value for value in (locator.key, locator.id, locator.text) if value)
     ranked: list[tuple[float, UIElement]] = []
     for element in elements:
