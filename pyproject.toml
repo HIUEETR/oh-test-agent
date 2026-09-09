@@ -1,0 +1,43 @@
+[project]
+name = "mvp"
+version = "0.1.0"
+description = "OpenHarmony multimodal UI testing agent and Hypium generator"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.116.0",
+    "httpx>=0.28.0",
+    "hypium==6.1.0.210",
+    "jinja2>=3.1.6",
+    "pillow>=11.3.0",
+    "pydantic-ai==1.73.0",
+    "pydantic-settings>=2.10.0",
+    "sqlmodel>=0.0.24",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.1.0",
+    "ruff>=0.12.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harmony_test_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+extend-exclude = ["artifacts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
