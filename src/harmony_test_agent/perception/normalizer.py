@@ -1,3 +1,5 @@
+"""将 HDC UI 层级转换为统一元素模型，并提供语义元素匹配。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -23,6 +25,7 @@ SYSTEM_NODE_PREFIXES = (
 
 
 def walk_nodes(root: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    """按原始子节点顺序深度遍历 UI 层级。"""
     stack = [root]
     while stack:
         node = stack.pop()
@@ -31,6 +34,7 @@ def walk_nodes(root: dict[str, Any]) -> Iterable[dict[str, Any]]:
 
 
 def parse_bounds(value: str | None) -> BoundingBox | None:
+    """解析 HDC bounds 字符串，并过滤无效或退化的矩形。"""
     if not value:
         return None
     match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", value.strip())
@@ -43,6 +47,7 @@ def parse_bounds(value: str | None) -> BoundingBox | None:
 
 
 def page_path(layout: dict[str, Any]) -> str:
+    """从层级中提取首个可用页面路径。"""
     for node in walk_nodes(layout):
         value = (node.get("attributes") or {}).get("pagePath")
         if value:
@@ -51,6 +56,7 @@ def page_path(layout: dict[str, Any]) -> str:
 
 
 def normalize_layout(layout: dict[str, Any], width: int, height: int) -> list[UIElement]:
+    """把可见且可识别的层级节点转换为去重后的统一 UI 元素。"""
     elements: list[UIElement] = []
     seen: set[str] = set()
     for index, node in enumerate(walk_nodes(layout)):
@@ -130,6 +136,7 @@ def _match_score(element: UIElement, target: str) -> float:
 
 
 def target_variants(target: str) -> list[str]:
+    """展开目标描述中的同义短语和通用 UI 后缀，供语义匹配使用。"""
     normalized = target.strip()
     if not normalized:
         return []
@@ -177,6 +184,7 @@ def find_element(
     clickable: bool | None = None,
     editable: bool | None = None,
 ) -> tuple[UIElement, LocatorCandidate] | None:
+    """按可点击、可编辑约束和定位器得分选择最匹配的元素。"""
     locator_values = target_variants(target)
     for locator in stable_locators or []:
         locator_name = locator.name.casefold()

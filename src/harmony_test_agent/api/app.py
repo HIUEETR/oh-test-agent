@@ -1,3 +1,5 @@
+"""构建测试代理的 FastAPI 接口，并管理后台运行任务及产物访问。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +22,8 @@ from ..storage import ArtifactStore, RunRepository
 
 
 class RunManager:
+    """持有 API 共享依赖，并管理运行任务的创建、停止与清理。"""
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.repository = RunRepository(settings.resolved_database_path)
@@ -28,6 +32,7 @@ class RunManager:
         self.orchestrators: dict[str, AgentOrchestrator] = {}
 
     def start(self, request: RunRequest) -> str:
+        """创建运行标识并在当前事件循环中启动后台测试任务。"""
         run_id = f"run-{utc_now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
         orchestrator = AgentOrchestrator(
             self.settings,
@@ -46,6 +51,7 @@ class RunManager:
         return run_id
 
     def stop(self, run_id: str) -> bool:
+        """请求运行在下一个安全检查点停止，并标记已持久化的非活动运行。"""
         orchestrator = self.orchestrators.get(run_id)
         if orchestrator:
             orchestrator.request_stop(run_id)
@@ -53,6 +59,7 @@ class RunManager:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    """使用给定配置创建并装配 FastAPI 应用。"""
     settings = settings or get_settings()
     manager = RunManager(settings)
     app = FastAPI(title="OpenHarmony Multimodal Test Agent", version="0.1.0")
@@ -72,6 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
+        """返回服务版本、模型配置状态和设备连通性摘要。"""
         device_data: dict[str, object]
         try:
             device = HarmonyDeviceAdapter(settings.harmony_device, settings.hdc_path, settings.agent_action_timeout)
@@ -98,6 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/devices")
     async def devices():
+        """列出设备适配器当前可见的设备。"""
         try:
             device = HarmonyDeviceAdapter(settings.harmony_device, settings.hdc_path, settings.agent_action_timeout)
             result = await asyncio.to_thread(device.health_check)
@@ -108,14 +117,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/runs")
     async def list_runs(limit: int = Query(default=50, ge=1, le=200)):
+        """按最近更新时间返回有限数量的运行摘要。"""
         return manager.repository.list_runs(limit)
 
     @app.post("/api/runs", status_code=status.HTTP_202_ACCEPTED)
     async def create_run(request: RunRequest):
+        """接受运行请求并返回新建后台任务的标识与初始状态。"""
         return {"run_id": manager.start(request), "state": RunState.CREATED}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str):
+        """返回已持久化轨迹，或报告尚未落库的运行初始状态。"""
         trace = manager.repository.get_trace(run_id)
         if not trace:
             task = manager.tasks.get(run_id)
@@ -126,15 +138,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/runs/{run_id}/stop")
     async def stop_run(run_id: str):
+        """请求停止指定运行并返回停止状态。"""
         if not manager.stop(run_id):
             raise HTTPException(status_code=404, detail="run not found")
         return {"run_id": run_id, "state": RunState.STOPPED_BY_USER}
 
     @app.get("/api/runs/{run_id}/events")
     async def events(run_id: str, after: int = Query(default=0, ge=0)):
+        """以 SSE 流持续返回指定序号之后的运行事件。"""
+
         async def stream():
             cursor = after
             while True:
+                # 发送成功后推进本次连接的游标；断线续传需要客户端显式传入 after。
                 found = manager.repository.get_events(run_id, cursor)
                 for event in found:
                     cursor = event.event_id
@@ -151,11 +167,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/graph")
     async def graph(run_id: str):
+        """返回指定运行累计构建的页面图。"""
         trace = _trace_or_404(manager, run_id)
         return trace.graph
 
     @app.get("/api/runs/{run_id}/script")
     async def script(run_id: str):
+        """返回已生成脚本、配置内容及生成警告。"""
         trace = _trace_or_404(manager, run_id)
         if not trace.generated:
             raise HTTPException(status_code=404, detail="script has not been generated")
@@ -169,6 +187,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/runs/{run_id}/generate")
     async def generate(run_id: str):
+        """在线程中为既有轨迹生成 Hypium 产物并持久化结果。"""
         trace = _trace_or_404(manager, run_id)
         profile = manager.artifacts.load_profile(settings.resolved_target_profile_path)
         trace.generated = await asyncio.to_thread(HypiumGenerator(manager.artifacts).generate, trace, profile)
@@ -179,6 +198,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/runs/{run_id}/execute")
     async def execute(run_id: str, attempts: int = Query(default=3, ge=1, le=3)):
+        """在线程中重复执行已生成脚本并更新运行状态。"""
         trace = _trace_or_404(manager, run_id)
         if not trace.generated:
             raise HTTPException(status_code=409, detail="generate the Hypium script first")
@@ -193,6 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/report")
     async def report(run_id: str, download: bool = False):
+        """按需生成并返回指定运行的 HTML 报告。"""
         trace = _trace_or_404(manager, run_id)
         report_path = manager.artifacts.run_dir(run_id) / "reports" / "report.html"
         if not report_path.exists():
@@ -202,8 +223,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/artifacts/{artifact_path:path}")
     async def artifact(run_id: str, artifact_path: str):
+        """返回运行目录内经过路径边界校验的单个产物文件。"""
         run_dir = manager.artifacts.run_dir(run_id).resolve()
         requested = (run_dir / artifact_path).resolve()
+        # resolve 后再检查父目录，阻止绝对路径和 .. 片段越出当前运行目录。
         if not requested.is_relative_to(run_dir) or not requested.is_file():
             raise HTTPException(status_code=404, detail="artifact not found")
         return FileResponse(requested)

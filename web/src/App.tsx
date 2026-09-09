@@ -7,6 +7,7 @@ import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/r
 import type { Health, RunEvent, RunTrace, ScriptResult } from "./types";
 
 const API = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+// 终态由后端 RunState 契约决定；进入这些状态后停止 Trace 轮询并解除操作区忙碌状态。
 const terminalStates = new Set([
   "completed", "failed_device", "failed_model", "failed_element", "failed_action",
   "failed_assertion", "failed_script", "stopped_by_user",
@@ -14,6 +15,7 @@ const terminalStates = new Set([
 type Tab = "live" | "graph" | "script" | "report";
 
 export default function App() {
+  // runId 是各类运行数据的切换边界：变化时，SSE、Trace 轮询和脚本读取都会转向同一次运行。
   const [health, setHealth] = useState<Health | null>(null);
   const [task, setTask] = useState(
     "打开知乎++，进入搜索，输入 OpenHarmony，返回首页，打开一条内容详情，确认页面存在可见内容后返回首页。",
@@ -27,6 +29,7 @@ export default function App() {
   const [script, setScript] = useState<ScriptResult | null>(null);
   const [tab, setTab] = useState<Tab>(() => {
     const requested = new URLSearchParams(window.location.search).get("tab");
+    // URL 参数属于不可信字符串，先用白名单收窄后再进入 Tab 类型边界。
     return requested && ["live", "graph", "script", "report"].includes(requested)
       ? requested as Tab
       : "live";
@@ -48,23 +51,29 @@ export default function App() {
 
   useEffect(() => {
     if (!runId) return;
+    // 每个 runId 独占一个 EventSource。切换运行或卸载组件时关闭旧连接，避免旧事件写入当前视图。
     const source = new EventSource(API + "/api/runs/" + runId + "/events");
+    // 后端使用具名 SSE event 字段，必须逐项订阅；默认的 onmessage 不会收到这些业务事件。
     const eventTypes = [
       "run_started", "preflight_passed", "screen_captured", "elements_detected", "plan_created",
       "action_started", "action_finished", "assertion_passed", "assertion_failed", "page_discovered",
       "edge_created", "script_generated", "execution_started", "execution_finished", "run_failed", "run_finished",
     ];
     const handler = (message: MessageEvent) => {
+      // MessageEvent.data 在浏览器边界上只能视为字符串；解析后按共享 DTO 进入前端状态。
       const event = JSON.parse(message.data) as RunEvent;
+      // event_id 是单次运行内的递增序号，可抵消重连、重复订阅或历史补发造成的重复展示。
       setEvents((current) => current.some((item) => item.event_id === event.event_id) ? current : [...current, event]);
     };
     eventTypes.forEach((name) => source.addEventListener(name, handler as EventListener));
+    // 当前界面不在错误后自行重连；后端 Trace 轮询仍会提供权威状态和最终结果。
     source.onerror = () => source.close();
     return () => source.close();
   }, [runId]);
 
   useEffect(() => {
     if (!runId) return;
+    // SSE 负责增量事件日志，Trace 轮询负责快照、动作、断言和页面图等聚合数据，两者用途不同。
     let cancelled = false;
     const poll = async () => {
       try {
@@ -72,18 +81,22 @@ export default function App() {
         if (response.ok && !cancelled) {
           const next = (await response.json()) as RunTrace;
           if (next.snapshots) setTrace(next);
+          // 使用递归 setTimeout 串行发起请求，确保慢请求不会与下一轮轮询重叠。
           if (!terminalStates.has(next.state)) window.setTimeout(poll, 800);
           else setBusy(false);
+        // Run 刚创建但 Trace 尚不可读时缩短等待；清理后的 effect 不再安排后续请求。
         } else if (!cancelled) window.setTimeout(poll, 500);
       } catch (cause) {
         if (!cancelled) setError(String(cause));
       }
     };
     void poll();
+    // fetch 本身无法由该标记中止，但响应返回后不会再写状态或继续调度。
     return () => { cancelled = true; };
   }, [runId]);
 
   const startRun = async () => {
+    // 先清空上一轮派生状态；创建成功后的 runId 会统一启动新一轮 SSE 与 Trace 生命周期。
     setBusy(true); setError(""); setEvents([]); setTrace(null); setScript(null); setTab("live");
     try {
       const response = await fetch(API + "/api/runs", {
@@ -116,6 +129,7 @@ export default function App() {
     const response = await fetch(API + "/api/runs/" + runId + "/generate", { method: "POST" });
     setBusy(false);
     if (!response.ok) return setError(await response.text());
+    // 生成接口只确认产物写入，展示所需的脚本文本仍通过 script 接口读取。
     await loadScript(); setTab("script");
   };
 
@@ -126,14 +140,17 @@ export default function App() {
     setBusy(false);
     if (!response.ok) setError(await response.text());
     else {
+      // 回放会更新 replays 和最终 state，完成后立即刷新聚合 Trace，避免等待已停止的终态轮询。
       const latest = await fetch(API + "/api/runs/" + runId);
       if (latest.ok) setTrace(await latest.json());
     }
   };
 
+  // 脚本页既可由生成动作进入，也可由 URL 直接打开，因此在页签切换时统一补取脚本。
   useEffect(() => { if (tab === "script") void loadScript(); }, [tab, runId]);
 
   const latestSnapshot = trace?.snapshots.at(-1);
+  // 页面图转换只依赖 Trace，避免事件日志或其他界面状态变化时重复创建 React Flow 对象。
   const graph = useMemo(() => toFlow(trace), [trace]);
   const state = trace?.state ?? (runId ? "created" : "idle");
 
@@ -244,21 +261,25 @@ function EmptyState({ title = "等待 Agent 采集设备画面" }: { title?: str
 function EmptyLog() { return <div className="empty-log"><Activity size={24} /><span>启动任务后显示规划、工具调用和断言事件</span></div>; }
 
 function artifactUrl(runId: string, absolutePath: string) {
+  // Trace 保存的是后端主机绝对路径，而下载接口接收 run 目录内的相对路径；先统一 Windows 路径分隔符。
   const normalized = absolutePath.replaceAll("\\", "/");
   const marker = "/" + runId + "/";
   const index = normalized.indexOf(marker);
+  // 标准路径从 runId 后截取；兼容旧 Trace 时保留末两级目录（如 screens/example.png）。
   const relative = index >= 0 ? normalized.slice(index + marker.length) : normalized.split("/").slice(-2).join("/");
   return API + "/api/runs/" + runId + "/artifacts/" + relative;
 }
 
 function toFlow(trace: RunTrace | null): { nodes: Node[]; edges: Edge[] } {
   if (!trace) return { nodes: [], edges: [] };
+  // 领域页面图没有画布坐标；按发现顺序排成固定三列，使同一 Trace 的布局保持可预测。
   const nodes: Node[] = trace.graph.nodes.map((node, index) => ({
     id: node.node_id,
     position: { x: (index % 3) * 290, y: Math.floor(index / 3) * 190 },
     data: { label: <div className="flow-node"><small>STATE {node.discovered_order}</small><strong>{node.title}</strong><span>{node.element_count} elements</span></div> },
     className: "flow-card",
   }));
+  // source/target 直接沿用领域节点 ID，确保 React Flow 的边与去重后的页面节点正确关联。
   const edges: Edge[] = trace.graph.edges.map((edge) => ({
     id: edge.edge_id, source: edge.source, target: edge.target,
     label: edge.target_description ? edge.action + ": " + edge.target_description : edge.action,

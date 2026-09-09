@@ -1,3 +1,11 @@
+<#
+.SYNOPSIS
+按显式选择清理项目内生成的运行产物。
+.DESCRIPTION
+所有删除路径先解析为绝对路径，并必须位于项目根目录下；Run ID 只允许安全的目录叶名称。
+运行目录可按 ID、最新预检或最新真实模型成功记录保留，artifacts\phase1 始终保留。
+脚本启用 SupportsShouldProcess，因此 -WhatIf 可只展示操作，实际删除会遵循 -Confirm 与确认级别。
+#>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [switch]$Runs,
@@ -36,6 +44,7 @@ if (-not ($Runs -or $Preflight -or $Validation -or $WebAcceptanceLogs -or $Datab
 function Assert-ProjectPath {
     param([Parameter(Mandatory)][string]$Path)
 
+    # 删除前统一解析路径，防止相对路径或上级目录跳出项目根目录。
     $absolute = [System.IO.Path]::GetFullPath($Path)
     $prefix = $Root.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
     if (-not $absolute.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -57,6 +66,7 @@ function Remove-GeneratedPath {
     param([Parameter(Mandatory)][string]$Path)
 
     $absolute = Assert-ProjectPath -Path $Path
+    # ShouldProcess 统一承接 -WhatIf 与 -Confirm，检查通过后才执行递归删除。
     if ((Test-Path -LiteralPath $absolute) -and $PSCmdlet.ShouldProcess($absolute, 'Remove generated runtime content')) {
         Remove-Item -LiteralPath $absolute -Recurse -Force
         $script:RemovedCount++
@@ -92,6 +102,7 @@ function Remove-RunDirectories {
         return
     }
 
+    # 保留集合使用不区分大小写的比较，与 Windows 目录名称语义一致。
     $keep = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($runId in $KeepRunId) {
         $name = Assert-LeafName -Name $runId
@@ -153,6 +164,7 @@ if ($Database) {
     Get-ChildItem -LiteralPath (Join-Path $Root 'artifacts') -File -Filter 'agent.db*' -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-GeneratedPath $_.FullName }
 }
+# phase1 历史验收证据不属于任何清理目标，调用 -AllGenerated 时也会保留。
 if ($ToolCaches) {
     Remove-GeneratedPath (Join-Path $Root '.pytest_cache')
     Remove-GeneratedPath (Join-Path $Root '.ruff_cache')

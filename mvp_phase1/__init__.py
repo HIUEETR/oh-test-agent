@@ -1,1 +1,1 @@
-"""Phase 1 smoke-test helpers."""
+"""第一阶段设备冒烟验证的 legacy 辅助包；为复现既有验收证据而保留。"""

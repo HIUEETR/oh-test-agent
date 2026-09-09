@@ -1,3 +1,5 @@
+"""串联规划、设备操作、页面感知、产物生成与回放的任务编排器。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -32,6 +34,8 @@ DeviceFactory = Callable[[str], DeviceAdapter]
 
 
 class AgentOrchestrator:
+    """协调单次测试任务的完整生命周期，并持续保存事件、轨迹和报告。"""
+
     def __init__(
         self,
         settings: Settings,
@@ -56,9 +60,11 @@ class AgentOrchestrator:
         return HarmonyDeviceAdapter(device_id, self.settings.hdc_path, self.settings.agent_action_timeout)
 
     def request_stop(self, run_id: str) -> None:
+        """记录停止请求；编排循环会在下一个安全检查点结束指定任务。"""
         self._stop_requested.add(run_id)
 
     async def run(self, request: RunRequest, run_id: str | None = None) -> RunTrace:
+        """执行任务并返回最终轨迹；设备连接、模型调用和工具动作均受配置超时约束。"""
         run_id = run_id or f"run-{utc_now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
         profile = self.artifacts.load_profile(self.settings.resolved_target_profile_path)
         if profile.target_app_id != request.target_app_id:

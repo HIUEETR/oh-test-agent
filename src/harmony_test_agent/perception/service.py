@@ -1,3 +1,5 @@
+"""将视觉模型观察结果按置信度和空间关系合并到设备快照。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -6,10 +8,13 @@ from ..models import LocatorCandidate, LocatorKind, ScreenSnapshot, UIElement, V
 
 
 class PerceptionService:
+    """以设备层级为基线，补充达到置信度阈值的视觉元素。"""
+
     def __init__(self, min_vision_confidence: float = 0.55):
         self.min_vision_confidence = min_vision_confidence
 
     def merge(self, snapshot: ScreenSnapshot, observation: VisionObservation | None) -> ScreenSnapshot:
+        """原地合并视觉观察；越界或低置信度候选不会进入快照。"""
         if not observation:
             return snapshot
         snapshot.page_title = observation.page_title or snapshot.page_title

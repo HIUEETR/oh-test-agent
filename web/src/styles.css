@@ -1,3 +1,4 @@
+/* 控制台采用单页响应式布局；全局禁止横向溢出，小屏断点保持设备截图和日志可读。 */
 :root {
   font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   color: #f4f8fc;

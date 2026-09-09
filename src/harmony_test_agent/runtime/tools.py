@@ -1,3 +1,5 @@
+"""将模型给出的工具决策解析为受安全策略约束的设备操作与断言。"""
+
 from __future__ import annotations
 
 import time
@@ -21,6 +23,8 @@ from .safety import SafetyPolicy
 
 
 class ToolExecutionError(RuntimeError):
+    """携带对应运行失败状态的工具执行异常。"""
+
     def __init__(self, message: str, state: RunState = RunState.FAILED_ACTION):
         super().__init__(message)
         self.state = state
@@ -28,11 +32,14 @@ class ToolExecutionError(RuntimeError):
 
 @dataclass(slots=True)
 class ToolExecutor:
+    """解析元素、调用设备适配器并生成统一的动作结果。"""
+
     device: DeviceAdapter
     profile: TargetAppProfile
     safety: SafetyPolicy
 
     def execute(self, step_id: str, decision: ToolDecision, snapshot: ScreenSnapshot | None) -> ActionResult:
+        """执行一个已规划工具决策，并返回标准化动作结果。"""
         self.safety.validate_decision(decision, snapshot)
         started_at = utc_now()
         started = time.monotonic()
@@ -117,6 +124,7 @@ class ToolExecutor:
         if result:
             return result
         if editable:
+            # 输入框文案常为空；精确目标失败时仅回退到具备边界的可编辑元素。
             fallback = next((item for item in snapshot.elements if item.editable and item.bbox), None)
             if fallback:
                 locator = next(iter(fallback.locator_candidates), None)
@@ -167,6 +175,7 @@ class ToolExecutor:
             (candidate for candidate in candidates if candidate.casefold() in page_text),
             None,
         )
+        # 页面摘要仅能证明可见性；文本断言仍要求命中实际 UI 元素。
         visible = found is not None or summary_candidate is not None
         if decision.tool == ToolName.ASSERT_NOT_VISIBLE:
             passed = not visible

@@ -1,3 +1,5 @@
+"""根据运行轨迹生成 HTML 报告与对应的结构化 JSON 报告。"""
+
 from __future__ import annotations
 
 import html
@@ -9,10 +11,13 @@ from .storage import ArtifactStore
 
 
 class ReportBuilder:
+    """将轨迹中的动作、断言和站内截图组织成可查看的运行报告。"""
+
     def __init__(self, artifacts: ArtifactStore):
         self.artifacts = artifacts
 
     def build(self, trace: RunTrace) -> Path:
+        """写入 HTML 与 JSON 报告，并返回 HTML 报告的绝对路径。"""
         run_dir = self.artifacts.run_dir(trace.run_id)
         report_path = run_dir / "reports" / "report.html"
         cards: list[str] = []

@@ -1,3 +1,5 @@
+"""项目源码检出环境下的命令行入口，负责将 src 目录加入模块搜索路径后转交正式 CLI。"""
+
 from __future__ import annotations
 
 import sys

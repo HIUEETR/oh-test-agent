@@ -1,3 +1,5 @@
+"""集中读取环境配置，并将相对运行路径基于仓库根目录解析为绝对路径。"""
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -11,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
+    """声明测试代理可由环境变量覆盖的配置，并提供解析后的路径与脱敏视图。"""
+
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore", case_sensitive=False)
 
     openai_base_url: str = "https://api.openai.com/v1"
@@ -35,32 +39,39 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def resolved_runtime_dir(self) -> Path:
+        """返回用于保存每次运行产物的绝对目录。"""
         return self._resolve(self.runtime_dir)
 
     @computed_field
     @property
     def resolved_database_path(self) -> Path:
+        """返回运行数据库的绝对路径。"""
         return self._resolve(self.database_path)
 
     @computed_field
     @property
     def resolved_target_profile_path(self) -> Path:
+        """返回目标应用配置文件的绝对路径。"""
         return self._resolve(self.target_profile_path)
 
     @computed_field
     @property
     def resolved_runtime_home(self) -> Path:
+        """返回 Hypium 运行用户目录的绝对路径。"""
         return self._resolve(self.runtime_home)
 
     @property
     def model_configured(self) -> bool:
+        """判断文本规划模型所需的密钥和模型名是否齐备。"""
         return bool(self.openai_api_key and self.agent_model)
 
     @property
     def vision_model_configured(self) -> bool:
+        """判断视觉分析是否可以使用专用模型或回退模型。"""
         return bool(self.openai_api_key and (self.agent_vision_model or self.agent_model))
 
     def redacted(self) -> dict[str, object]:
+        """返回可安全展示的配置字典，并隐藏 API 密钥内容。"""
         data = self.model_dump(exclude={"openai_api_key"}, mode="json")
         data["openai_api_key"] = "configured" if self.openai_api_key else "not_configured"
         return data
@@ -72,4 +83,5 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """返回进程内缓存的配置实例。"""
     return Settings()

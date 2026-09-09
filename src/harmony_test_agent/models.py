@@ -1,3 +1,5 @@
+"""定义测试运行、页面感知、工具调用及产物交换所使用的领域模型。"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -9,10 +11,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 def utc_now() -> datetime:
+    """返回带 UTC 时区信息的当前时间。"""
     return datetime.now(UTC)
 
 
 class RunMode(StrEnum):
+    """列出测试运行支持的任务模式。"""
+
     REGRESSION = "regression"
     EXPLORATION = "exploration"
     STABILITY = "stability"
@@ -20,6 +25,8 @@ class RunMode(StrEnum):
 
 
 class RunState(StrEnum):
+    """描述测试运行从创建到完成或失败的生命周期状态。"""
+
     CREATED = "created"
     PREFLIGHT = "preflight"
     PLANNING = "planning"
@@ -51,6 +58,8 @@ TERMINAL_STATES = {
 
 
 class EventType(StrEnum):
+    """列出可持久化并推送给客户端的运行事件类型。"""
+
     RUN_STARTED = "run_started"
     PREFLIGHT_PASSED = "preflight_passed"
     SCREEN_CAPTURED = "screen_captured"
@@ -70,6 +79,8 @@ class EventType(StrEnum):
 
 
 class ToolName(StrEnum):
+    """列出规划器可以请求的受控 UI 工具。"""
+
     INSPECT_SCREEN = "inspect_screen"
     OPEN_APP = "open_app"
     CLICK_ELEMENT = "click_element"
@@ -85,6 +96,8 @@ class ToolName(StrEnum):
 
 
 class LocatorKind(StrEnum):
+    """标识元素定位候选所采用的匹配方式。"""
+
     KEY = "key"
     ID = "id"
     TEXT = "text"
@@ -95,6 +108,8 @@ class LocatorKind(StrEnum):
 
 
 class BoundingBox(BaseModel):
+    """表示屏幕坐标系中的矩形区域，并提供尺寸与边界判断。"""
+
     left: int
     top: int
     right: int
@@ -102,31 +117,40 @@ class BoundingBox(BaseModel):
 
     @property
     def width(self) -> int:
+        """返回非负矩形宽度。"""
         return max(0, self.right - self.left)
 
     @property
     def height(self) -> int:
+        """返回非负矩形高度。"""
         return max(0, self.bottom - self.top)
 
     @property
     def area(self) -> int:
+        """返回矩形的非负面积。"""
         return self.width * self.height
 
     @property
     def center(self) -> tuple[int, int]:
+        """返回矩形中心点的整数屏幕坐标。"""
         return ((self.left + self.right) // 2, (self.top + self.bottom) // 2)
 
     def within(self, width: int, height: int) -> bool:
+        """判断矩形是否完整位于给定屏幕尺寸内。"""
         return 0 <= self.left < self.right <= width and 0 <= self.top < self.bottom <= height
 
 
 class LocatorCandidate(BaseModel):
+    """记录一个元素定位候选及其置信分数。"""
+
     kind: LocatorKind
     value: str
     score: float = Field(default=1, ge=0, le=1)
 
 
 class UIElement(BaseModel):
+    """描述从界面层级或视觉模型中识别出的可交互元素。"""
+
     element_id: str
     content: str = ""
     type: str = ""
@@ -146,6 +170,8 @@ class UIElement(BaseModel):
 
 
 class ScreenSnapshot(BaseModel):
+    """汇总一次屏幕采集的图像、页面信息和识别元素。"""
+
     snapshot_id: str
     run_id: str
     captured_at: datetime = Field(default_factory=utc_now)
@@ -162,6 +188,8 @@ class ScreenSnapshot(BaseModel):
 
 
 class StableLocator(BaseModel):
+    """描述目标应用配置中可跨运行复用的稳定定位信息。"""
+
     model_config = ConfigDict(extra="allow")
     name: str
     key: str = ""
@@ -172,6 +200,8 @@ class StableLocator(BaseModel):
 
 
 class TargetAppProfile(BaseModel):
+    """保存目标应用启动信息、安全约束和稳定定位清单。"""
+
     model_config = ConfigDict(extra="allow")
     target_app_id: str
     display_name: str
@@ -187,6 +217,8 @@ class TargetAppProfile(BaseModel):
 
 
 class PlannedStep(BaseModel):
+    """描述规划器生成的单个测试步骤及其预期结果。"""
+
     step_id: str
     instruction: str
     tool: ToolName
@@ -199,6 +231,8 @@ class PlannedStep(BaseModel):
 
 
 class PlanResult(BaseModel):
+    """封装一次规划结果及其完成条件。"""
+
     goal: str
     steps: list[PlannedStep]
     model_used: str
@@ -206,6 +240,8 @@ class PlanResult(BaseModel):
 
 
 class ToolDecision(BaseModel):
+    """表示模型针对当前步骤选择的工具及其参数。"""
+
     tool: ToolName
     target: str | None = None
     text: str | None = None
@@ -216,6 +252,8 @@ class ToolDecision(BaseModel):
 
 
 class CommandResult(BaseModel):
+    """记录底层设备命令的输出、返回码和执行耗时。"""
+
     command: str
     args: list[str] = Field(default_factory=list)
     returncode: int | None = None
@@ -226,10 +264,13 @@ class CommandResult(BaseModel):
 
     @property
     def ok(self) -> bool:
+        """判断底层命令是否以零返回码成功结束。"""
         return self.returncode == 0 and not self.timed_out
 
 
 class AssertionResult(BaseModel):
+    """记录一次界面断言的目标、结果和说明。"""
+
     kind: str
     target: str
     passed: bool
@@ -237,6 +278,8 @@ class AssertionResult(BaseModel):
 
 
 class ActionResult(BaseModel):
+    """记录一个工具步骤的命令、断言、定位器及时间信息。"""
+
     step_id: str
     tool: ToolName
     params: dict[str, Any] = Field(default_factory=dict)
@@ -254,6 +297,8 @@ class ActionResult(BaseModel):
 
 
 class PageNode(BaseModel):
+    """表示运行过程中发现的一个页面节点。"""
+
     node_id: str
     signature: str
     page_path: str
@@ -265,6 +310,8 @@ class PageNode(BaseModel):
 
 
 class PageEdge(BaseModel):
+    """表示由某个动作触发的页面跳转关系。"""
+
     edge_id: str
     source: str
     target: str
@@ -274,11 +321,15 @@ class PageEdge(BaseModel):
 
 
 class PageGraph(BaseModel):
+    """保存运行过程中累计构建的页面节点与跳转边。"""
+
     nodes: list[PageNode] = Field(default_factory=list)
     edges: list[PageEdge] = Field(default_factory=list)
 
 
 class GeneratedArtifact(BaseModel):
+    """记录生成的 Hypium 脚本、配置、元数据及警告。"""
+
     python_path: Path
     config_path: Path
     metadata_path: Path
@@ -287,6 +338,8 @@ class GeneratedArtifact(BaseModel):
 
 
 class ReplayResult(BaseModel):
+    """记录一次生成脚本的回放命令和通过状态。"""
+
     attempt: int
     command: CommandResult
     report_path: Path | None = None
@@ -294,6 +347,8 @@ class ReplayResult(BaseModel):
 
 
 class RunEvent(BaseModel):
+    """表示带有运行内序号和结构化负载的事件。"""
+
     event_id: int
     run_id: str
     type: EventType
@@ -303,6 +358,8 @@ class RunEvent(BaseModel):
 
 
 class RunTrace(BaseModel):
+    """聚合一次测试运行的计划、快照、动作、断言、产物和最终状态。"""
+
     run_id: str
     target_app_id: str
     task: str
@@ -325,6 +382,8 @@ class RunTrace(BaseModel):
 
 
 class VisionElement(BaseModel):
+    """描述视觉模型识别出的候选界面元素。"""
+
     content: str
     type: str = "unknown"
     bbox: BoundingBox
@@ -335,12 +394,16 @@ class VisionElement(BaseModel):
 
 
 class VisionObservation(BaseModel):
+    """封装视觉模型对当前页面的标题、摘要和元素观察。"""
+
     page_title: str = ""
     summary: str = ""
     elements: list[VisionElement] = Field(default_factory=list)
 
 
 class RunRequest(BaseModel):
+    """定义创建测试运行时可由调用方指定的参数。"""
+
     target_app_id: str = "zhihu-plus"
     task: str
     mode: RunMode = RunMode.REGRESSION

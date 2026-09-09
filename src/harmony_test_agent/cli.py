@@ -1,3 +1,5 @@
+"""提供预检、测试运行、脚本生成、脚本执行和 API 服务的命令行入口。"""
+
 from __future__ import annotations
 
 import argparse
@@ -17,6 +19,7 @@ from .storage import ArtifactStore, RunRepository
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构建包含全部子命令及参数约束的命令行解析器。"""
     parser = argparse.ArgumentParser(description="OpenHarmony multimodal UI testing agent")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -48,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """解析命令行参数，并分派到对应的测试代理工作流。"""
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")

@@ -1,3 +1,5 @@
+"""定义代理模型提供方接口，并实现 Mock 与 OpenAI 兼容提供方。"""
+
 from __future__ import annotations
 
 import re
@@ -131,24 +133,35 @@ def align_plan_with_task(task: str, steps: list[PlannedStep], max_steps: int) ->
 
 
 class AgentProvider(ABC):
+    """规划、视觉分析与动作决策所遵循的异步提供方协议。"""
+
     name: str
     mock: bool = False
 
     @abstractmethod
-    async def plan(self, task: str, profile: TargetAppProfile, max_steps: int) -> PlanResult: ...
+    async def plan(self, task: str, profile: TargetAppProfile, max_steps: int) -> PlanResult:
+        """将用户任务规划为不超过上限的原子步骤。"""
+        ...
 
     @abstractmethod
-    async def analyze(self, snapshot: ScreenSnapshot) -> VisionObservation | None: ...
+    async def analyze(self, snapshot: ScreenSnapshot) -> VisionObservation | None:
+        """分析屏幕快照并返回可选的视觉观察结果。"""
+        ...
 
     @abstractmethod
-    async def decide(self, step: PlannedStep, snapshot: ScreenSnapshot | None) -> ToolDecision: ...
+    async def decide(self, step: PlannedStep, snapshot: ScreenSnapshot | None) -> ToolDecision:
+        """结合计划步骤和当前快照选择一个受支持的工具动作。"""
+        ...
 
 
 class MockAgentProvider(AgentProvider):
+    """提供确定性离线计划和决策，用于不调用真实模型的开发流程。"""
+
     name = "mock"
     mock = True
 
     async def plan(self, task: str, profile: TargetAppProfile, max_steps: int) -> PlanResult:
+        """将用户任务规划为不超过上限的原子步骤。"""
         steps: list[PlannedStep] = [
             PlannedStep(step_id="step-01", instruction=f"启动{profile.display_name}", tool=ToolName.OPEN_APP),
             PlannedStep(step_id="step-02", instruction="检查首页", tool=ToolName.INSPECT_SCREEN),
@@ -206,9 +219,11 @@ class MockAgentProvider(AgentProvider):
         return PlanResult(goal=task, steps=steps[:max_steps], model_used=self.name, mock=True)
 
     async def analyze(self, snapshot: ScreenSnapshot) -> VisionObservation | None:
+        """分析屏幕快照并返回可选的视觉观察结果。"""
         return None
 
     async def decide(self, step: PlannedStep, snapshot: ScreenSnapshot | None) -> ToolDecision:
+        """结合计划步骤和当前快照选择一个受支持的工具动作。"""
         tool = step.tool
         if tool == ToolName.BACK and "返回首页" in step.instruction and snapshot:
             already_home = any(item.key == "p2_home_titlebar_search" for item in snapshot.elements)
@@ -226,6 +241,8 @@ class MockAgentProvider(AgentProvider):
 
 
 class OpenAICompatibleProvider(AgentProvider):
+    """通过 OpenAI 兼容接口完成规划、视觉分析和动作决策。"""
+
     mock = False
 
     def __init__(self, settings: Settings):
@@ -252,6 +269,7 @@ class OpenAICompatibleProvider(AgentProvider):
         return OpenAIChatModel(model_name, provider=provider)
 
     async def plan(self, task: str, profile: TargetAppProfile, max_steps: int) -> PlanResult:
+        """将用户任务规划为不超过上限的原子步骤。"""
         from pydantic_ai import Agent
 
         agent = Agent(self._model(), output_type=PlanResult, system_prompt=PLANNING_PROMPT, retries=2)
@@ -268,6 +286,7 @@ class OpenAICompatibleProvider(AgentProvider):
         return plan
 
     async def analyze(self, snapshot: ScreenSnapshot) -> VisionObservation | None:
+        """分析屏幕快照并返回可选的视觉观察结果。"""
         from pydantic_ai import Agent, BinaryContent
 
         agent = Agent(self._model(vision=True), output_type=VisionObservation, system_prompt=VISION_PROMPT, retries=2)
@@ -293,6 +312,7 @@ class OpenAICompatibleProvider(AgentProvider):
         return result.output
 
     async def decide(self, step: PlannedStep, snapshot: ScreenSnapshot | None) -> ToolDecision:
+        """结合计划步骤和当前快照选择一个受支持的工具动作。"""
         from pydantic_ai import Agent, BinaryContent, PromptedOutput
 
         agent = Agent(
@@ -330,6 +350,7 @@ class OpenAICompatibleProvider(AgentProvider):
 
 
 def create_provider(settings: Settings) -> AgentProvider:
+    """根据配置选择 Mock 或 OpenAI 兼容提供方，并拒绝缺少必要配置的模式。"""
     if settings.agent_provider == "mock":
         return MockAgentProvider()
     if settings.agent_provider == "openai":

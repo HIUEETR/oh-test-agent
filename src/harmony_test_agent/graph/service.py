@@ -1,3 +1,5 @@
+"""依据页面结构、文本与图像摘要维护可遍历的页面状态图。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -10,10 +12,13 @@ from ..models import PageEdge, PageGraph, PageNode, ScreenSnapshot, ToolName
 
 
 class PageGraphBuilder:
+    """为屏幕快照计算状态签名，并维护去重后的页面节点和转换边。"""
+
     def __init__(self, graph: PageGraph | None = None):
         self.graph = graph or PageGraph()
 
     def signature(self, snapshot: ScreenSnapshot) -> str:
+        """组合稳定元素、归一化文本和图像摘要生成页面状态签名。"""
         keys: list[str] = []
         for element in snapshot.elements:
             value = element.key or element.id
@@ -41,6 +46,7 @@ class PageGraphBuilder:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def add_snapshot(self, snapshot: ScreenSnapshot) -> tuple[PageNode, bool]:
+        """复用同签名页面，或创建并登记一个新的页面节点。"""
         signature = self.signature(snapshot)
         for node in self.graph.nodes:
             if node.signature == signature:
@@ -65,6 +71,7 @@ class PageGraphBuilder:
         action: ToolName,
         target_description: str = "",
     ) -> PageEdge | None:
+        """登记两个不同页面间的动作边，并避免重复边。"""
         if source.node_id == target.node_id:
             return None
         for edge in self.graph.edges:

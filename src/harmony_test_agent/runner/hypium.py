@@ -1,3 +1,5 @@
+"""在隔离运行目录中执行已生成的 Hypium Driver 回放脚本。"""
+
 from __future__ import annotations
 
 import json
@@ -11,12 +13,15 @@ from ..models import CommandResult, GeneratedArtifact, ReplayResult
 
 
 class HypiumRunner:
+    """管理回放环境、超时、标准输出和每次尝试的证据目录。"""
+
     def __init__(self, runtime_home: Path, timeout: float = 300):
         self.runtime_home = runtime_home.resolve()
         self.runtime_home.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
 
     def environment(self, report_dir: Path | None = None) -> dict[str, str]:
+        """构造回放子进程环境，并把 HOME 与报告目录限制到运行产物区域。"""
         env = os.environ.copy()
         env["HOME"] = str(self.runtime_home)
         env["USERPROFILE"] = str(self.runtime_home)
@@ -26,6 +31,7 @@ class HypiumRunner:
         return env
 
     def execute(self, generated: GeneratedArtifact, attempt: int = 1) -> ReplayResult:
+        """执行一次回放；退出码和生成结果均成功时才判定通过。"""
         run_dir = generated.python_path.parent.parent
         attempt_dir = run_dir / "hypium" / f"attempt-{attempt:02d}"
         attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -89,4 +95,5 @@ class HypiumRunner:
         )
 
     def execute_repeated(self, generated: GeneratedArtifact, attempts: int = 3) -> list[ReplayResult]:
+        """按独立尝试目录重复执行回放，并按执行顺序返回全部结果。"""
         return [self.execute(generated, attempt=index) for index in range(1, attempts + 1)]

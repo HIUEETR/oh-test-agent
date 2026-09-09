@@ -1,3 +1,5 @@
+"""第一阶段 HDC 冒烟验证的 legacy 公共函数；为兼容历史脚本和证据格式而保留。"""
+
 from __future__ import annotations
 
 import json

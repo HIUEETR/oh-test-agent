@@ -1,3 +1,5 @@
+"""汇总运行环境、模型、Hypium 与设备能力的启动前检查。"""
+
 from __future__ import annotations
 
 import importlib.metadata
@@ -16,6 +18,8 @@ from .storage import ArtifactStore
 
 
 class PreflightCheck(BaseModel):
+    """描述一项预检的状态、必要性、文字详情与结构化证据。"""
+
     name: str
     status: str
     required: bool = True
@@ -24,12 +28,16 @@ class PreflightCheck(BaseModel):
 
 
 class PreflightReport(BaseModel):
+    """汇总预检时间、整体状态以及各项检查结果。"""
+
     status: str
     checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     checks: list[PreflightCheck]
 
 
 class PreflightService:
+    """执行环境能力检查并把结果保存为预检证据。"""
+
     REQUIRED_MODULES = ("hypium", "pydantic_ai", "fastapi", "sqlmodel", "httpx", "PIL")
 
     def __init__(self, settings: Settings, artifacts: ArtifactStore | None = None):
@@ -37,6 +45,7 @@ class PreflightService:
         self.artifacts = artifacts or ArtifactStore(settings.resolved_runtime_dir)
 
     def run(self, include_screenshot: bool = True) -> PreflightReport:
+        """执行全部预检；可选截图步骤会连接设备并产生运行产物。"""
         checks = [
             PreflightCheck(
                 name="python",

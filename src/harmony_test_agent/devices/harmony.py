@@ -1,3 +1,5 @@
+"""通过 HDC 连接 OpenHarmony 设备并执行受限 UI 操作。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -18,6 +20,8 @@ from .base import DeviceAdapter, DeviceError
 
 
 class HarmonyDeviceAdapter(DeviceAdapter):
+    """封装指定设备序列号上的 HDC 命令，并将结果统一为领域模型。"""
+
     def __init__(self, device_id: str, hdc_path: str | None = None, timeout: float = 30):
         self.device_id = device_id
         self.hdc_path = self._find_hdc(hdc_path)
@@ -80,12 +84,14 @@ class HarmonyDeviceAdapter(DeviceAdapter):
             )
 
     def connect(self) -> None:
+        """建立到目标设备的 HDC 连接，连接失败时抛出设备异常。"""
         result = self._run("list", "targets", device=False)
         if not result.ok or self.device_id not in result.stdout:
             raise DeviceError(f"device {self.device_id} is not connected: {result.stderr or result.stdout}")
         self.connected = True
 
     def health_check(self) -> dict[str, object]:
+        """读取设备列表和基础属性，返回可序列化的连接健康信息。"""
         listed = self._run("list", "targets", device=False)
         resolution = self._run("shell", "hidumper", "-s", "RenderService", "-a", "screen")
         match = re.search(r"render resolution=(\d+)x(\d+)", resolution.stdout)
@@ -98,6 +104,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         }
 
     def collect_ui_hierarchy(self) -> dict:
+        """导出并解析当前页面的 UI 层级数据。"""
         dump = self._run("shell", "uitest", "dumpLayout", "-a")
         output = f"{dump.stdout}\n{dump.stderr}".strip()
         match = re.search(r"DumpLayout saved to:\s*(\S+)", output)
@@ -112,6 +119,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
             raise DeviceError(f"invalid layout JSON: {exc}") from exc
 
     def screenshot(self, output_dir: Path, run_id: str, label: str = "screen") -> ScreenSnapshot:
+        """采集截图与 UI 层级，生成带稳定摘要的屏幕快照。"""
         output_dir.mkdir(parents=True, exist_ok=True)
         snapshot_id = f"snap-{uuid.uuid4().hex[:12]}"
         remote_path = f"/data/local/tmp/{run_id}_{snapshot_id}.jpeg"
@@ -169,12 +177,14 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         raise DeviceError(f"failed to capture a valid screenshot after 3 attempts: {detail}")
 
     def collect_logs(self, output_path: Path) -> CommandResult:
+        """将目标设备的日志采集结果写入指定证据文件。"""
         result = self._run("shell", "hilog", "-x", timeout=10)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(result.stdout[-200_000:] + result.stderr[-20_000:], encoding="utf-8")
         return result
 
     def open_app(self, profile: TargetAppProfile, reset: bool = False) -> CommandResult:
+        """按目标应用配置启动 Ability，并在要求时先执行受支持的重置策略。"""
         if reset:
             stopped = self._run("shell", "aa", "force-stop", profile.bundle_name)
             if not stopped.ok:
@@ -183,9 +193,11 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         return self._run("shell", "aa", "start", "-b", profile.bundle_name, "-a", profile.main_ability)
 
     def click(self, x: int, y: int) -> CommandResult:
+        """在设备屏幕的绝对像素坐标执行一次点击。"""
         return self._run("shell", "uitest", "uiInput", "click", str(x), str(y))
 
     def input_text(self, text: str, x: int | None = None, y: int | None = None) -> CommandResult:
+        """可选地先聚焦坐标，再向当前输入控件写入文本。"""
         args = ["shell", "uitest", "uiInput", "inputText"]
         if x is not None and y is not None:
             args.extend([str(x), str(y)])
@@ -193,6 +205,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         return self._run(*args)
 
     def swipe(self, start: tuple[int, int], end: tuple[int, int], duration: float = 0.5) -> CommandResult:
+        """按起止坐标和持续时间执行一次滑动。"""
         velocity = max(200, min(40_000, int(15_000 - duration * 7_000)))
         return self._run(
             "shell",
@@ -207,9 +220,11 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         )
 
     def back(self) -> CommandResult:
+        """发送系统返回键事件。"""
         return self._run("shell", "uitest", "uiInput", "keyEvent", "Back")
 
     def wait(self, seconds: float) -> CommandResult:
+        """等待给定秒数，并返回与其他设备动作一致的命令结果。"""
         started = time.monotonic()
         time.sleep(max(0, min(seconds, 30)))
         return CommandResult(
@@ -220,4 +235,5 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         )
 
     def close(self) -> None:
+        """结束适配器生命周期；当前 HDC 调用不持有常驻连接。"""
         self.connected = False

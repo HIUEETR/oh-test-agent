@@ -1,3 +1,5 @@
+"""把已执行的任务轨迹转换为可审计的 Hypium Driver 回放产物。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -10,10 +12,13 @@ from ..storage import ArtifactStore
 
 
 class HypiumGenerator:
+    """从成功动作和断言生成 Hypium 脚本、配置及完整性元数据。"""
+
     def __init__(self, artifacts: ArtifactStore):
         self.artifacts = artifacts
 
     def generate(self, trace: RunTrace, profile: TargetAppProfile) -> GeneratedArtifact:
+        """生成单次运行的回放文件，并记录坐标降级和文件摘要。"""
         output_dir = self.artifacts.run_dir(trace.run_id) / "generated"
         safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", trace.run_id)
         python_path = output_dir / f"test_{safe_id}.py"
