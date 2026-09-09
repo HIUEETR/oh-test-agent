@@ -130,22 +130,22 @@ VLM_MIN_CONFIDENCE=0.55
 
 ### 5.1 配置项说明
 
-| 配置项 | 说明 |
-| --- | --- |
-| `OPENAI_BASE_URL` | OpenAI-compatible API 根地址。由所用服务商决定是否包含 `/v1`。 |
-| `OPENAI_API_KEY` | 本地密钥，只保存在忽略的 `.env`。 |
-| `AGENT_MODEL` | 规划模型；必须支持当前 Provider 的结构化输出。 |
-| `AGENT_VISION_MODEL` | 截图理解和工具决策模型；留空时回退到 `AGENT_MODEL`。 |
-| `AGENT_PROVIDER` | `auto`、`openai` 或 `mock`。`auto` 在配置完整时使用真实模型，否则使用 Mock。 |
-| `AGENT_DISABLE_THINKING` | 某些兼容端点的 thinking 模式与结构化工具输出冲突时设为 `true`。 |
-| `HDC_PATH` | `hdc.exe` 的绝对路径；若 HDC 已在 `PATH` 中可留空。 |
-| `HARMONY_DEVICE` | 设备序列号，默认 `127.0.0.1:5555`。 |
-| `AGENT_ACTION_TIMEOUT` | HDC/设备动作超时，默认 30 秒。 |
-| `AGENT_MODEL_TIMEOUT` | 规划、VLM 和工具决策超时，默认 90 秒。不要与设备动作超时混用。 |
-| `AGENT_RETRY_LIMIT` | 瞬时动作失败的有限重试次数；断言和元素缺失默认立即停。 |
-| `UNCHANGED_SCREEN_LIMIT` | 连续可变动作截图不变化的停止阈值，默认 2。 |
-| `VLM_MIN_CONFIDENCE` | VLM 视觉元素进入融合列表的最低置信度，默认 0.55。 |
-| `RUNTIME_HOME` | Hypium/xdevice 的项目内隔离 Home，默认 `.runtime-user`。 |
+| 配置项                     | 说明                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------ |
+| `OPENAI_BASE_URL`        | OpenAI-compatible API 根地址。由所用服务商决定是否包含`/v1`。                      |
+| `OPENAI_API_KEY`         | 本地密钥，只保存在忽略的`.env`。                                                   |
+| `AGENT_MODEL`            | 规划模型；必须支持当前 Provider 的结构化输出。                                       |
+| `AGENT_VISION_MODEL`     | 截图理解和工具决策模型；留空时回退到`AGENT_MODEL`。                                |
+| `AGENT_PROVIDER`         | `auto`、`openai` 或 `mock`。`auto` 在配置完整时使用真实模型，否则使用 Mock。 |
+| `AGENT_DISABLE_THINKING` | 某些兼容端点的 thinking 模式与结构化工具输出冲突时设为`true`。                     |
+| `HDC_PATH`               | `hdc.exe` 的绝对路径；若 HDC 已在 `PATH` 中可留空。                              |
+| `HARMONY_DEVICE`         | 设备序列号，默认`127.0.0.1:5555`。                                                 |
+| `AGENT_ACTION_TIMEOUT`   | HDC/设备动作超时，默认 30 秒。                                                       |
+| `AGENT_MODEL_TIMEOUT`    | 规划、VLM 和工具决策超时，默认 90 秒。不要与设备动作超时混用。                       |
+| `AGENT_RETRY_LIMIT`      | 瞬时动作失败的有限重试次数；断言和元素缺失默认立即停。                               |
+| `UNCHANGED_SCREEN_LIMIT` | 连续可变动作截图不变化的停止阈值，默认 2。                                           |
+| `VLM_MIN_CONFIDENCE`     | VLM 视觉元素进入融合列表的最低置信度，默认 0.55。                                    |
+| `RUNTIME_HOME`           | Hypium/xdevice 的项目内隔离 Home，默认`.runtime-user`。                            |
 
 ### 5.2 thinking 兼容性
 
@@ -540,6 +540,7 @@ $finalRun = 'run-20260909T140205Z-e9ada52e'
 ```
 
 脚本刻意不删除 `artifacts/phase1`。`-KeepRunId` 会验证目录存在且拒绝路径分隔符；`-KeepLatestPreflight` 或 `-KeepLatestSuccessfulRun` 找不到可保留目录时会先失败，不会继续删除。
+
 ## 15. 常见问题
 
 ### 15.1 `Thinking mode does not support this tool_choice`
