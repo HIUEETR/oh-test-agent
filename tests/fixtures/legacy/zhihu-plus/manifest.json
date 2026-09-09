@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "fixture_id": "zhihu-plus-phase1-20260909T082119Z",
+  "description": "Curated legacy OpenHarmony UI hierarchy and normalized element fixtures for home, search, and detail states.",
+  "source_run": "artifacts/phase1/recognition/20260909T082119Z/round_1",
+  "captured_at": "2026-09-09T08:21:19Z",
+  "application": "知乎++",
+  "resolution": {
+    "width": 1320,
+    "height": 2232
+  },
+  "files": [
+    {
+      "file": "home.layout.json",
+      "source": "artifacts/phase1/recognition/20260909T082119Z/round_1/home_before_action.json",
+      "sha256": "afc68bf3f888629786120a4a1ce66f8b70f981ece381d570cf9a1056408e2098",
+      "bytes": 314017
+    },
+    {
+      "file": "home.elements.json",
+      "source": "artifacts/phase1/recognition/20260909T082119Z/round_1/home_before_action_elements.json",
+      "sha256": "7d9b1d3f0d26f430dee462f0ec83c1fe70c6d4f711a961c826e912ef4c496e5d",
+      "bytes": 19035
+    },
+    {
+      "file": "search.layout.json",
+      "source": "artifacts/phase1/recognition/20260909T082119Z/round_1/search_after_click.json",
+      "sha256": "6a18e3de7c959437cc34cccb40f1e9335f65422b4f86d65924c5167d759d093c",
+      "bytes": 313105
+    },
+    {
+      "file": "search.elements.json",
+      "source": "artifacts/phase1/recognition/20260909T082119Z/round_1/search_after_click_elements.json",
+      "sha256": "2bc7db439d0b99721e22b85c154a0f2def61a24ed7f65f49418a9d7fc81fbe52",
+      "bytes": 19482
+    },
+    {
+      "file": "detail.layout.json",
+      "source": "artifacts/phase1/recognition/20260909T082119Z/round_1/detail_after_click.json",
+      "sha256": "2b870a28b2f1ca09d673c3b649fbbc890920e5c10f9a0923a98be137e7d012a7",
+      "bytes": 358513
+    },
+    {
+      "file": "detail.elements.json",
+      "source": "artifacts/phase1/recognition/20260909T082119Z/round_1/detail_after_click_elements.json",
+      "sha256": "c29e9fcb1aa636334e297ec0a5f7204ca5121ab1fc02cd6b7297a97d2f450370",
+      "bytes": 20171
+    }
+  ],
+  "notes": [
+    "Raw phase1 evidence remains local under artifacts/phase1 and is ignored by Git.",
+    "These fixtures contain no API credentials or local absolute filesystem paths."
+  ]
+}

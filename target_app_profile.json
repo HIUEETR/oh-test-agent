@@ -1,0 +1,723 @@
+{
+  "target_app_id": "zhihu-plus",
+  "display_name": "知乎++",
+  "bundle_name": "com.github.zhuoyi233.zhplus",
+  "main_ability": "EntryAbility",
+  "install_artifact_or_project_path": null,
+  "installation_status": "device_installed_unverified",
+  "device_selector": {
+    "serial": "127.0.0.1:5555"
+  },
+  "launch_strategy": {
+    "kind": "hdc_aa_start",
+    "command": "aa start -b com.github.zhuoyi233.zhplus -a EntryAbility"
+  },
+  "reset_strategy": {
+    "kind": "stop_then_start_only",
+    "clear_app_data": false,
+    "command": "aa force-stop com.github.zhuoyi233.zhplus; aa start -b com.github.zhuoyi233.zhplus -a EntryAbility"
+  },
+  "test_data_strategy": {
+    "mode": "anonymous_read_only",
+    "login": false,
+    "write_operations": false,
+    "fixed_keyword": "OpenHarmony"
+  },
+  "permission_and_popup_strategy": {
+    "mode": "dismiss_non_destructive_prompts_only",
+    "login_prompt": "blocked",
+    "captcha_prompt": "blocked"
+  },
+  "stable_locator_inventory": [
+    {
+      "name": "home_search_entry",
+      "key": "p2_home_titlebar_search",
+      "id": "p2_home_titlebar_search",
+      "type": "Button",
+      "locator_priority": 1,
+      "source": "observed_2026-09-09"
+    },
+    {
+      "name": "home_feed_list",
+      "key": "p2_home_feed_list",
+      "id": "p2_home_feed_list",
+      "type": "List",
+      "scrollable": true,
+      "locator_priority": 1,
+      "source": "observed_2026-09-09"
+    },
+    {
+      "name": "home_pull_refresh",
+      "key": "p2_home_pull_refresh",
+      "id": "p2_home_pull_refresh",
+      "type": "Refresh",
+      "scrollable": true,
+      "locator_priority": 1,
+      "source": "observed_2026-09-09"
+    },
+    {
+      "name": "p2_home_titlebar_notifications",
+      "key": "p2_home_titlebar_notifications",
+      "id": "p2_home_titlebar_notifications",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_2080820596280128138",
+      "key": "p2_home_feed_card_answer_2080820596280128138",
+      "id": "p2_home_feed_card_answer_2080820596280128138",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_2080820596280128138",
+      "key": "p3_home_feed_block_answer_2080820596280128138",
+      "id": "p3_home_feed_block_answer_2080820596280128138",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_2052364366704649939",
+      "key": "p2_home_feed_card_answer_2052364366704649939",
+      "id": "p2_home_feed_card_answer_2052364366704649939",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_2052364366704649939",
+      "key": "p3_home_feed_block_answer_2052364366704649939",
+      "id": "p3_home_feed_block_answer_2052364366704649939",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_2024564645420101735",
+      "key": "p2_home_feed_card_answer_2024564645420101735",
+      "id": "p2_home_feed_card_answer_2024564645420101735",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_2024564645420101735",
+      "key": "p3_home_feed_block_answer_2024564645420101735",
+      "id": "p3_home_feed_block_answer_2024564645420101735",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "StatusBarBridgeView",
+      "key": "StatusBarBridgeView",
+      "id": "StatusBarBridgeView",
+      "type": "__Common__",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "LiveMetaBallBaseVm",
+      "key": "LiveMetaBallBaseVm",
+      "id": "LiveMetaBallBaseVm",
+      "type": "metaballNode",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_input",
+      "key": "p2_search_input",
+      "id": "p2_search_input",
+      "type": "TextInput",
+      "clickable": true,
+      "scrollable": true,
+      "editable": true,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_refresh",
+      "key": "p2_search_hot_refresh",
+      "id": "p2_search_hot_refresh",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_0",
+      "key": "p2_search_hot_0",
+      "id": "p2_search_hot_0",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_1",
+      "key": "p2_search_hot_1",
+      "id": "p2_search_hot_1",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_2",
+      "key": "p2_search_hot_2",
+      "id": "p2_search_hot_2",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_3",
+      "key": "p2_search_hot_3",
+      "id": "p2_search_hot_3",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_4",
+      "key": "p2_search_hot_4",
+      "id": "p2_search_hot_4",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_5",
+      "key": "p2_search_hot_5",
+      "id": "p2_search_hot_5",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_6",
+      "key": "p2_search_hot_6",
+      "id": "p2_search_hot_6",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_7",
+      "key": "p2_search_hot_7",
+      "id": "p2_search_hot_7",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_8",
+      "key": "p2_search_hot_8",
+      "id": "p2_search_hot_8",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_9",
+      "key": "p2_search_hot_9",
+      "id": "p2_search_hot_9",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_10",
+      "key": "p2_search_hot_10",
+      "id": "p2_search_hot_10",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_11",
+      "key": "p2_search_hot_11",
+      "id": "p2_search_hot_11",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_12",
+      "key": "p2_search_hot_12",
+      "id": "p2_search_hot_12",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_13",
+      "key": "p2_search_hot_13",
+      "id": "p2_search_hot_13",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_hot_14",
+      "key": "p2_search_hot_14",
+      "id": "p2_search_hot_14",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_search_clear",
+      "key": "p2_search_clear",
+      "id": "p2_search_clear",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "KeyMenu",
+      "key": "KeyMenu",
+      "id": "KeyMenu",
+      "type": "Stack",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "KeyCustom_0",
+      "key": "KeyCustom_0",
+      "id": "KeyCustom_0",
+      "type": "Stack",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "KeyCustom_1",
+      "key": "KeyCustom_1",
+      "id": "KeyCustom_1",
+      "type": "Stack",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "KeyHideKbd",
+      "key": "KeyHideKbd",
+      "id": "KeyHideKbd",
+      "type": "Stack",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_2079850746862892339",
+      "key": "p2_home_feed_card_answer_2079850746862892339",
+      "id": "p2_home_feed_card_answer_2079850746862892339",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_2079850746862892339",
+      "key": "p3_home_feed_block_answer_2079850746862892339",
+      "id": "p3_home_feed_block_answer_2079850746862892339",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_article_2072728544950609039",
+      "key": "p2_home_feed_card_article_2072728544950609039",
+      "id": "p2_home_feed_card_article_2072728544950609039",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_article_2072728544950609039",
+      "key": "p3_home_feed_block_article_2072728544950609039",
+      "id": "p3_home_feed_block_article_2072728544950609039",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_3413610492",
+      "key": "p2_home_feed_card_answer_3413610492",
+      "id": "p2_home_feed_card_answer_3413610492",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_3413610492",
+      "key": "p3_home_feed_block_answer_3413610492",
+      "id": "p3_home_feed_block_answer_3413610492",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_2079313309241759416",
+      "key": "p2_home_feed_card_answer_2079313309241759416",
+      "id": "p2_home_feed_card_answer_2079313309241759416",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_2029682369460740557",
+      "key": "p2_home_feed_card_answer_2029682369460740557",
+      "id": "p2_home_feed_card_answer_2029682369460740557",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_2029682369460740557",
+      "key": "p3_home_feed_block_answer_2029682369460740557",
+      "id": "p3_home_feed_block_answer_2029682369460740557",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_2049540542044943357",
+      "key": "p2_home_feed_card_answer_2049540542044943357",
+      "id": "p2_home_feed_card_answer_2049540542044943357",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_2049540542044943357",
+      "key": "p3_home_feed_block_answer_2049540542044943357",
+      "id": "p3_home_feed_block_answer_2049540542044943357",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_2063249854458077873",
+      "key": "p2_home_feed_card_answer_2063249854458077873",
+      "id": "p2_home_feed_card_answer_2063249854458077873",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_2063249854458077873",
+      "key": "p3_home_feed_block_answer_2063249854458077873",
+      "id": "p3_home_feed_block_answer_2063249854458077873",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_home_feed_card_answer_1930421133779375885",
+      "key": "p2_home_feed_card_answer_1930421133779375885",
+      "id": "p2_home_feed_card_answer_1930421133779375885",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_home_feed_block_answer_1930421133779375885",
+      "key": "p3_home_feed_block_answer_1930421133779375885",
+      "id": "p3_home_feed_block_answer_1930421133779375885",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_answer_detail_context_title",
+      "key": "p2_answer_detail_context_title",
+      "id": "p2_answer_detail_context_title",
+      "type": "Text",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_answer_detail_header_author_row",
+      "key": "p3_answer_detail_header_author_row",
+      "id": "p3_answer_detail_header_author_row",
+      "type": "Row",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_answer_vote_up",
+      "key": "p3_answer_vote_up",
+      "id": "p3_answer_vote_up",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_answer_vote_down",
+      "key": "p3_answer_vote_down",
+      "id": "p3_answer_vote_down",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_answer_detail_favorite_bar",
+      "key": "p3_answer_detail_favorite_bar",
+      "id": "p3_answer_detail_favorite_bar",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_answer_detail_comment_bar",
+      "key": "p3_answer_detail_comment_bar",
+      "id": "p3_answer_detail_comment_bar",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p3_answer_detail_more",
+      "key": "p3_answer_detail_more",
+      "id": "p3_answer_detail_more",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    },
+    {
+      "name": "p2_answer_next_floating",
+      "key": "p2_answer_next_floating",
+      "id": "p2_answer_next_floating",
+      "type": "Button",
+      "clickable": true,
+      "scrollable": false,
+      "editable": false,
+      "locator_priority": 1,
+      "source": "direct_observation"
+    }
+  ],
+  "core_flow_name": "匿名首页浏览与详情返回验证",
+  "core_flow_pages": [
+    {
+      "page_id": "home",
+      "name": "首页信息流",
+      "signature_strategy": "pagePath_plus_stable_keys",
+      "stable_keys": [
+        "p2_home_titlebar_search",
+        "p2_home_feed_list"
+      ]
+    },
+    {
+      "page_id": "search_or_channel",
+      "name": "搜索或频道页",
+      "signature_strategy": "observed_after_home_entry",
+      "stable_keys": []
+    },
+    {
+      "page_id": "detail",
+      "name": "内容详情页",
+      "signature_strategy": "observed_after_stable_card_click",
+      "stable_keys": []
+    }
+  ],
+  "known_limitations": [
+    "本阶段不验证 HAP 或源码重新安装",
+    "本阶段不清除应用数据，只停止并重新启动",
+    "知乎++首页内容来自网络，动态内容控件 key 可能变化",
+    "页面中文字可能受终端编码影响，优先使用 key/id/type 定位",
+    "若出现登录、验证码或不可控弹窗，流程必须阻塞并保存证据"
+  ],
+  "last_observed_at": "2026-09-09T08:17:21.183314+00:00",
+  "status": "observed_unverified_install",
+  "observed_pages": [
+    {
+      "id": "round1_page1",
+      "name": "首页信息流",
+      "page_path": "pages/Index",
+      "signature": "pages/Index|keys=HdsTitleBar,TimeView_Text_timeText,[Live]LiveCapsuleListView,p1_hds_tabs,p1_top_level_home_content,p2_home_feed_card_answer_*,p2_home_feed_list,p2_home_pull_refresh,p2_home_titlebar_notifications,p2_home_titlebar_search,p2_home_top_start_container,p2_root_titlebar_content,p3_home_feed_block_answer_*,sbg_left,sbg_right,session27,status_bar_color_picker|types=Button,Column,Flex,HdsTitleBar,List,Refresh,RelativeContainer,Row,Stack,SymbolGlyph,TabContent,Tabs,Text,WindowScene,__Common__,metaballNode",
+      "elements_file": "D:\\Work\\Code\\Harmony\\mvp\\artifacts\\phase1\\recognition\\20260909T081601Z\\round_1\\home_before_action_elements.json"
+    },
+    {
+      "id": "round1_page2",
+      "name": "搜索入口页",
+      "page_path": "pages/Index",
+      "signature": "pages/Index|keys=HdsTitleBar,TimeView_Text_timeText,[Live]LiveCapsuleListView,p2_search_filter,p2_search_hot_0,p2_search_hot_1,p2_search_hot_10,p2_search_hot_11,p2_search_hot_12,p2_search_hot_13,p2_search_hot_14,p2_search_hot_2,p2_search_hot_3,p2_search_hot_4,p2_search_hot_5,p2_search_hot_6,p2_search_hot_7,p2_search_hot_8,p2_search_hot_9,p2_search_hot_refresh,p2_search_idle_panel,p2_search_input,p2_search_input_container,p2_search_title_bar,sbg_left,sbg_right,session27,status_bar_color_picker|types=Button,Flex,HdsTitleBar,RelativeContainer,Row,Scroll,Stack,SymbolGlyph,Text,TextInput,WindowScene,__Common__,metaballNode",
+      "elements_file": "D:\\Work\\Code\\Harmony\\mvp\\artifacts\\phase1\\recognition\\20260909T081601Z\\round_1\\search_after_click_elements.json"
+    },
+    {
+      "id": "round1_page3",
+      "name": "搜索输入状态",
+      "page_path": "pages/Index",
+      "signature": "pages/Index|keys=HdsTitleBar,TimeView_Text_timeText,[Live]LiveCapsuleListView,downMenu,downMenu_container,downMenu_flex,downMenu_line,functionView,index_content,index_keyMenu_container,index_outer,index_stack_container,inputMethodPanel,kbd_toolbar_list_menu,keyboard193,keyboardLeftButton,keyboardPanel31,keyboardRightButton,p2_search_clear,p2_search_filter,p2_search_hot_0,p2_search_hot_1,p2_search_hot_2,p2_search_hot_3,p2_search_hot_4,p2_search_hot_5,p2_search_hot_6,p2_search_hot_7,p2_search_hot_refresh,p2_search_idle_panel,p2_search_input,p2_search_input_container,p2_search_title_bar,parentLayout,sbg_left,sbg_right|types=Button,Column,Flex,Grid,HdsTitleBar,Image,RelativeContainer,Row,Scroll,Stack,SymbolGlyph,Text,TextInput,WindowScene,__Common__,metaballNode",
+      "elements_file": "D:\\Work\\Code\\Harmony\\mvp\\artifacts\\phase1\\recognition\\20260909T081601Z\\round_1\\search_after_input_elements.json"
+    },
+    {
+      "id": "round1_page4",
+      "name": "搜索结果或提交状态",
+      "page_path": "pages/Index",
+      "signature": "pages/Index|keys=HdsTitleBar,TimeView_Text_timeText,[Live]LiveCapsuleListView,downMenu,downMenu_container,downMenu_flex,downMenu_line,functionView,index_content,index_keyMenu_container,index_outer,index_stack_container,inputMethodPanel,kbd_toolbar_list_menu,keyboard193,keyboardLeftButton,keyboardPanel31,keyboardRightButton,p2_search_clear,p2_search_filter,p2_search_hot_0,p2_search_hot_1,p2_search_hot_2,p2_search_hot_3,p2_search_hot_4,p2_search_hot_5,p2_search_hot_6,p2_search_hot_7,p2_search_hot_refresh,p2_search_idle_panel,p2_search_input,p2_search_input_container,p2_search_title_bar,parentLayout,sbg_left,sbg_right|types=Button,Column,Flex,Grid,HdsTitleBar,Image,RelativeContainer,Row,Scroll,Stack,SymbolGlyph,Text,TextInput,WindowScene,__Common__,metaballNode",
+      "elements_file": "D:\\Work\\Code\\Harmony\\mvp\\artifacts\\phase1\\recognition\\20260909T081601Z\\round_1\\search_after_submit_elements.json"
+    },
+    {
+      "id": "round1_page4",
+      "name": "内容详情页",
+      "page_path": "pages/Index",
+      "signature": "pages/Index|keys=HdsTitleBar,TimeView_Text_timeText,[Live]LiveCapsuleListView,answer_top_author,answer_top_author_avatar,answer_top_label,answer_top_question,hdsTabs,p2_answer_detail_context_title,p2_answer_detail_created_at,p2_answer_detail_page,p2_answer_detail_statistics,p2_answer_next_floating,p2_content_document_list,p3_answer_detail_comment_bar,p3_answer_detail_favorite_bar,p3_answer_detail_header_author,p3_answer_detail_header_author_row,p3_answer_detail_header_avatar,p3_answer_detail_more,p3_answer_vote_down,p3_answer_vote_up,sbg_left,sbg_right,session27,status_bar_color_picker|types=Button,Column,Flex,HdsTitleBar,Image,List,RelativeContainer,Row,Stack,SymbolGlyph,Tabs,Text,WindowScene,__Common__,metaballNode",
+      "elements_file": "D:\\Work\\Code\\Harmony\\mvp\\artifacts\\phase1\\recognition\\20260909T081601Z\\round_1\\detail_after_click_elements.json"
+    }
+  ]
+}

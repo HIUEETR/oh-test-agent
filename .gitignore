@@ -1,0 +1,49 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+
+# Local configuration and IDE state
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.runtime-user/
+
+# Node/Web build and test outputs
+web/node_modules/
+web/dist/
+web/.vite/
+web/coverage/
+web/playwright-report/
+web/test-results/
+
+# Runtime artifacts. Keep only the directory contract in Git.
+artifacts/**
+!artifacts/README.md
+reports/
+screenshots/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+Thumbs.db
+.DS_Store
