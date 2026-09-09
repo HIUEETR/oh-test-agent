@@ -1,7 +1,5 @@
-@import url("https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@400;500;600;700&display=swap");
-
 :root {
-  font-family: "Fira Sans", "Microsoft YaHei", sans-serif;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   color: #f4f8fc;
   background: #07111e;
   font-synthesis: none;
@@ -33,7 +31,7 @@ button:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2p
 .topbar { height: 78px; padding: 0 28px; display: flex; align-items: center; gap: 14px; border-bottom: 1px solid var(--line-soft); background: rgba(7, 17, 30, 0.82); backdrop-filter: blur(18px); position: sticky; top: 0; z-index: 20; }
 .brand-mark { width: 42px; height: 42px; display: grid; place-items: center; color: #071a19; background: linear-gradient(135deg, #72efc5, var(--green)); border-radius: 12px; box-shadow: 0 0 34px rgba(53, 214, 164, 0.22); }
 .topbar h1 { font-size: 19px; line-height: 1; margin: 5px 0 0; letter-spacing: -0.02em; }
-.eyebrow { color: var(--muted); font-family: "Fira Code", monospace; font-size: 10px; letter-spacing: 0.16em; margin: 0; }
+.eyebrow { color: var(--muted); font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; letter-spacing: 0.16em; margin: 0; }
 .topbar-status { margin-left: auto; display: flex; align-items: center; gap: 20px; }
 .status-dot { display: flex; align-items: center; gap: 8px; color: #b7c7d8; font-size: 13px; }
 .status-dot i, .health-ok, .health-off { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -67,16 +65,16 @@ button:not(:disabled):hover { transform: translateY(-1px); }
 .health-icon { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; color: var(--blue); background: rgba(101, 191, 255, 0.09); }
 .health-row small, .health-row strong { display: block; }
 .health-row small { color: #758da6; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
-.health-row strong { margin-top: 3px; color: #cbd9e7; font-size: 12px; font-family: "Fira Code", monospace; word-break: break-all; }
-.run-card code { color: var(--blue); font-family: "Fira Code", monospace; font-size: 11px; word-break: break-all; }
-.state-pill { width: fit-content; margin: 14px 0; border-radius: 999px; padding: 6px 10px; font-family: "Fira Code", monospace; font-size: 11px; color: var(--amber); background: rgba(245, 186, 98, 0.1); border: 1px solid rgba(245, 186, 98, 0.23); }
+.health-row strong { margin-top: 3px; color: #cbd9e7; font-size: 12px; font-family: "Cascadia Code", Consolas, monospace; word-break: break-all; }
+.run-card code { color: var(--blue); font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; word-break: break-all; }
+.state-pill { width: fit-content; margin: 14px 0; border-radius: 999px; padding: 6px 10px; font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; color: var(--amber); background: rgba(245, 186, 98, 0.1); border: 1px solid rgba(245, 186, 98, 0.23); }
 .state-completed { color: var(--green); background: rgba(53, 214, 164, 0.1); border-color: rgba(53, 214, 164, 0.25); }
 .state-failed_device, .state-failed_model, .state-failed_element, .state-failed_action, .state-failed_assertion, .state-failed_script { color: var(--red); background: rgba(255, 113, 134, 0.1); border-color: rgba(255, 113, 134, 0.25); }
 .metrics { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line-soft); padding-top: 15px; }
 .metrics div { text-align: center; border-right: 1px solid var(--line-soft); }
 .metrics div:last-child { border-right: 0; }
 .metrics strong, .metrics small { display: block; }
-.metrics strong { font: 600 20px "Fira Code", monospace; }
+.metrics strong { font: 600 20px "Cascadia Code", Consolas, monospace; }
 .metrics small { color: var(--muted); margin-top: 4px; font-size: 11px; }
 
 .main-panel { min-width: 0; padding: 22px; }
@@ -90,7 +88,7 @@ button:not(:disabled):hover { transform: translateY(-1px); }
 .timeline-card, .elements-card { display: flex; flex-direction: column; min-height: 0; }
 .elements-card { display: none; }
 .card-heading { justify-content: space-between; min-height: 52px; padding: 0 17px; border-bottom: 1px solid var(--line-soft); }
-.card-heading small { color: #7189a3; font: 10px "Fira Code", monospace; text-transform: uppercase; }
+.card-heading small { color: #7189a3; font: 10px "Cascadia Code", Consolas, monospace; text-transform: uppercase; }
 .device-stage { height: calc(100% - 52px); min-height: 500px; padding: 20px; display: grid; place-items: center; background: radial-gradient(circle, rgba(58, 92, 127, 0.16), transparent 60%); }
 .device-stage img { max-height: calc(100vh - 225px); max-width: 100%; border-radius: 20px; border: 1px solid #395674; box-shadow: 0 25px 70px rgba(0, 0, 0, 0.38); }
 .empty-state, .empty-log { min-height: 240px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #607991; text-align: center; }
@@ -103,20 +101,20 @@ button:not(:disabled):hover { transform: translateY(-1px); }
 .event-run_failed, .event-assertion_failed { border-color: var(--red); background: rgba(255, 113, 134, 0.18); }
 .event strong, .event small { display: block; }
 .event strong { font-size: 12px; color: #cfdeeb; }
-.event small { margin-top: 5px; color: #687f99; font: 10px "Fira Code", monospace; }
+.event small { margin-top: 5px; color: #687f99; font: 10px "Cascadia Code", Consolas, monospace; }
 .element-table { overflow: auto; padding: 8px 15px; }
 .element-row { display: grid; grid-template-columns: 74px 1fr auto; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
-.element-type { color: var(--blue); font: 10px "Fira Code", monospace; }
+.element-type { color: var(--blue); font: 10px "Cascadia Code", Consolas, monospace; }
 .element-row strong, .element-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .element-row strong { color: #cad9e8; font-size: 11px; }
-.element-row small { color: #667f99; margin-top: 3px; font: 9px "Fira Code", monospace; }
+.element-row small { color: #667f99; margin-top: 3px; font: 9px "Cascadia Code", Consolas, monospace; }
 .tag { padding: 3px 6px; border: 1px solid #314a65; border-radius: 99px; color: #7890a8; font-size: 9px; }
 .tag.active { color: var(--green); border-color: rgba(53, 214, 164, 0.35); }
 
 .graph-card { height: calc(100vh - 142px); min-height: 560px; overflow: hidden; }
 .flow-card { width: 230px !important; padding: 0 !important; border: 1px solid #345878 !important; border-radius: 13px !important; background: linear-gradient(145deg, #17304d, #10243b) !important; color: white !important; box-shadow: 0 14px 34px rgba(0,0,0,.25) !important; }
 .flow-node { display: flex; flex-direction: column; gap: 7px; padding: 15px; text-align: left; }
-.flow-node small { color: var(--green); font: 9px "Fira Code", monospace; letter-spacing: .1em; }
+.flow-node small { color: var(--green); font: 9px "Cascadia Code", Consolas, monospace; letter-spacing: .1em; }
 .flow-node strong { color: #e7f0f8; font-size: 12px; }
 .flow-node span { color: #7f97af; font-size: 10px; }
 .react-flow__controls { border: 1px solid var(--line) !important; box-shadow: none !important; }
@@ -127,7 +125,7 @@ button:not(:disabled):hover { transform: translateY(-1px); }
 .action-strip .primary { flex: initial; }
 .warning-list { border-color: rgba(245, 186, 98, .26); background: rgba(245, 186, 98, .08); color: #ffd596; }
 .warning-list p { margin: 4px 0; font-size: 12px; }
-.code-view { min-height: 560px; max-height: calc(100vh - 245px); overflow: auto; margin: 0; padding: 22px; color: #c9e8ff; background: #050d17; border: 1px solid #213750; border-radius: 13px; font: 12px/1.7 "Fira Code", monospace; tab-size: 4; }
+.code-view { min-height: 560px; max-height: calc(100vh - 245px); overflow: auto; margin: 0; padding: 22px; color: #c9e8ff; background: #050d17; border: 1px solid #213750; border-radius: 13px; font: 12px/1.7 "Cascadia Code", Consolas, monospace; tab-size: 4; }
 .report-layout { height: calc(100vh - 142px); min-height: 600px; display: flex; flex-direction: column; gap: 10px; }
 .report-toolbar { display: flex; justify-content: flex-end; }
 .report-download { display: inline-flex; align-items: center; text-decoration: none; width: auto; }
