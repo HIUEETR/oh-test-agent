@@ -6,6 +6,7 @@ import asyncio
 import importlib.metadata
 import json
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,25 +58,47 @@ class RunManager:
             orchestrator.request_stop(run_id)
         return bool(orchestrator) or self.repository.mark_stopped(run_id)
 
+    async def shutdown(self, timeout: float = 8.0) -> None:
+        """Request cooperative stops and bound how long shutdown waits for cleanup."""
+        tasks = list(self.tasks.values())
+        for run_id, orchestrator in list(self.orchestrators.items()):
+            orchestrator.request_stop(run_id)
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if not task.cancelled():
+                task.exception()
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """使用给定配置创建并装配 FastAPI 应用。"""
     settings = settings or get_settings()
     manager = RunManager(settings)
-    app = FastAPI(title="OpenHarmony Multimodal Test Agent", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        await manager.shutdown()
+
+    app = FastAPI(title="OpenHarmony Multimodal Test Agent", version="0.1.0", lifespan=lifespan)
     app.state.manager = manager
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://127.0.0.1:5173",
-            "http://localhost:5173",
-            "http://127.0.0.1:15173",
-            "http://localhost:15173",
-        ],
+        allow_origins=settings.harmony_cors_origins,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/api/health/live")
+    async def live_health():
+        """Report ASGI liveness without probing devices, models, or Hypium."""
+        return {"status": "ok"}
 
     @app.get("/api/health")
     async def health():
@@ -239,6 +262,3 @@ def _trace_or_404(manager: RunManager, run_id: str):
     if not trace:
         raise HTTPException(status_code=404, detail="run not found")
     return trace
-
-
-app = create_app()
