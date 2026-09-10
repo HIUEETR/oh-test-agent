@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   Activity, Bot, Braces, CircleStop, FileCode2, GitBranch, MonitorSmartphone,
   Play, RefreshCw, ServerCog, ShieldCheck, TerminalSquare,
 } from "lucide-react";
-import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
+import PageGraphView from "./components/PageGraphView";
 import type { Health, RunEvent, RunTrace, ScriptResult } from "./types";
 
 const API = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
@@ -150,8 +150,7 @@ export default function App() {
   useEffect(() => { if (tab === "script") void loadScript(); }, [tab, runId]);
 
   const latestSnapshot = trace?.snapshots.at(-1);
-  // 页面图转换只依赖 Trace，避免事件日志或其他界面状态变化时重复创建 React Flow 对象。
-  const graph = useMemo(() => toFlow(trace), [trace]);
+  const graphArtifactUrl = useCallback((path: string) => artifactUrl(runId, path), [runId]);
   const state = trace?.state ?? (runId ? "created" : "idle");
 
   return (
@@ -228,9 +227,11 @@ export default function App() {
             </section>
           </div>}
 
-          {tab === "graph" && <section className="graph-card">{graph.nodes.length ? <ReactFlow nodes={graph.nodes} edges={graph.edges} fitView minZoom={0.25} maxZoom={1.8}>
-            <Background color="#253957" gap={22} /><Controls position="bottom-right" />
-          </ReactFlow> : <EmptyState title="页面图尚未生成" />}</section>}
+          {tab === "graph" && <section className="graph-card">
+            {trace?.graph.nodes.length
+              ? <PageGraphView runId={runId} graph={trace.graph} artifactUrl={graphArtifactUrl} />
+              : <EmptyState title="页面图尚未生成" />}
+          </section>}
 
           {tab === "script" && <section className="script-layout">
             <div className="action-strip"><button className="secondary" onClick={generate} disabled={!runId || busy}><FileCode2 size={16} />重新生成</button>
@@ -268,22 +269,4 @@ function artifactUrl(runId: string, absolutePath: string) {
   // 标准路径从 runId 后截取；兼容旧 Trace 时保留末两级目录（如 screens/example.png）。
   const relative = index >= 0 ? normalized.slice(index + marker.length) : normalized.split("/").slice(-2).join("/");
   return API + "/api/runs/" + runId + "/artifacts/" + relative;
-}
-
-function toFlow(trace: RunTrace | null): { nodes: Node[]; edges: Edge[] } {
-  if (!trace) return { nodes: [], edges: [] };
-  // 领域页面图没有画布坐标；按发现顺序排成固定三列，使同一 Trace 的布局保持可预测。
-  const nodes: Node[] = trace.graph.nodes.map((node, index) => ({
-    id: node.node_id,
-    position: { x: (index % 3) * 290, y: Math.floor(index / 3) * 190 },
-    data: { label: <div className="flow-node"><small>STATE {node.discovered_order}</small><strong>{node.title}</strong><span>{node.element_count} elements</span></div> },
-    className: "flow-card",
-  }));
-  // source/target 直接沿用领域节点 ID，确保 React Flow 的边与去重后的页面节点正确关联。
-  const edges: Edge[] = trace.graph.edges.map((edge) => ({
-    id: edge.edge_id, source: edge.source, target: edge.target,
-    label: edge.target_description ? edge.action + ": " + edge.target_description : edge.action,
-    animated: true, style: { stroke: "#35d6a4", strokeWidth: 2 }, labelStyle: { fill: "#a7bad4", fontSize: 11 },
-  }));
-  return { nodes, edges };
 }
