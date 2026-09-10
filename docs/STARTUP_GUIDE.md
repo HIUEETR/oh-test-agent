@@ -1,6 +1,6 @@
 # OpenHarmony 多模态测试 Agent 启动手册
 
-更新日期：2026-09-09
+更新日期：2026-09-10
 
 本文面向首次拿到仓库的开发者，覆盖从环境准备、真实模型与设备配置、预检、Agent 运行、Hypium 生成/回放，到 FastAPI/SSE/Web 控制台、测试、清理与排错的完整流程。
 
@@ -78,22 +78,26 @@ scripts/clean-runtime.ps1     带路径保护和 ShouldProcess 的清理脚本
 
 ```powershell
 uv sync --all-groups
-Push-Location web
-npm ci
-Pop-Location
+Copy-Item .env.example .env
+uv run main.py dev --install
 ```
 
-验证 CLI 已安装：
+`uv.toml` 会自动把 Python 包下载缓存放在仓库内的 `.uv-cache`。项目虚拟环境仍位于 `.venv`。如果不准备立即启动服务，可以先省略最后一条命令；之后执行 `uv run main.py dev --install` 安装锁文件指定的 Web 依赖并启动 API 与 Web。
+
+验证 CLI：
 
 ```powershell
-.\.venv\Scripts\harmony-test-agent.exe --help
+uv run main.py --help
+uv run main.py dev --help
 ```
 
-也可使用：
+`pyproject.toml` 中的 `[project.scripts]` 声明了：
 
-```powershell
-uv run harmony-test-agent --help
+```toml
+harmony-test-agent = "harmony_test_agent.cli:main"
 ```
+
+`uv sync` 会据此生成 `.venv\Scripts\harmony-test-agent.exe`。这个文件是 Windows 命令包装器，负责加载项目环境并调用同一个 `main()`，不包含另一套业务逻辑。若包装器正在运行，Windows 会锁定该 `.exe`；此时另一个 `uv run harmony-test-agent ...` 触发同步并尝试更新包装器，可能报 `Access is denied`。源码检出环境统一使用 `uv run main.py ...`，可以避免把正在执行的包装器作为同步更新目标。
 
 ## 5. 配置 `.env`
 
@@ -196,13 +200,13 @@ AGENT_DISABLE_THINKING=true
 完整预检：
 
 ```powershell
-.\.venv\Scripts\harmony-test-agent.exe preflight
+uv run main.py preflight
 ```
 
 不采集截图：
 
 ```powershell
-.\.venv\Scripts\harmony-test-agent.exe preflight --no-screenshot
+uv run main.py preflight --no-screenshot
 ```
 
 完整预检依次检查：
@@ -233,7 +237,7 @@ artifacts/runs/preflight-<timestamp>/layouts/
 
 ```powershell
 $task = '打开知乎++，进入搜索，输入 OpenHarmony，返回首页，打开一条内容详情，确认页面存在可见内容后返回首页。'
-.\.venv\Scripts\harmony-test-agent.exe run `
+uv run main.py run `
   --provider openai `
   --mode regression `
   --max-steps 20 `
@@ -247,7 +251,7 @@ $task = '打开知乎++，进入搜索，输入 OpenHarmony，返回首页，打
 无模型 Key 时验证状态机、HDC、存储和生成器：
 
 ```powershell
-.\.venv\Scripts\harmony-test-agent.exe run `
+uv run main.py run `
   --provider mock `
   --task '打开知乎++，进入搜索，输入 OpenHarmony，返回首页。'
 ```
@@ -288,8 +292,8 @@ artifacts/runs/<run-id>/
 
 ```powershell
 $runId = 'run-xxxxxxxxTxxxxxxZ-xxxxxxxx'
-.\.venv\Scripts\harmony-test-agent.exe generate --run-id $runId
-.\.venv\Scripts\harmony-test-agent.exe execute --run-id $runId --attempts 3
+uv run main.py generate --run-id $runId
+uv run main.py execute --run-id $runId --attempts 3
 ```
 
 每次回放使用独立目录：
@@ -314,63 +318,119 @@ Hypium 子进程把 `HOME`、`USERPROFILE` 指向仓库内 `.runtime-user`，避
 
 ## 10. 启动 API 与 Web 控制台
 
-### 10.1 默认端口
+### 10.1 推荐：单终端启动
+
+日常开发从仓库根目录运行：
+
+```powershell
+uv run main.py dev
+```
+
+`dev` 同时启动 FastAPI 和 Vite，并把两个进程的输出转发到当前终端。每行以 `[api]` 或 `[web]` 开头，可以直接判断日志来源。默认地址为：
+
+```text
+API  http://127.0.0.1:8000
+Web  http://127.0.0.1:5173/
+```
+
+首次安装或需要按 `web/package-lock.json` 重新安装前端依赖时增加 `--install`：
+
+```powershell
+uv run main.py dev --install
+```
+
+自定义地址、端口并启用 API 热重载：
+
+```powershell
+uv run main.py dev `
+  --api-host 127.0.0.1 `
+  --api-port 18000 `
+  --web-host 127.0.0.1 `
+  --web-port 15173 `
+  --reload
+```
+
+参数含义：
+
+```text
+--api-host   FastAPI 监听地址
+--api-port   FastAPI 监听端口
+--web-host   Vite 监听地址
+--web-port   Vite 监听端口
+--reload     启用 Uvicorn 源码热重载
+--install    启动前先在 web 目录执行 npm ci
+```
+
+按一次 `Ctrl+C` 后，启动器会向 API 和 Web 子进程发送停止信号，等待它们退出，并清理仍存活的子进程。按 `Ctrl+C` 中断返回退出码 130；API 或 Web 无法启动、运行中异常退出，或者依赖安装失败时返回非 0，同时停止另一项服务。自动化脚本应检查 `$LASTEXITCODE`，不能只看到其中一个服务打印过启动日志就判定成功。
+
+### 10.2 `serve` 与手动双终端排错
+
+`serve` 只启动 FastAPI/SSE，不会安装或启动 Web：
+
+```powershell
+uv run main.py serve --host 127.0.0.1 --port 8000
+```
+
+当需要分别观察原始日志、单独重启 Vite 或确认问题属于哪一侧时，使用两个终端。
 
 终端 1：
 
 ```powershell
-.\.venv\Scripts\harmony-test-agent.exe serve --host 127.0.0.1 --port 8000
+uv run main.py serve --host 127.0.0.1 --port 8000 --reload
 ```
 
 终端 2：
 
 ```powershell
 Push-Location web
+$env:VITE_API_URL = 'http://127.0.0.1:8000'
 npm run dev -- --host 127.0.0.1 --port 5173
 Pop-Location
 ```
 
-浏览器打开：
+手动模式下两个进程互不管理，停止时要在两个终端分别按 `Ctrl+C`。`VITE_API_URL` 必须在 Vite 启动前设置。
 
-```text
-http://127.0.0.1:5173/
-```
+### 10.3 端口与 CORS
 
-### 10.2 Windows 端口被保留时
-
-若出现：
-
-```text
-WinError 10013
-listen EACCES: permission denied
-```
-
-检查 Windows 排除端口范围：
+若出现 `WinError 10013`、`listen EACCES` 或地址已被占用，先检查 Windows 排除端口和当前监听进程：
 
 ```powershell
 netsh interface ipv4 show excludedportrange protocol=tcp
+Get-NetTCPConnection -State Listen | Where-Object LocalPort -In 8000,5173
+Get-Process -Id (Get-NetTCPConnection -State Listen -LocalPort 8000).OwningProcess
 ```
 
-选择未被排除的端口。例如本次验收使用：
+选择未被排除且未被占用的端口，再通过 `dev` 的 `--api-port`、`--web-port` 同时传入。浏览器报 CORS 时，先确认 Web 实际来源与 API 配置允许的来源完全一致，包括协议、主机和端口；`localhost` 与 `127.0.0.1` 属于不同来源。默认允许本机的 `5173`，验收端口 `15173` 也已列入允许来源。统一 `dev` 启动器会自动把所选 Web 来源传给 FastAPI；手动改用其他 Web 端口时，在启动 API 前设置 `HARMONY_CORS_ORIGINS=http://127.0.0.1:<port>`，多个来源用逗号分隔。
 
-终端 1：
+### 10.4 npm、`node_modules` 与残留进程
+
+`dev` 报找不到 `npm` 时检查 Node.js 与 npm 是否在 `PATH`：
 
 ```powershell
-.\.venv\Scripts\harmony-test-agent.exe serve --host 127.0.0.1 --port 18000
+node --version
+npm --version
 ```
 
-终端 2：
+`web/node_modules` 不存在、依赖不完整或 lockfile 更新后，重新运行：
 
 ```powershell
-Push-Location web
-$env:VITE_API_URL = 'http://127.0.0.1:18000'
-npm run dev -- --host 127.0.0.1 --port 15173
-Pop-Location
+uv run main.py dev --install
 ```
 
-`VITE_API_URL` 必须在 Vite 启动前设置。若使用另一个 Web 端口，需同步检查 FastAPI 的 CORS 允许列表。
+`--install` 使用 `npm ci`，要求 `web/package-lock.json` 与 `web/package.json` 一致。若安装失败，先处理 npm 输出的 lockfile、网络或权限错误；启动器会保留非 0 退出码。
 
-### 10.3 Web 功能
+按 `Ctrl+C` 后端口仍被占用，通常表示之前从另一个终端启动了服务，或父终端被直接关闭而留下子进程。按端口定位进程，并核对命令行后再停止：
+
+```powershell
+$connection = Get-NetTCPConnection -State Listen -LocalPort 8000
+Get-CimInstance Win32_Process -Filter "ProcessId = $($connection.OwningProcess)" |
+  Select-Object ProcessId, Name, CommandLine
+Stop-Process -Id $connection.OwningProcess
+```
+
+对 Web 端口重复检查。不要按名称批量结束所有 `python` 或 `node`，这会影响其他项目。
+
+### 10.5 Web 功能
 
 Web 控制台支持：
 
@@ -391,11 +451,23 @@ http://127.0.0.1:5173/?run_id=<run-id>&tab=script
 http://127.0.0.1:5173/?run_id=<run-id>&tab=report
 ```
 
-## 11. API 与 SSE
+## 11. CLI、API 与 SSE
+
+CLI 子命令：
+
+```text
+preflight   检查 Python、依赖、模型、Hypium、HDC、设备、截图和布局
+run         执行自然语言 UI 测试任务
+generate    从已有 Run Trace 生成 Hypium 项目
+execute     回放生成用例 1—3 次
+dev         同时启动 API 与 Web，统一转发日志并管理进程生命周期
+serve       只启动 FastAPI/SSE
+```
 
 主要接口：
 
 ```text
+GET  /api/health/live
 GET  /api/health
 GET  /api/devices
 GET  /api/runs
@@ -409,6 +481,13 @@ GET  /api/runs/{run_id}/report
 POST /api/runs/{run_id}/generate
 POST /api/runs/{run_id}/execute?attempts=3
 GET  /api/runs/{run_id}/artifacts/{path}
+```
+
+`GET /api/health/live` 是轻量进程存活探针，不访问设备或外部模型，适合启动器和自动化轮询。`GET /api/health` 返回模型配置、设备连通性和 Hypium 状态，检查范围更完整，响应时间也可能受 HDC 影响。
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8000/api/health/live'
+Invoke-RestMethod 'http://127.0.0.1:8000/api/health'
 ```
 
 SSE 示例：
@@ -543,35 +622,47 @@ $finalRun = 'run-20260909T140205Z-e9ada52e'
 
 ## 15. 常见问题
 
-### 15.1 `Thinking mode does not support this tool_choice`
+### 15.1 `dev` 启动后立即退出
+
+根据最后一条 `[api]` 或 `[web]` 日志判断失败进程，并检查 PowerShell 的 `$LASTEXITCODE`。`[web]` 提示缺少包时运行 `uv run main.py dev --install`；监听失败时按 10.3 节更换端口；其中一项失败后另一项被停止属于预期的生命周期清理。
+
+### 15.2 按 `Ctrl+C` 后仍有服务占用端口
+
+先用 `Get-NetTCPConnection` 与 `Get-CimInstance Win32_Process` 确认占用进程的命令行。常见原因是之前用手动双终端启动过服务，或直接关闭终端留下了进程。确认 PID 后仅停止对应进程。
+
+### 15.3 浏览器能打开 Web，但请求 API 失败
+
+确认 `VITE_API_URL` 指向实际 API 地址，再检查浏览器控制台是否为 CORS 错误。协议、主机或端口任一不同都会形成新来源；自定义 Web 端口必须出现在 FastAPI 的 CORS 允许列表中。先调用 `/api/health/live` 可区分 API 未启动与设备健康检查较慢。
+
+### 15.4 `Thinking mode does not support this tool_choice`
 
 设置 `AGENT_DISABLE_THINKING=true`，然后重启 CLI/API。
 
-### 15.2 模型请求在 30 秒失败
+### 15.5 模型请求在 30 秒失败
 
 确认使用的是 `AGENT_MODEL_TIMEOUT`，推荐从 90 秒开始；`AGENT_ACTION_TIMEOUT` 只控制设备动作。若端点本身响应慢，可临时提高到 120—180 秒，但上限为 300 秒。
 
-### 15.3 `failed_model`
+### 15.6 `failed_model`
 
 检查 Base URL、Key、模型名、结构化输出兼容性和 VLM 图片输入。系统不会在真实模型失败后自动伪装为 Mock 成功。
 
-### 15.4 `failed_device`
+### 15.7 `failed_device`
 
 检查模拟器是否启动、序列号是否变化、HDC 是否能执行 `list targets`。设备断开后状态机停止，不继续后续操作。
 
-### 15.5 `failed_element`
+### 15.8 `failed_element`
 
 优先检查对应 `layouts/`、`screens/` 与 `trace.json`。定位优先级为 key/id、精确文本、类型+文本、空间关系、VLM bbox、裸坐标。模型返回的运行时 `element_id` 可在当前 Snapshot 内精确解析，但不能直接作为稳定 Hypium 文本定位器。
 
-### 15.6 断言失败
+### 15.9 断言失败
 
 断言支持 UI 元素、语义目标简化和 VLM 页面摘要证据，但不会无限放宽。失败后立即停是设计行为，应查看失败截图，而不是关闭门禁。
 
-### 15.7 Hypium 写入用户目录
+### 15.10 Hypium 写入用户目录
 
 只能通过本项目 Runner 启动生成用例；Runner 会隔离 `HOME` 和 `USERPROFILE`。不要直接用系统 Python 运行且同时修改全局 HOME。
 
-### 15.8 页面图节点很多
+### 15.11 页面图节点很多
 
 当前页面签名综合页面路径、控件、文本与感知结果。动态信息流和 VLM 页面标题变化可能把同一语义页面拆成多个状态。当前验收满足页面/边证据要求，但后续仍可增加语义聚类以减少过度分裂。
 

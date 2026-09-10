@@ -27,15 +27,19 @@
 
 ## 快速开始
 
-### 1. 安装
+### 1. 首次安装
+
+在仓库根目录执行：
 
 ```powershell
 uv sync --all-groups
-Push-Location web
-npm ci
-Pop-Location
 Copy-Item .env.example .env
+uv run main.py dev --install
 ```
+
+`uv.toml` 会自动把 uv 下载缓存放在项目内的 `.uv-cache`；`.venv` 仍是项目虚拟环境。`dev --install` 会执行前端的 `npm ci`，然后在同一终端启动 API 与 Web。后续启动省略 `--install` 即可。
+
+`pyproject.toml` 的 `[project.scripts]` 会在 `uv sync` 时生成 `.venv\Scripts\harmony-test-agent.exe`，它只是转发到 `harmony_test_agent.cli:main` 的 Windows 包装器。Windows 会锁定正在运行的 `.exe`，导致另一个 uv 同步进程无法替换它，因此源码检出环境推荐使用不会锁定包装器的 `uv run main.py ...`。
 
 在 `.env` 中填写模型、VLM、HDC 和设备配置。若兼容端点报 thinking/tool choice 冲突，设置：
 
@@ -46,35 +50,41 @@ AGENT_DISABLE_THINKING=true
 ### 2. 预检
 
 ```powershell
-.\.venv\Scripts\harmony-test-agent.exe preflight
+uv run main.py preflight
 ```
 
 ### 3. 运行真实 Agent
 
 ```powershell
 $task = '打开知乎++，进入搜索，输入 OpenHarmony，返回首页，打开一条内容详情，确认页面存在可见内容后返回首页。'
-.\.venv\Scripts\harmony-test-agent.exe run --provider openai --task $task
+uv run main.py run --provider openai --task $task
 ```
 
 成功 Run 默认生成 Hypium 文件。也可单独执行：
 
 ```powershell
-.\.venv\Scripts\harmony-test-agent.exe generate --run-id <run-id>
-.\.venv\Scripts\harmony-test-agent.exe execute --run-id <run-id> --attempts 3
+uv run main.py generate --run-id <run-id>
+uv run main.py execute --run-id <run-id> --attempts 3
 ```
 
 ### 4. 启动 API 与 Web
 
-```powershell
-# 终端 1
-.\.venv\Scripts\harmony-test-agent.exe serve --host 127.0.0.1 --port 8000
+推荐由一个终端统一管理两个服务：
 
-# 终端 2
-Push-Location web
-npm run dev -- --host 127.0.0.1 --port 5173
+```powershell
+uv run main.py dev
 ```
 
-若 Windows 保留默认端口，先运行 `netsh interface ipv4 show excludedportrange protocol=tcp`，再选择未被排除的端口并在启动 Vite 前设置 `VITE_API_URL`。完整示例见启动手册。
+需要自定义监听地址、端口或 API 热重载时：
+
+```powershell
+uv run main.py dev `
+  --api-host 127.0.0.1 --api-port 18000 `
+  --web-host 127.0.0.1 --web-port 15173 `
+  --reload
+```
+
+输出以 `[api]`、`[web]` 标识来源。按一次 `Ctrl+C` 会同时停止两个子进程；任一服务异常退出时，启动器会停止另一个服务并返回非 0 退出码。`serve` 只启动 API，适合手动双终端排错。完整端口、CORS、`node_modules` 和残留进程排查见 [启动手册](docs/STARTUP_GUIDE.md)。
 
 ## CLI
 
@@ -83,10 +93,11 @@ preflight   检查 Python、依赖、模型、Hypium、HDC、设备、截图和�
 run         执行自然语言任务，可选 real/mock、模式、设备、生成和回放
 generate    从已有 Run Trace 重新生成 Hypium
 execute     回放生成用例 1—3 次
-serve       启动 FastAPI/SSE
+dev         同时启动 FastAPI 与 Vite，可安装前端依赖并统一管理生命周期
+serve       只启动 FastAPI/SSE
 ```
 
-运行模式枚举为 `regression`、`exploration`、`stability`、`reproduction`；当前完整验收链路是 `regression`。
+`dev` 支持 `--api-host`、`--api-port`、`--web-host`、`--web-port`、`--reload` 和 `--install`。运行模式枚举为 `regression`、`exploration`、`stability`、`reproduction`；当前完整验收链路是 `regression`。
 
 ## 架构
 

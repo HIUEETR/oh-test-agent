@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, computed_field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, computed_field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,6 +35,22 @@ class Settings(BaseSettings):
     agent_retry_limit: int = Field(default=2, ge=0, le=5)
     unchanged_screen_limit: int = Field(default=2, ge=1, le=5)
     vlm_min_confidence: float = Field(default=0.55, ge=0, le=1)
+    harmony_cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:15173",
+            "http://localhost:15173",
+        ]
+    )
+
+    @field_validator("harmony_cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: object) -> object:
+        """Accept a comma-separated environment value or a native list."""
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @computed_field
     @property
