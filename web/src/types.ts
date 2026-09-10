@@ -63,6 +63,7 @@ export type RunTrace = {
       node_id: string;
       title: string;
       page_path: string;
+      snapshot_id: string;
       image_path: string;
       element_count: number;
       discovered_order: number;
