@@ -16,7 +16,15 @@ from ..agents import AgentOrchestrator
 from ..config import Settings, get_settings
 from ..devices import DeviceError, HarmonyDeviceAdapter
 from ..generation import HypiumGenerator
-from ..models import TERMINAL_STATES, RunRequest, RunState, utc_now
+from ..models import (
+    TERMINAL_STATES,
+    CommandResult,
+    ReplayError,
+    ReplayResult,
+    RunRequest,
+    RunState,
+    utc_now,
+)
 from ..reporting import ReportBuilder
 from ..runner import HypiumRunner
 from ..storage import ArtifactStore, RunRepository
@@ -30,6 +38,8 @@ class RunManager:
         self.repository = RunRepository(settings.resolved_database_path)
         self.artifacts = ArtifactStore(settings.resolved_runtime_dir)
         self.tasks: dict[str, asyncio.Task] = {}
+        self.replay_tasks: dict[str, asyncio.Task] = {}
+        self.replay_locks: dict[str, asyncio.Lock] = {}
         self.orchestrators: dict[str, AgentOrchestrator] = {}
 
     def start(self, request: RunRequest) -> str:
@@ -60,7 +70,7 @@ class RunManager:
 
     async def shutdown(self, timeout: float = 8.0) -> None:
         """Request cooperative stops and bound how long shutdown waits for cleanup."""
-        tasks = list(self.tasks.values())
+        tasks = [*self.tasks.values(), *self.replay_tasks.values()]
         for run_id, orchestrator in list(self.orchestrators.items()):
             orchestrator.request_stop(run_id)
         if not tasks:
@@ -73,6 +83,73 @@ class RunManager:
         for task in done:
             if not task.cancelled():
                 task.exception()
+
+    def replay_running(self, run_id: str) -> bool:
+        """Return whether this process is already replaying the Run."""
+        task = self.replay_tasks.get(run_id)
+        lock = self.replay_locks.get(run_id)
+        return bool((task and not task.done()) or (lock and lock.locked()))
+
+    def start_replay(self, run_id: str, attempts: int) -> None:
+        """Persist the queued state and execute attempts in a background task."""
+        trace = self.repository.get_trace(run_id)
+        if trace is None or trace.generated is None:
+            raise ValueError("generated artifact is missing")
+        lock = self.replay_locks.setdefault(run_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("Hypium replay is already running")
+        trace.replays = []
+        trace.replay_status = "pending"
+        trace.replay_total = attempts
+        trace.replay_completed = 0
+        trace.replay_passed = 0
+        self._save_trace_and_report(trace)
+        task = asyncio.create_task(self._run_replay(run_id), name=f"replay-{run_id}")
+        self.replay_tasks[run_id] = task
+
+        def cleanup(completed: asyncio.Task) -> None:
+            self.replay_tasks.pop(run_id, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(cleanup)
+
+    async def _run_replay(self, run_id: str) -> None:
+        """Execute and persist every replay attempt independently."""
+        trace = self.repository.get_trace(run_id)
+        if trace is None or trace.generated is None:
+            return
+        runner = HypiumRunner(self.settings.resolved_runtime_home)
+        lock = self.replay_locks.setdefault(run_id, asyncio.Lock())
+        try:
+            await lock.acquire()
+            for attempt in range(1, trace.replay_total + 1):
+                result = await asyncio.to_thread(runner.execute, trace.generated, attempt)
+                trace.replays.append(result)
+                trace.replay_completed = len(trace.replays)
+                trace.replay_passed = sum(item.passed for item in trace.replays)
+                trace.replay_status = "pending"
+                self._save_trace_and_report(trace)
+            if trace.replay_passed == trace.replay_total:
+                trace.replay_status = "passed"
+            elif trace.replay_passed:
+                trace.replay_status = "partial"
+            else:
+                trace.replay_status = "failed"
+        except Exception as exc:
+            trace.replay_status = "failed"
+            trace.replays.append(_unexpected_replay_result(trace.replay_completed + 1, exc))
+            trace.replay_completed = len(trace.replays)
+            trace.replay_passed = sum(item.passed for item in trace.replays)
+        finally:
+            self._save_trace_and_report(trace)
+            if lock.locked():
+                lock.release()
+
+    def _save_trace_and_report(self, trace) -> None:
+        self.repository.save_trace(trace)
+        self.artifacts.save_trace(trace)
+        ReportBuilder(self.artifacts).build(trace)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -206,6 +283,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "python": trace.generated.python_path.read_text(encoding="utf-8"),
             "config": json.loads(trace.generated.config_path.read_text(encoding="utf-8")),
             "warnings": trace.generated.warnings,
+            "generated_at": trace.generated.generated_at,
+            "purpose": trace.generated.purpose,
+            "diagnostic": trace.generated.purpose == "diagnostic",
+            "acceptance_replay_enabled": trace.generated.replay_eligible,
+            "source_agent_outcome": trace.generated.source_agent_outcome,
+            "source_action_count": trace.generated.source_action_count,
+            "included_action_count": trace.generated.included_action_count,
+            "incomplete_reasons": trace.generated.incomplete_reasons,
         }
 
     @app.post("/api/runs/{run_id}/generate")
@@ -219,20 +304,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ReportBuilder(manager.artifacts).build(trace)
         return trace.generated
 
-    @app.post("/api/runs/{run_id}/execute")
+    @app.post("/api/runs/{run_id}/execute", status_code=status.HTTP_202_ACCEPTED)
     async def execute(run_id: str, attempts: int = Query(default=3, ge=1, le=3)):
-        """在线程中重复执行已生成脚本并更新运行状态。"""
+        """Queue eligible Hypium replays and return before device execution starts."""
         trace = _trace_or_404(manager, run_id)
         if not trace.generated:
             raise HTTPException(status_code=409, detail="generate the Hypium script first")
-        trace.state = RunState.SCRIPT_EXECUTING
-        runner = HypiumRunner(settings.resolved_runtime_home)
-        trace.replays = await asyncio.to_thread(runner.execute_repeated, trace.generated, attempts)
-        trace.state = RunState.COMPLETED if all(item.passed for item in trace.replays) else RunState.FAILED_SCRIPT
-        manager.repository.save_trace(trace)
-        manager.artifacts.save_trace(trace)
-        ReportBuilder(manager.artifacts).build(trace)
-        return {"passed": all(item.passed for item in trace.replays), "replays": trace.replays}
+        if manager.replay_running(run_id) or trace.replay_status == "pending":
+            raise HTTPException(status_code=409, detail="Hypium replay is already running")
+        if not trace.generated.replay_eligible:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "diagnostic script is not eligible for acceptance replay",
+                    "incomplete_reasons": trace.generated.incomplete_reasons,
+                },
+            )
+        try:
+            manager.start_replay(run_id, attempts)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"run_id": run_id, "status": "pending", "attempts": attempts}
 
     @app.get("/api/runs/{run_id}/report")
     async def report(run_id: str, download: bool = False):
@@ -262,3 +354,14 @@ def _trace_or_404(manager: RunManager, run_id: str):
     if not trace:
         raise HTTPException(status_code=404, detail="run not found")
     return trace
+
+
+def _unexpected_replay_result(attempt: int, exc: Exception) -> ReplayResult:
+    """Convert an unexpected runner failure into a persisted structured result."""
+    message = f"{type(exc).__name__}: {exc}"
+    return ReplayResult(
+        attempt=attempt,
+        command=CommandResult(command="HypiumRunner.execute", returncode=None),
+        status="failed",
+        error=ReplayError(kind="process_exit", message=message),
+    )

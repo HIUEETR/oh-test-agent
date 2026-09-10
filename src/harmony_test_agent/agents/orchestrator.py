@@ -121,6 +121,7 @@ class AgentOrchestrator:
             for index, step in enumerate(trace.plan, start=1):
                 if self._should_stop(trace.run_id):
                     trace.state = RunState.STOPPED_BY_USER
+                    trace.agent_outcome = "stopped"
                     trace.ended_at = utc_now()
                     emitter.emit(EventType.RUN_FINISHED, "任务已由用户停止")
                     return trace
@@ -252,6 +253,8 @@ class AgentOrchestrator:
                 )
 
             trace.state = RunState.COMPLETED
+            trace.agent_outcome = "completed"
+            trace.agent_error = None
             trace.ended_at = utc_now()
             emitter.emit(
                 EventType.RUN_FINISHED,
@@ -371,6 +374,8 @@ class AgentOrchestrator:
 
     async def _fail(self, trace, emitter, state: RunState, message: str) -> None:
         trace.state = state
+        trace.agent_outcome = "stopped" if state == RunState.STOPPED_BY_USER else "failed"
+        trace.agent_error = message
         trace.error = message
         trace.ended_at = utc_now()
         event_type = EventType.ASSERTION_FAILED if state == RunState.FAILED_ASSERTION else EventType.RUN_FAILED

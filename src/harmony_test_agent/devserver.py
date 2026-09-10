@@ -108,7 +108,8 @@ def build_process_specs(config: DevServerConfig, npm: str | None = None) -> tupl
         "PYTHONPATH": python_path,
         "PYTHONUNBUFFERED": "1",
     }
-    web_env = shared_env | {"VITE_API_URL": api_url}
+    web_env = shared_env | {"VITE_API_PROXY_TARGET": api_url}
+    web_env.pop("VITE_API_URL", None)
     api_command = [
         sys.executable,
         "-m",
@@ -251,4 +252,3 @@ def run_dev_server(config: DevServerConfig) -> int:
     finally:
         for process in reversed(processes):
             _terminate_process_tree(process, config.shutdown_timeout)
-

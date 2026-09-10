@@ -121,7 +121,8 @@ def test_build_process_specs_constructs_commands_and_child_environments(
         "15173",
         "--strictPort",
     )
-    assert web.env["VITE_API_URL"] == "http://127.0.0.1:18000"
+    assert web.env["VITE_API_PROXY_TARGET"] == "http://127.0.0.1:18000"
+    assert "VITE_API_URL" not in web.env
 
 
 def test_build_process_specs_brackets_ipv6_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,7 +134,8 @@ def test_build_process_specs_brackets_ipv6_hosts(monkeypatch: pytest.MonkeyPatch
     )
 
     assert api.env["HARMONY_CORS_ORIGINS"] == "http://[::1]:5173"
-    assert web.env["VITE_API_URL"] == "http://[::1]:8000"
+    assert web.env["VITE_API_PROXY_TARGET"] == "http://[::1]:8000"
+    assert "VITE_API_URL" not in web.env
 
 
 def test_build_process_specs_merges_configured_cors_origins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -225,5 +227,3 @@ def test_run_dev_server_returns_failed_child_code_and_cleans_up_both_children(
 
     assert run_dev_server(DevServerConfig()) == 7
     assert cleaned == [web_process, api_process]
-
-

@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def utc_now() -> datetime:
@@ -297,16 +297,40 @@ class ActionResult(BaseModel):
 
 
 class PageNode(BaseModel):
-    """表示运行过程中发现的一个页面节点。"""
+    """表示运行过程中发现的一个页面节点，并兼容旧版 image_path。"""
 
     node_id: str
     signature: str
     page_path: str
     title: str
     snapshot_id: str
-    image_path: Path
+    artifact_path: Path | None = None
+    image_path: Path | None = None
     discovered_order: int
     element_count: int
+
+    @model_validator(mode="after")
+    def populate_artifact_path(self) -> PageNode:
+        """为旧 Trace 从绝对 image_path 提取 Run 内相对截图路径。"""
+        if self.artifact_path is not None:
+            if self.artifact_path.is_absolute():
+                raise ValueError("artifact_path must be relative to the Run directory")
+            return self
+        if self.image_path is None:
+            raise ValueError("artifact_path or image_path is required")
+        parts = self.image_path.parts
+        if self.snapshot_id:
+            run_markers = [index for index, part in enumerate(parts) if part.startswith("run-")]
+            if run_markers and run_markers[-1] + 1 < len(parts):
+                self.artifact_path = Path(*parts[run_markers[-1] + 1 :])
+                return self
+        for directory in ("screens", "layouts", "commands", "generated", "hypium", "reports"):
+            if directory in parts:
+                index = len(parts) - 1 - list(reversed(parts)).index(directory)
+                self.artifact_path = Path(*parts[index:])
+                return self
+        self.artifact_path = Path("screens") / self.image_path.name
+        return self
 
 
 class PageEdge(BaseModel):
@@ -328,22 +352,57 @@ class PageGraph(BaseModel):
 
 
 class GeneratedArtifact(BaseModel):
-    """记录生成的 Hypium 脚本、配置、元数据及警告。"""
+    """记录生成的 Hypium 脚本、用途、完整性及可回放资格。"""
 
     python_path: Path
     config_path: Path
     metadata_path: Path
     generated_at: datetime = Field(default_factory=utc_now)
+    purpose: Literal["acceptance", "diagnostic"] = "diagnostic"
+    replay_eligible: bool = False
+    source_agent_outcome: Literal["completed", "failed", "stopped", "unknown"] = "unknown"
+    source_action_count: int = 0
+    included_action_count: int = 0
+    omitted_action_count: int = 0
+    counts: dict[str, int] = Field(default_factory=dict)
+    incomplete_reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
+class ReplayError(BaseModel):
+    """描述回放资格、进程或生成结果产生的结构化错误。"""
+
+    kind: Literal["ineligible", "timeout", "process_exit", "missing_result", "invalid_result", "script_error"]
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ReplayResult(BaseModel):
-    """记录一次生成脚本的回放命令和通过状态。"""
+    """记录一次回放的状态、结构化错误与 Run 内相对证据路径。"""
 
     attempt: int
     command: CommandResult
     report_path: Path | None = None
     passed: bool = False
+    status: Literal["passed", "failed", "timed_out", "ineligible", "invalid_result"] = "failed"
+    exit_code: int | None = None
+    timed_out: bool = False
+    error: ReplayError | None = None
+    evidence_paths: list[str] = Field(default_factory=list)
+    generated_result_path: str | None = None
+    generated_result: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def populate_legacy_status(self) -> ReplayResult:
+        """从旧 ReplayResult 的 command/passed 补全退出码、超时和状态。"""
+        if self.exit_code is None:
+            self.exit_code = self.command.returncode
+        self.timed_out = self.timed_out or self.command.timed_out
+        if self.timed_out:
+            self.status = "timed_out"
+        elif self.passed and self.status == "failed":
+            self.status = "passed"
+        return self
 
 
 class RunEvent(BaseModel):
@@ -378,7 +437,44 @@ class RunTrace(BaseModel):
     events: list[RunEvent] = Field(default_factory=list)
     generated: GeneratedArtifact | None = None
     replays: list[ReplayResult] = Field(default_factory=list)
+    agent_outcome: Literal["completed", "failed", "stopped", "unknown"] = "unknown"
+    agent_error: str | None = None
+    replay_status: Literal["not_requested", "not_eligible", "pending", "passed", "failed", "partial"] = "not_requested"
+    replay_total: int = 0
+    replay_completed: int = 0
+    replay_passed: int = 0
     error: str | None = None
+
+    @model_validator(mode="after")
+    def populate_compatibility_summary(self) -> RunTrace:
+        """从旧 Trace 的 state/error/replays 补全新汇总字段。"""
+        legacy_replay_failure = (
+            self.state == RunState.FAILED_SCRIPT
+            and bool(self.actions)
+            and self.actions[-1].tool == ToolName.FINISH
+            and self.actions[-1].success
+        )
+        if self.agent_outcome == "unknown":
+            if self.state == RunState.COMPLETED or legacy_replay_failure:
+                self.agent_outcome = "completed"
+            elif self.state == RunState.STOPPED_BY_USER:
+                self.agent_outcome = "stopped"
+            elif self.state in TERMINAL_STATES:
+                self.agent_outcome = "failed"
+        if self.agent_error is None and self.error and not legacy_replay_failure:
+            self.agent_error = self.error
+        if self.replays:
+            if self.replay_total == 0:
+                self.replay_total = len(self.replays)
+            self.replay_completed = len(self.replays)
+            self.replay_passed = sum(item.passed for item in self.replays)
+            if self.replay_passed == self.replay_total and self.replay_completed == self.replay_total:
+                self.replay_status = "passed"
+            elif self.replay_passed:
+                self.replay_status = "partial"
+            elif self.replay_completed:
+                self.replay_status = "failed"
+        return self
 
 
 class VisionElement(BaseModel):

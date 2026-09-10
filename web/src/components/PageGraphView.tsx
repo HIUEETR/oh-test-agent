@@ -79,12 +79,16 @@ const styles: Record<string, CSSProperties> = {
   imageFallback: {
     width: "100%",
     height: "100%",
-    display: "grid",
-    placeItems: "center",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
     color: "#7890a8",
     background: "linear-gradient(135deg, #0a1726, #122a42)",
     fontSize: 12,
   },
+  retryButton: { minHeight: 30, padding: "0 10px", border: "1px solid #456682", borderRadius: 8, color: "#eff8ff", background: "#1a304b", cursor: "pointer" },
   nodeBody: { display: "flex", flexDirection: "column", gap: 6, padding: "11px 13px" },
   state: {
     color: "#35d6a4",
@@ -176,16 +180,18 @@ const styles: Record<string, CSSProperties> = {
 
 function ImageWithFallback({ src, alt, large = false }: { src: string; alt: string; large?: boolean }) {
   const [failed, setFailed] = useState(false);
+  const [revision, setRevision] = useState(0);
 
-  useEffect(() => setFailed(false), [src]);
+  useEffect(() => { setFailed(false); setRevision(0); }, [src]);
 
   if (!src || failed) {
-    return <div style={styles.imageFallback}>图片加载失败</div>;
+    return <div style={styles.imageFallback} role="alert"><span>图片加载失败</span><button type="button" style={styles.retryButton} onClick={() => { setFailed(false); setRevision((value) => value + 1); }}>重试图片</button></div>;
   }
 
   return (
     <img
-      src={src}
+      key={`${src}-${revision}`}
+      src={`${src}${src.includes("?") ? "&" : "?"}revision=${revision}`}
       alt={alt}
       draggable={false}
       style={large ? styles.panelImage : styles.thumbnail}
@@ -229,7 +235,8 @@ function mergeNodes(
   const previousById = new Map(currentNodes.map((node) => [node.id, node]));
   const merged = graphNodes.map((page, index) => {
     const previous = previousById.get(page.node_id);
-    const imageUrl = page.image_path ? artifactUrl(page.image_path) : "";
+    const path = page.artifact_path || page.image_path || "";
+    const imageUrl = path ? artifactUrl(path) : "";
     const selected = page.node_id === selectedId;
     if (
       previous
@@ -239,6 +246,7 @@ function mergeNodes(
       && previous.data.page.snapshot_id === page.snapshot_id
       && previous.data.page.title === page.title
       && previous.data.page.page_path === page.page_path
+      && previous.data.page.artifact_path === page.artifact_path
       && previous.data.page.image_path === page.image_path
       && previous.data.page.element_count === page.element_count
       && previous.data.page.discovered_order === page.discovered_order
@@ -397,7 +405,7 @@ export default function PageGraphView({ runId, graph, artifactUrl }: PageGraphVi
           <button type="button" style={styles.closeButton} aria-label="关闭页面详情" onClick={() => setSelectedId(null)}>关闭</button>
           <div className="page-graph-detail-image" style={styles.panelImageFrame}>
             <ImageWithFallback
-              src={selectedPage.image_path ? artifactUrl(selectedPage.image_path) : ""}
+              src={selectedPage.artifact_path || selectedPage.image_path ? artifactUrl(selectedPage.artifact_path || selectedPage.image_path || "") : ""}
               alt={`${selectedPage.title} 页面大图`}
               large
             />
@@ -439,4 +447,3 @@ export default function PageGraphView({ runId, graph, artifactUrl }: PageGraphVi
     </section>
   );
 }
-
