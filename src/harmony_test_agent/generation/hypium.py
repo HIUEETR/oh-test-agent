@@ -17,8 +17,20 @@ class HypiumGenerator:
     def __init__(self, artifacts: ArtifactStore):
         self.artifacts = artifacts
 
-    def generate(self, trace: RunTrace, profile: TargetAppProfile) -> GeneratedArtifact:
-        """生成单次运行的回放文件，并记录坐标降级和文件摘要。"""
+    def generate(self, trace: RunTrace, profile: TargetAppProfile | None = None) -> GeneratedArtifact:
+        """仅从 Trace 冻结的 Profile 生成回放；旧 Trace 可显式传入一次兼容快照。"""
+        if trace.provisional:
+            raise ValueError("provisional RunTrace cannot generate a formal Hypium case")
+        frozen = getattr(trace, "profile_snapshot", None)
+        if frozen is None and profile is not None:
+            trace.profile_snapshot = profile.model_copy(deep=True)
+            frozen = trace.profile_snapshot
+        if frozen is None:
+            raise ValueError("RunTrace does not contain a frozen profile_snapshot")
+        profile = frozen
+        application_assertions = [item for item in trace.assertions if item.passed and item.target]
+        if not application_assertions:
+            raise ValueError("generated Hypium case requires at least one application-level UI assertion")
         output_dir = self.artifacts.run_dir(trace.run_id) / "generated"
         safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", trace.run_id)
         python_path = output_dir / f"test_{safe_id}.py"
@@ -40,6 +52,8 @@ class HypiumGenerator:
             "timeout_seconds": 300,
             "generated_from_run_id": trace.run_id,
             "warnings": warnings,
+            "application_assertion_count": sum(1 for item in trace.assertions if item.passed),
+            "validated_resolutions": profile.device_compatibility.validated_resolutions,
         }
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         metadata = {
@@ -60,6 +74,8 @@ class HypiumGenerator:
                 )
             ),
             "warnings": warnings,
+            "application_assertion_count": sum(1 for item in trace.assertions if item.passed),
+            "coordinate_constraints": profile.device_compatibility.model_dump(mode="json"),
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return GeneratedArtifact(
@@ -83,7 +99,10 @@ class HypiumGenerator:
             if tool in {ToolName.INSPECT_SCREEN, ToolName.FINISH}:
                 continue
             if tool == ToolName.OPEN_APP:
-                if profile.reset_strategy.get("kind") == "stop_then_start_only":
+                if profile.reset_strategy.get("kind") in {
+            "stop_then_start_only",
+            "stop_start_then_navigation_restore",
+        }:
                     lines.append("        driver.stop_app(BUNDLE_NAME)")
                 lines.append("        driver.start_app(BUNDLE_NAME, MAIN_ABILITY)")
             elif tool == ToolName.CLICK_ELEMENT:
@@ -110,21 +129,38 @@ class HypiumGenerator:
                 lines.append("        driver.go_back()")
             elif tool == ToolName.WAIT:
                 lines.append(f"        driver.wait({float(action.params.get('wait_seconds') or 1)!r})")
-            elif tool in {ToolName.ASSERT_VISIBLE, ToolName.ASSERT_TEXT}:
+            elif tool == ToolName.ASSERT_VISIBLE:
                 target = action.params.get("target") or action.params.get("text")
-                selector = self._selector(action.locator, target, warnings)
+                if not action.locator and target not in {"内容", "content"}:
+                    raise ValueError(f"{action.step_id}: assertion target was not observed in the UI")
+                if action.locator:
+                    selector = self._selector(action.locator, target, warnings)
+                else:
+                    stable = self._first_stable_locator(trace)
+                    if not stable:
+                        raise ValueError(f"{action.step_id}: assertion has no replayable application locator")
+                    selector = stable
+                    warnings.append(f"{action.step_id}: generic content assertion uses an observed stable locator")
                 lines.append(f"        driver.check_component_exist({selector}, expect_exist=True)")
+            elif tool == ToolName.ASSERT_TEXT:
+                expected = action.params.get("text") or action.params.get("target")
+                locator = action.locator or LocatorCandidate(kind=LocatorKind.TEXT, value=str(expected), score=0.8)
+                selector = self._selector(locator, action.params.get("target"), warnings)
+                lines.append(f"        component = driver.find_component({selector})")
+                lines.append(f"        assert component is not None, {expected!r}")
+                lines.append(f"        assert {expected!r} in str(component.get_text()), 'expected text is not visible'")
             elif tool == ToolName.ASSERT_NOT_VISIBLE:
+                if not action.locator:
+                    raise ValueError(f"{action.step_id}: negative assertion requires an observed stable locator")
                 selector = self._selector(action.locator, action.params.get("target"), warnings)
                 lines.append(f"        driver.check_component_exist({selector}, expect_exist=False)")
-        if not any("check_component" in line for line in lines):
+        if not any("check_component" in line or "component.get_text" in line for line in lines):
             stable = self._first_stable_locator(trace)
             if stable:
                 lines.append(f"        driver.check_component_exist({stable}, expect_exist=True)")
                 warnings.append("generated a fallback assertion from an observed stable locator")
             else:
-                lines.append("        assert driver.device_sn, 'Hypium driver did not connect to a device'")
-                warnings.append("no stable UI assertion was available; generated a connection assertion")
+                raise ValueError("generated Hypium case requires at least one application-level UI assertion")
         return lines
 
     @staticmethod
@@ -150,17 +186,19 @@ class HypiumGenerator:
                 method = "key" if locator.kind == LocatorKind.KEY else "id"
                 dynamic = re.fullmatch(r"(.+_)\d{8,}", locator.value)
                 if dynamic:
-                    prefix = dynamic.group(1)
-                    warnings.append(f"dynamic {method} {locator.value!r} generalized to prefix {prefix!r}")
-                    return f"BY.{method}({prefix!r}, MatchPattern.STARTS_WITH)"
+                    raise ValueError(
+                        f"dynamic {method} {locator.value!r} was not validated as a unique prefix locator"
+                    )
                 return f"BY.{method}({locator.value!r})"
             if locator.kind == LocatorKind.TEXT:
                 return f"BY.text({locator.value!r})"
             if locator.kind == LocatorKind.TYPE_TEXT:
                 type_name, _, text = locator.value.partition("|")
                 return f"BY.type({type_name!r}).text({text!r})"
-        warnings.append(f"semantic target {target!r} fell back to exact text")
-        return f"BY.text({target or ''!r})"
+        if target:
+            warnings.append(f"semantic target {target!r} uses a Profile-backed exact text selector")
+            return f"BY.text({target!r})"
+        raise ValueError("semantic target is empty and has no observed replayable locator")
 
     @staticmethod
     def _first_stable_locator(trace: RunTrace) -> str | None:

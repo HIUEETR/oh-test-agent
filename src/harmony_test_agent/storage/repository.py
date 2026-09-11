@@ -32,7 +32,8 @@ class RunRepository:
                     target_app_id TEXT NOT NULL,
                     task TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    trace_json TEXT NOT NULL
+                    trace_json TEXT NOT NULL,
+                    target_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS events (
                     run_id TEXT NOT NULL,
@@ -43,6 +44,9 @@ class RunRepository:
                     PRIMARY KEY (run_id, event_id)
                 );
             """)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+            if "target_json" not in columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN target_json TEXT")
 
     def save_trace(self, trace: RunTrace) -> None:
         """新增或更新运行轨迹及其可检索摘要。"""
@@ -50,12 +54,15 @@ class RunRepository:
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO runs(run_id, state, target_app_id, task, updated_at, trace_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO runs(run_id, state, target_app_id, task, updated_at, trace_json, target_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     state=excluded.state,
                     updated_at=excluded.updated_at,
-                    trace_json=excluded.trace_json
+                    target_app_id=excluded.target_app_id,
+                    task=excluded.task,
+                    trace_json=excluded.trace_json,
+                    target_json=excluded.target_json
                 """,
                 (
                     trace.run_id,
@@ -64,6 +71,7 @@ class RunRepository:
                     trace.task,
                     utc_now().isoformat(),
                     trace.model_dump_json(),
+                    trace.resolved_target.model_dump_json() if getattr(trace, "resolved_target", None) else None,
                 ),
             )
 

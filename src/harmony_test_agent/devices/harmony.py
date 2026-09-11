@@ -16,6 +16,13 @@ from PIL import Image
 
 from ..models import CommandResult, ScreenSnapshot, TargetAppProfile
 from ..perception.normalizer import normalize_layout, page_path
+from ..targets.catalog import (
+    ForegroundApp,
+    InstalledApp,
+    parse_bundle_list,
+    parse_foreground_hierarchy,
+    parse_installed_app,
+)
 from .base import DeviceAdapter, DeviceError
 
 
@@ -27,6 +34,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         self.hdc_path = self._find_hdc(hdc_path)
         self.timeout = timeout
         self.connected = False
+        self.last_catalog_raw = ""
 
     @staticmethod
     def _find_hdc(configured: str | None) -> str:
@@ -183,14 +191,73 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         output_path.write_text(result.stdout[-200_000:] + result.stderr[-20_000:], encoding="utf-8")
         return result
 
+    def list_installed_apps(self) -> list[InstalledApp]:
+        """Enumerate installed bundles and inspect each one using Bundle Manager."""
+        result = self._run("shell", "bm", "dump", "-a")
+        if not result.ok:
+            raise DeviceError(f"bm dump -a failed: {result.stderr or result.stdout}")
+        self.last_catalog_raw = result.stdout
+        apps: list[InstalledApp] = []
+        failures: list[str] = []
+        for bundle_name in parse_bundle_list(result.stdout):
+            try:
+                apps.append(self.inspect_app(bundle_name))
+            except DeviceError as exc:
+                failures.append(str(exc))
+        if failures and not apps:
+            raise DeviceError("installed app catalog could not be parsed: " + "; ".join(failures[:5]))
+        return sorted(apps, key=lambda app: app.bundle_name)
+
+    def inspect_app(self, bundle_name: str) -> InstalledApp:
+        """Read one application's label, Ability, version and signature metadata."""
+        result = self._run("shell", "bm", "dump", "-n", bundle_name)
+        if not result.ok:
+            raise DeviceError(f"bm dump -n {bundle_name} failed: {result.stderr or result.stdout}")
+        try:
+            return parse_installed_app(result.stdout, expected_bundle=bundle_name)
+        except ValueError as exc:
+            raise DeviceError(f"bm metadata for {bundle_name} is ambiguous: {exc}") from exc
+
+    def find_installed_apps(self, label: str) -> list[InstalledApp]:
+        """Use ``bm dump -l`` as an accelerator, then verify every bundle via ``-n``."""
+        result = self._run("shell", "bm", "dump", "-l", label)
+        bundles = parse_bundle_list(result.stdout) if result.ok else []
+        candidates: list[InstalledApp] = []
+        for bundle_name in bundles:
+            try:
+                candidates.append(self.inspect_app(bundle_name))
+            except DeviceError:
+                continue
+        return candidates or super().find_installed_apps(label)
+
+    def current_foreground_app(self) -> ForegroundApp | None:
+        """Resolve the current foreground Bundle and Ability from the UI hierarchy."""
+        return parse_foreground_hierarchy(self.collect_ui_hierarchy())
+
+    def start_app(
+        self,
+        bundle_name: str,
+        ability_name: str,
+        module_name: str | None = None,
+    ) -> CommandResult:
+        """Start a resolved Ability, optionally constraining the module when supplied."""
+        args = ["shell", "aa", "start", "-b", bundle_name, "-a", ability_name]
+        if module_name:
+            args.extend(["-m", module_name])
+        return self._run(*args)
+
+    def stop_app(self, bundle_name: str) -> CommandResult:
+        """Force-stop an application without deleting its state."""
+        return self._run("shell", "aa", "force-stop", bundle_name)
     def open_app(self, profile: TargetAppProfile, reset: bool = False) -> CommandResult:
         """按目标应用配置启动 Ability，并在要求时先执行受支持的重置策略。"""
         if reset:
-            stopped = self._run("shell", "aa", "force-stop", profile.bundle_name)
+            stopped = self.stop_app(profile.bundle_name)
             if not stopped.ok:
                 return stopped
             time.sleep(1)
-        return self._run("shell", "aa", "start", "-b", profile.bundle_name, "-a", profile.main_ability)
+        module_name = profile.launch_strategy.get("module_name") if profile.launch_strategy else None
+        return self.start_app(profile.bundle_name, profile.main_ability, module_name)
 
     def click(self, x: int, y: int) -> CommandResult:
         """在设备屏幕的绝对像素坐标执行一次点击。"""

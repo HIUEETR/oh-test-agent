@@ -13,6 +13,22 @@
 - **Hypium 确定性生成。** Python 使用固定模板，JSON 只写已验证字段；模型不能自由生成可执行代码。
 - **运行产物不进入 Git。** Git 只管理 `artifacts/README.md`；经筛选的稳定 fixture 放在 `tests/fixtures/`。
 
+## Agent 与模型配置
+
+当前系统属于受控 UI 测试 Agent：编排器维护计划、页面状态和运行证据，模型每轮只输出一个结构化决策，HDC 与 Hypium 由白名单适配器执行。`AGENT_MODEL` 负责规划，`AGENT_VISION_MODEL` 负责截图理解和逐步决策；后者留空时自动复用前者，因此一个支持图像和结构化输出的模型即可覆盖全流程。两个阶段通过 `PlanResult`、`ScreenSnapshot` 和 `ToolDecision` 通信，没有模型间的直接聊天。
+
+当前每次模型调用都是独立请求，没有项目侧 Prompt Cache、共享消息历史或命中率指标。把两个配置统一为同一模型可以减少模型切换，但缓存是否命中仍由兼容服务和请求前缀稳定性决定，不能仅凭统一模型名推断命中率提升。
+## 无预置 Profile 的应用发现
+
+新运行可以只提供应用名称或 `bundleName`。系统通过 `bm dump` 解析已安装应用，以 `aa start` 启动并进行有界探索，生成 `draft → candidate → verified` Profile。探索默认限制为 20 个页面、每页 8 个动作、15 分钟；登录、授权、提交、发布和下载需要逐项启用，支付、删除、卸载和清除数据始终禁止。
+
+```powershell
+uv run main.py run --app "示例应用" --task "打开设置并验证版本信息" --execute
+uv run main.py run --bundle-name com.example.app --task "验证首页" --execute
+```
+
+已有 `TARGET_PROFILE_PATH` 和 `--target-app` 继续作为兼容入口，并会输出弃用提示。Profile 验证要求三轮独立启动下至少 3 个可重复页面、3 类交互、3 个稳定定位器和 2 个应用级断言；随后三次 Hypium Driver 回放全部通过才自动晋级 `verified`。运行轨迹冻结目标与 Profile 快照，历史 Run 重新生成时不会读取后来变化的全局 Profile。
+
 ## 已实现能力
 
 - `HarmonyDeviceAdapter`：连接、健康检查、启动应用、截图、`file recv`、布局、日志、点击、输入、滑动、返回和等待。

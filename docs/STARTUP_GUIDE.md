@@ -684,3 +684,23 @@ $finalRun = 'run-20260909T140205Z-e9ada52e'
 - Web：真实浏览器检查 live/graph/script/report，页面图 19 节点、脚本 3 条告警、报告 iframe 正常；1440px 和 375px 均无横向溢出，浏览器控制台和请求失败为 0。
 - Web 回放：浏览器按钮触发 `POST /execute?attempts=3`，API 返回 200，3 次均成功。
 - 自动门禁：33 passed、1 skipped（显式 live 测试默认跳过）；Ruff、uv lock、Vite build、`git diff --check` 全部通过。
+
+
+## 17. 测试陌生应用并自动生成 Profile
+
+设备已安装应用后，不需要先编写 `profiles/*.json`：
+
+```powershell
+uv run main.py run --app "应用显示名称" --task "启动应用，探索可达页面，验证返回和重启恢复" --execute
+# 显示名有多个匹配时，使用返回的 bundleName 精确重试
+uv run main.py run --bundle-name com.example.app --task "验证首页和设置页" --execute
+```
+
+默认允许普通导航、滑动、返回、固定测试文本输入和只读断言。按需添加 `--allow-login`、`--allow-permission`、`--allow-submit`、`--allow-publish`、`--allow-download`；支付、删除、卸载和清除数据没有开放开关。可用 `--max-pages`、`--max-actions-per-page` 和 `--max-duration` 收紧探索上限。
+
+运行目录保存 catalog 原始输出、启动探测、截图、布局、页面图、动作与门禁结果。Profile 先写 draft，三轮设备验证后写 candidate，三次 Hypium Driver 回放均通过后自动写 verified。正式 Profile 可通过 API 锁定；更新时保存时间戳历史备份。`TARGET_PROFILE_PATH` 仍可显式使用旧 Profile。当前执行模式为 Hypium Driver；DevEco Testing 测试工程模式继续标记为 `not_validated`。
+
+
+### Profile 管理 API
+
+`GET /api/profiles` 查看 draft、candidate、verified；`POST /api/profiles/{id}/verify` 发起复验 Run；`POST /api/profiles/{id}/lock` 切换自动覆盖锁；`POST /api/profiles/{id}/rollback` 从校验过的历史版本原子回退。名称消歧使用 `POST /api/runs/{run_id}/target-selection`，仅接受该 Run 已返回候选集合中的精确 `bundle_name`。

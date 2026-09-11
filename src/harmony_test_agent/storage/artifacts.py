@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..models import RunTrace, TargetAppProfile
+from ..profiles.compat import load_compatible_profile
 
 
 class ArtifactStore:
@@ -45,4 +46,4 @@ class ArtifactStore:
     @staticmethod
     def load_profile(path: Path) -> TargetAppProfile:
         """从 JSON 文件读取并校验目标应用配置。"""
-        return TargetAppProfile.model_validate_json(path.read_text(encoding="utf-8-sig"))
+        return load_compatible_profile(path)

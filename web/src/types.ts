@@ -1,4 +1,4 @@
-// 本文件描述前端实际消费的 API JSON 子集；字段命名保持后端序列化格式，避免在网络边界重复映射。
+// 本文件描述前端实际消费的 API JSON 子集；字段命名保持后端序列化格式。
 export type Health = {
   status: string;
   model: { configured: boolean; vision_configured: boolean; provider: string };
@@ -7,19 +7,16 @@ export type Health = {
 };
 
 export type RunEvent = {
-  // event_id 只保证在同一 run_id 内单调递增，前端据此合并 SSE 历史事件和实时事件。
   event_id: number;
   run_id: string;
   type: string;
   timestamp: string;
   message: string;
-  // 不同事件拥有不同负载，读取方必须先根据 type 收窄，不能在边界处假定具体结构。
   payload: Record<string, unknown>;
 };
 
 export type Snapshot = {
   snapshot_id: string;
-  // 后端持久化绝对文件路径，展示前需由 artifactUrl 转换为当前 Run 的产物接口 URL。
   image_path: string;
   width: number;
   height: number;
@@ -37,11 +34,80 @@ export type Snapshot = {
   }>;
 };
 
+export type TargetCandidate = {
+  candidate_id?: string;
+  target_app_id?: string;
+  lifecycle?: string;
+  display_name?: string;
+  app_name?: string;
+  bundle_name: string;
+  main_ability?: string;
+  version_name?: string;
+  version_code?: string | number;
+};
+
+export type ProfileSummary = {
+  profile_id: string;
+  target_app_id?: string;
+  lifecycle?: string;
+  display_name?: string;
+  bundle_name?: string;
+  main_ability?: string;
+  version_name?: string;
+  version_code?: string | number;
+  status: "draft" | "candidate" | "verified" | "invalid" | string;
+  locked: boolean;
+  quick_verification?: { passed?: boolean; checked_at?: string; reason?: string };
+  history?: Array<{ backup_name: string; created_at?: string }>;
+};
+
+export type DiscoveryPolicy = {
+  enabled: boolean;
+  allow_login: boolean;
+  allow_permission: boolean;
+  allow_submit: boolean;
+  allow_publish: boolean;
+  allow_download: boolean;
+  max_pages: number;
+  max_actions_per_page: number;
+  max_duration_seconds: number;
+  temporary_test: boolean;
+};
+
+export type DiscoveryStatus = {
+  phase?: "bootstrap" | "task";
+  provisional?: boolean;
+  profile_status?: string;
+  profile_status_at_start?: string;
+  profile_snapshot?: ProfileSummary;
+  resolved_target?: TargetCandidate;
+  target_candidates?: TargetCandidate[];
+  pages_discovered?: number;
+  actions_executed?: number;
+  remaining_seconds?: number;
+  blocked_paths?: Array<string | { reason?: string; label?: string; risk_reason?: string; target_text?: string }>;
+  locator_candidates?: unknown[];
+  assertion_candidates?: unknown[];
+  validation_rounds?: Array<{ round_number: number; passed: boolean; failures?: string[] }>;
+  replays?: Array<{ attempt: number; passed: boolean }>;
+  gates?: Record<string, boolean | number | string>;
+};
+
 export type RunTrace = {
-  // RunTrace 是轮询接口返回的聚合快照；数组内容会随 Agent 执行持续追加。
   run_id: string;
+  target_app_id: string;
   task: string;
   state: string;
+  phase?: "bootstrap" | "task";
+  provisional?: boolean;
+  profile_status_at_start?: string;
+  profile_snapshot?: ProfileSummary;
+  resolved_target?: TargetCandidate;
+  target_candidates?: TargetCandidate[];
+  discovery_result?: Record<string, unknown>;
+  verification_result?: Record<string, unknown>;
+  profile_validation_replays?: Array<{ attempt: number; passed: boolean }>;
+  discovery?: DiscoveryStatus;
   mode: string;
   model_used: string;
   model_mock: boolean;
@@ -58,7 +124,6 @@ export type RunTrace = {
   }>;
   assertions: Array<{ kind: string; target: string; passed: boolean; message: string }>;
   graph: {
-    // 图节点是已去重的页面状态，不与 snapshots 保持一一对应关系。
     nodes: Array<{
       node_id: string;
       title: string;
@@ -68,7 +133,6 @@ export type RunTrace = {
       element_count: number;
       discovered_order: number;
     }>;
-    // 边的 source/target 引用上方 node_id，前端转换时必须保留该标识。
     edges: Array<{
       edge_id: string;
       source: string;
@@ -77,14 +141,12 @@ export type RunTrace = {
       target_description: string;
     }>;
   };
-  // 脚本生成前该字段缺省；脚本文本和配置通过独立的 script 接口获取。
   generated?: { warnings: string[] };
   replays: Array<{ attempt: number; passed: boolean }>;
 };
 
 export type ScriptResult = {
   python: string;
-  // 配置结构由生成器决定，消费方应在读取具体键前执行运行时收窄。
   config: Record<string, unknown>;
   warnings: string[];
 };

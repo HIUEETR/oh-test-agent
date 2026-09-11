@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..models import ScreenSnapshot, ToolDecision, ToolName
+from ..models import ExplorationPolicy, ScreenSnapshot, ToolDecision, ToolName
 
 
 class SafetyError(RuntimeError):
@@ -15,41 +15,54 @@ class SafetyError(RuntimeError):
 
 @dataclass(slots=True)
 class SafetyPolicy:
-    """拦截敏感操作，并校验坐标点击和等待时长等执行边界。"""
+    """执行确定性的三级安全策略，模型不能解除永久禁用项。"""
 
-    blocked_terms: tuple[str, ...] = (
-        "支付",
-        "付款",
-        "购买",
-        "删除",
-        "卸载",
-        "授权",
-        "允许权限",
-        "验证码",
-        "登录",
-        "注册",
-        "payment",
-        "purchase",
-        "delete",
-        "uninstall",
-        "grant permission",
-        "captcha",
-        "login",
-        "register",
-    )
+    exploration_policy: ExplorationPolicy | None = None
     min_target_area: int = 16
 
+    always_blocked: tuple[str, ...] = (
+        "支付", "付款", "购买", "确认购买", "删除", "移除", "卸载", "清除数据", "恢复出厂", "系统设置",
+        "payment", "pay now", "purchase", "delete", "remove", "uninstall", "clear data", "factory reset", "system settings",
+    )
+    gated_terms: dict[str, tuple[str, ...]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.gated_terms is None:
+            self.gated_terms = {
+                "allow_login": ("登录", "登陆", "注册", "login", "sign in", "register"),
+                "allow_permission": ("授权", "允许权限", "permission", "authorize", "allow access"),
+                "allow_submit": ("提交", "发送", "确认", "submit", "send", "confirm"),
+                "allow_publish": ("发布", "发表", "publish", "post"),
+                "allow_download": ("下载", "保存到本地", "download", "save file"),
+            }
+
+    def _blocked_match(self, text: str) -> str | None:
+        lowered = text.casefold()
+        permanent = next((term for term in self.always_blocked if term.casefold() in lowered), None)
+        if permanent:
+            return permanent
+        credentials = (
+            "密码", "验证码", "password", "captcha", "otp", "passcode", "pin",
+        )
+        credential = next((term for term in credentials if term.casefold() in lowered), None)
+        if credential:
+            return credential
+        policy = self.exploration_policy
+        for permission, terms in (self.gated_terms or {}).items():
+            if not bool(policy and getattr(policy, permission, False)):
+                match = next((term for term in terms if term.casefold() in lowered), None)
+                if match:
+                    return match
+        return None
+
     def validate_task(self, task: str) -> None:
-        """拒绝包含敏感操作词的自然语言任务。"""
-        lowered = task.casefold()
-        match = next((term for term in self.blocked_terms if term.casefold() in lowered), None)
+        match = self._blocked_match(task)
         if match:
             raise SafetyError(f"task contains blocked operation: {match}")
 
     def validate_decision(self, decision: ToolDecision, snapshot: ScreenSnapshot | None) -> None:
-        """在执行前校验工具文本、坐标依赖与等待上限。"""
-        text = " ".join(filter(None, (decision.target, decision.text))).casefold()
-        match = next((term for term in self.blocked_terms if term.casefold() in text), None)
+        text = " ".join(filter(None, (decision.target, decision.text)))
+        match = self._blocked_match(text)
         if match:
             raise SafetyError(f"tool decision contains blocked operation: {match}")
         if decision.tool == ToolName.CLICK_COORDINATE:

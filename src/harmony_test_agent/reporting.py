@@ -67,6 +67,16 @@ img { display: block; max-width: 420px; max-height: 620px; object-fit: contain; 
 .ok { color: #61d6a3; } .bad { color: #ff7c8e; } code { color: #86d8ff; }
 """
         error = html.escape(trace.error or "")
+        target = trace.resolved_target.model_dump(mode="json") if trace.resolved_target else {}
+        profile = trace.profile_snapshot.model_dump(mode="json") if trace.profile_snapshot else {}
+        discovery = trace.discovery_result or {}
+        verification = trace.verification_result or {}
+        gate_markup = f"""<section class="summary"><h2>Profile bootstrap</h2>
+<p>阶段：<b>{html.escape(trace.phase)}</b> · Profile：<b>{html.escape(str(profile.get('status') or 'none'))}</b>
+· 临时结果：<b>{'是' if trace.provisional else '否'}</b></p>
+<p>目标：<code>{html.escape(str(target.get('bundle_name') or trace.target_app_id))}</code>
+· 探索页面：{len(discovery.get('pages', []))} · 验证轮次：{len(verification.get('rounds', []))}
+· Profile Hypium 回放：{len(trace.profile_validation_replays)}</p></section>"""
         return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width">
@@ -81,5 +91,6 @@ img { display: block; max-width: 420px; max-height: 620px; object-fit: contain; 
 <div class="metric">动作<br><b>{len(trace.actions)}</b></div>
 <div class="metric">断言<br><b>{len(trace.assertions)}</b></div></div>
 <p class="bad">{error}</p></section>
+{gate_markup}
 {cards}
 </main></body></html>"""

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 
+from pydantic import BaseModel, Field
+
 from ..config import Settings
 from ..models import (
     PlannedStep,
@@ -15,6 +17,30 @@ from ..models import (
     ToolName,
     VisionObservation,
 )
+
+
+
+class PlanningContext(BaseModel):
+    """Minimal immutable application context exposed to the planner."""
+
+    target_app_id: str
+    display_name: str
+    bundle_name: str
+    main_ability: str
+    stable_locator_names: list[str] = Field(default_factory=list)
+    known_limitations: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_profile(cls, profile: TargetAppProfile) -> "PlanningContext":
+        return cls(
+            target_app_id=profile.target_app_id,
+            display_name=profile.display_name,
+            bundle_name=profile.bundle_name,
+            main_ability=profile.main_ability,
+            stable_locator_names=[item.name for item in profile.stable_locator_inventory],
+            known_limitations=list(profile.known_limitations),
+        )
+
 
 PLANNING_PROMPT = """You are an OpenHarmony UI test planner. Convert the user's task into no more than 20
 atomic steps. Only use these tools: inspect_screen, open_app, click_element, click_coordinate, input_text, swipe,
@@ -273,8 +299,9 @@ class OpenAICompatibleProvider(AgentProvider):
         from pydantic_ai import Agent
 
         agent = Agent(self._model(), output_type=PlanResult, system_prompt=PLANNING_PROMPT, retries=2)
+        context = PlanningContext.from_profile(profile)
         prompt = (
-            f"Target app: {profile.display_name} ({profile.bundle_name})\n"
+            f"Planning context: {context.model_dump_json()}\n"
             f"Maximum steps: {max_steps}\nUser task: {task}\n"
             "Set model_used to the configured model name and mock to false."
         )
