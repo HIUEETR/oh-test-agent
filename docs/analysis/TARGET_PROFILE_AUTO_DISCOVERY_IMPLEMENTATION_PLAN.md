@@ -161,6 +161,7 @@ class TargetQuery(BaseModel):
     app_name: str | None = None
     bundle_name: str | None = None
 
+
 class ExplorationPolicy(BaseModel):
     enabled: bool = True
     max_pages: int = 20
@@ -172,6 +173,7 @@ class ExplorationPolicy(BaseModel):
     allow_submit: bool = False
     allow_publish: bool = False
     allow_download: bool = False
+
 
 class ResolvedTarget(BaseModel):
     target_app_id: str
