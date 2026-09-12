@@ -18,6 +18,7 @@ uv lock --check
 .\.venv\Scripts\python.exe -m pytest -q
 Push-Location web
 npm run build
+npm run test
 Pop-Location
 git diff --check
 ```

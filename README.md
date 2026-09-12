@@ -4,6 +4,8 @@
 
 项目于 2026-09-09 完成真实模型、真实设备、Hypium 三次回放和 Web 全链路验收。详细安装与排错见 [docs/STARTUP_GUIDE.md](docs/STARTUP_GUIDE.md)。
 
+Web 控制台于 2026-09 完全重写（浅色玻璃拟态界面，旧版冻结在 `web-legacy/`）：实时展示大模型的规划、视觉理解、逐步决策与探索顾问对话留痕，配闭环流水线状态条、探索页面状态图、历史运行回看与 Profile 资产管理，详见 [web/README.md](web/README.md)。
+
 ## 核心原则
 
 - **模型负责理解与选择，不负责任意执行。** Agent 没有通用 Shell 工具。
@@ -202,6 +204,7 @@ uv lock --check
 .\.venv\Scripts\python.exe -m pytest -q
 Push-Location web
 npm run build
+npm run test
 Pop-Location
 git diff --check
 ```

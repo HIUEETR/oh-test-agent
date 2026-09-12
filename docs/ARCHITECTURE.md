@@ -275,9 +275,11 @@ SQLite 用于查询和 SSE；JSON/PNG/日志是可移植证据。它们全部被
 
 FastAPI 提供健康、设备、Run 创建/停止/查询、SSE、Graph、Script、Report、Generate、Execute 和安全产物下载。
 
-SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关闭。React 控制台使用 EventSource 展示事件，同时轮询 Run Trace；页面图使用 React Flow，报告使用 iframe，脚本页可通过 API 触发 3 次回放。
+SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关闭。Web 控制台（`web/`，2026-09 完全重写；旧版冻结于 `web-legacy/`）基于 React 19 + TypeScript + Vite + zustand，按 feature 分层（launcher/live/advisor/graph/script/profiles/report/runs/pipeline），API 访问集中在 `src/api/`（fetch 封装 + EventSource 封装），业务状态集中在 `src/stores/console.ts`。
 
-前端不依赖运行时外部字体 CDN，便于受限网络和离线开发。
+控制台用 EventSource 订阅全部事件类型并按 event_id 去重，同时串行轮询 Run Trace 与 discovery 快照；`src/utils/thought-aggregator.ts` 把事件流聚合为「计划/感知/决策/断言/顾问/页面/通知」思考块，驱动实时页的思考流与顶部闭环流水线状态条。页面图使用 React Flow：任务阶段渲染 `trace.graph`，探索型运行回退渲染 `discovery.pages/transitions` 构建的页面状态图。顾问对话页展示 `/discovery` 返回的 `advisor_log` 逐轮输入/输出留痕。报告使用 iframe，脚本页可通过 API 触发 1/3 次回放；历史运行列表来自 `GET /api/runs`。
+
+前端测试使用 vitest + Testing Library（`cd web && npm run test`），覆盖思考流聚合、Markdown 渲染（含 XSS 防护）、深链解析、流水线推导与组件冒烟。前端不依赖运行时外部字体 CDN，便于受限网络和离线开发。
 
 ## 14. 真实验收
 
