@@ -116,6 +116,51 @@ def test_advisor_falls_back_on_provider_failure(tmp_path: Path) -> None:
     assert verdict is None and source == "heuristic-fallback"
 
 
+def test_advisor_records_input_output_per_turn(tmp_path: Path) -> None:
+    """每次调用都应留痕输入 payload 与输出建议，供前端思考流与对话视图回放。"""
+    provider = RecordingProvider()
+    advisor = ExplorationAdvisor(provider, ExplorationPolicy())
+
+    advisor.advise(_snapshot(tmp_path, "/page/0"), [_action("btn-home")], "历史上下文摘要")
+
+    assert len(advisor.turns) == 1
+    record = advisor.turns[0]
+    assert record.turn == 1
+    assert record.source == "model"
+    assert record.page_path == "/page/0"
+    assert record.snapshot_path is not None and record.snapshot_path.endswith("screen.png")
+    assert "候选动作" in record.input
+    assert "btn-home" in record.input
+    assert "历史上下文摘要" in record.input
+    assert record.output is not None
+    assert record.output.page_summary == "page 1"
+    assert record.output.recommended == [0]
+    assert record.elapsed_ms is not None
+    assert advisor.turn_count == 1
+
+
+def test_advisor_records_failed_turns(tmp_path: Path) -> None:
+    """失败调用同样留痕：异常来源标记 error，返回空建议标记 heuristic-fallback。"""
+    fail_provider = RecordingProvider(fail=True)
+    advisor = ExplorationAdvisor(fail_provider, ExplorationPolicy())
+    advisor.advise(_snapshot(tmp_path), [_action("a")])
+
+    assert len(advisor.turns) == 1
+    failed = advisor.turns[0]
+    assert failed.source == "error"
+    assert failed.output is None
+    assert "advisor backend down" in (failed.error or "")
+    assert advisor.turn_count == 0  # 失败轮不计入成功对话轮数
+
+    none_provider = RecordingProvider(return_none=True)
+    advisor = ExplorationAdvisor(none_provider, ExplorationPolicy())
+    advisor.advise(_snapshot(tmp_path), [_action("a")])
+    none_turn = advisor.turns[0]
+    assert none_turn.source == "heuristic-fallback"
+    assert none_turn.error is None
+    assert none_turn.output is None
+
+
 def test_apply_advisor_reorders_and_avoids_content_clicks() -> None:
     from harmony_test_agent.discovery.explorer import BoundedExplorer
 

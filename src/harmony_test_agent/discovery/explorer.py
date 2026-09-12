@@ -19,6 +19,7 @@ from ..models import CommandResult, ExplorationPolicy, ScreenSnapshot, UIElement
 from ..perception.normalizer import normalize_layout, page_path
 from ..runtime.safety import SafetyPolicy
 from ..targets import ForegroundApp, ResolvedTarget
+from .advisor import AdvisorTurnRecord
 
 if TYPE_CHECKING:
     from .advisor import AdvisorVerdict, ExplorationAdvisor
@@ -95,6 +96,7 @@ class DiscoveryResult(BaseModel):
     blocked_actions: list[ExplorationAction] = Field(default_factory=list)
     advisor_turns: int = 0
     advisor_verdicts: list[dict[str, object]] = Field(default_factory=list)
+    advisor_log: list[AdvisorTurnRecord] = Field(default_factory=list)
     started_at_monotonic: float = Field(exclude=True, default=0)
     duration_seconds: float = 0
     stop_reason: str = "queue_exhausted"
@@ -206,7 +208,8 @@ class BoundedExplorer:
         self.progress = progress
         self.should_stop = should_stop or (lambda: False)
         self.advisor = advisor
-        self._advisor_verdicts: dict[str, tuple[AdvisorVerdict, str]] = {}
+        # 结构身份 -> (建议, 来源, 建议时的候选摘要)；候选摘要用于把编号建议映射回可读控件。
+        self._advisor_verdicts: dict[str, tuple[AdvisorVerdict, str, list[dict[str, object]]]] = {}
         self._advisor_summaries: list[str] = []
 
     def explore(self) -> DiscoveryResult:
@@ -383,9 +386,11 @@ class BoundedExplorer:
         result.duration_seconds = round(time.monotonic() - result.started_at_monotonic, 3)
         result.advisor_turns = self.advisor.turn_count if self.advisor else 0
         result.advisor_verdicts = [
-            {"identity": identity, "source": source, **verdict.model_dump()}
-            for identity, (verdict, source) in self._advisor_verdicts.items()
+            {"identity": identity, "source": source, "candidates": digest, **verdict.model_dump()}
+            for identity, (verdict, source, digest) in self._advisor_verdicts.items()
         ]
+        if self.advisor:
+            result.advisor_log = list(self.advisor.turns)
         self._save(result)
         self._save_observations(result)
         self._progress("finished", {"stop_reason": result.stop_reason, "pages": len(result.pages)})
@@ -442,7 +447,7 @@ class BoundedExplorer:
             return None, "heuristic"
         known = self._advisor_verdicts.get(page.structural_identity)
         if known is not None:
-            verdict, source = known
+            verdict, source, digest = known
             self._progress(
                 "advisor",
                 {
@@ -450,12 +455,15 @@ class BoundedExplorer:
                     "source": "reuse",
                     "turns": self.advisor.turn_count,
                     "verdict": verdict.model_dump(),
+                    "candidates": digest,
                 },
             )
             return verdict, "reuse"
+        turns_before = len(self.advisor.turns)
         verdict, source = self.advisor.advise(snapshot, candidates, self._advisor_context_note())
+        digest = self._candidate_digest(candidates)
         if verdict is not None:
-            self._advisor_verdicts[page.structural_identity] = (verdict, source)
+            self._advisor_verdicts[page.structural_identity] = (verdict, source, digest)
             summary = f"{page.page_path}: {verdict.page_summary or '（无摘要）'}"
             self._advisor_summaries.append(summary)
         self._progress(
@@ -465,9 +473,32 @@ class BoundedExplorer:
                 "source": source,
                 "turns": self.advisor.turn_count,
                 "verdict": verdict.model_dump() if verdict else None,
+                "candidates": digest,
             },
         )
+        # 把本轮（或异常兜底轮）LLM 调用的输入/输出留痕作为独立进度事件推送，供前端实时渲染思考流。
+        for record in self.advisor.turns[turns_before:]:
+            self._progress(
+                "advisor_turn",
+                {"page_id": page.page_id, "turn": record.model_dump(mode="json"), "candidates": digest},
+            )
         return verdict, source
+
+    @staticmethod
+    def _candidate_digest(candidates: list[ExplorationAction]) -> list[dict[str, object]]:
+        """候选动作的可读摘要：顾问的 recommended/avoid 编号即此列表的下标。"""
+        digest: list[dict[str, object]] = []
+        for index, action in enumerate(candidates):
+            locator = action.locator_value if action.locator_kind in {"key", "id"} else action.target_text
+            digest.append(
+                {
+                    "index": index,
+                    "kind": action.kind,
+                    "label": str(locator)[:60],
+                    "coordinate": list(action.coordinate) if action.coordinate else None,
+                }
+            )
+        return digest
 
     def _apply_advisor(
         self,
@@ -850,7 +881,8 @@ class BoundedExplorer:
 
     def _progress(self, kind: str, payload: dict[str, object]) -> None:
         if self.progress:
-            self.progress(kind, payload)
+            # 注入 stage 便于前端按阶段分发（advisor/advisor_turn/blocked/finished 等）。
+            self.progress(kind, {"stage": kind, **payload})
 
     def _assert_target_foreground(self) -> ForegroundApp:
         foreground = self.device.current_foreground_app()

@@ -1123,6 +1123,8 @@ class AgentOrchestrator:
                 "width": snapshot.width,
                 "height": snapshot.height,
                 "sha256": snapshot.image_sha256,
+                # 视觉模型对页面的理解摘要（mock 或分析失败时为占位说明），供前端思考流展示 LLM 输入理解。
+                "summary": snapshot.summary,
             },
         )
         emitter.emit(

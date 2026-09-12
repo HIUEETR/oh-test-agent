@@ -15,6 +15,7 @@ from harmony_test_agent.discovery import (
     ExplorationAction,
     ExplorationPolicy,
 )
+from harmony_test_agent.discovery.advisor import AdvisorTurnResult, AdvisorVerdict, ExplorationAdvisor
 from harmony_test_agent.models import CommandResult, ResolvedTarget, ScreenSnapshot
 from harmony_test_agent.perception.normalizer import normalize_layout, page_path
 from harmony_test_agent.runtime.safety import SafetyPolicy
@@ -203,6 +204,19 @@ def _explorer(tmp_path: Path, device: FakeDiscoveryDevice, **policy: object) -> 
     )
 
 
+class _StubAdvisorProvider:
+    """始终返回固定建议的顾问后端替身，用于探索流程中的留痕验证。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def advise_turn(self, history: list[object], screenshot: bytes, payload: str) -> AdvisorTurnResult:
+        del history, screenshot
+        self.calls += 1
+        verdict = AdvisorVerdict(page_summary=f"页面 {self.calls}", recommended=[0], avoid=[1], reason="结构优先")
+        return AdvisorTurnResult(verdict=verdict, history=["system-prompt", payload, verdict.model_dump_json()])
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -227,6 +241,57 @@ def test_explorer_enforces_page_and_per_page_action_limits_with_fake_device(tmp_
     home_transitions = [item for item in result.transitions if item.source_page_id == result.pages[0].page_id]
     assert len(home_transitions) == 2
     assert all(item.success for item in home_transitions)
+
+
+def test_candidate_digest_maps_indices_to_readable_labels() -> None:
+    """候选摘要必须保留编号语义：顾问 recommended/avoid 的下标即此列表下标。"""
+    key_action = ExplorationAction(action_id="a", kind="click", locator_kind="key", locator_value="btn_home")
+    text_action = ExplorationAction(action_id="b", kind="input", locator_kind="text", target_text="搜索框")
+    coord_action = ExplorationAction(action_id="c", kind="swipe", coordinate=(10, 20), direction="up")
+
+    digest = BoundedExplorer._candidate_digest([key_action, text_action, coord_action])
+
+    assert digest[0] == {"index": 0, "kind": "click", "label": "btn_home", "coordinate": None}
+    assert digest[1]["label"] == "搜索框"
+    assert digest[2]["coordinate"] == [10, 20]
+
+
+def test_explorer_streams_advisor_turn_events_and_persists_log(tmp_path: Path) -> None:
+    """探索过程应实时推送 advisor_turn 留痕事件，并把完整对话留痕持久化到结果。"""
+    device = FakeDiscoveryDevice(tmp_path, home_actions=2)
+    for state in range(3):  # 顾问会读取截图字节，预置假图片
+        (tmp_path / f"page-{state}.png").write_bytes(b"\x89PNG-fake")
+
+    progress_events: list[tuple[str, dict[str, object]]] = []
+    advisor = ExplorationAdvisor(_StubAdvisorProvider(), ExplorationPolicy(advisor_max_actions=2))
+    explorer = BoundedExplorer(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "discovery",
+        run_id="run-advisor-log",
+        policy=ExplorationPolicy(max_pages=2),
+        progress=lambda kind, payload: progress_events.append((kind, payload)),
+        advisor=advisor,
+    )
+
+    result = explorer.explore()
+
+    assert advisor.turns and result.advisor_turns == advisor.turn_count
+    assert len(result.advisor_log) == len(advisor.turns)
+    first = result.advisor_log[0]
+    assert first.source == "model"
+    assert first.output is not None and first.output.page_summary == "页面 1"
+    assert "候选动作" in first.input
+
+    advisor_events = [payload for kind, payload in progress_events if kind == "advisor"]
+    turn_events = [payload for kind, payload in progress_events if kind == "advisor_turn"]
+    assert advisor_events and turn_events
+    # 全部进度 payload 带 stage 标识，前端据此分发思考流阶段
+    assert all("stage" in payload for _, payload in progress_events)
+    digest = turn_events[0]["candidates"]
+    assert isinstance(digest, list) and digest and {"index", "kind", "label"} <= set(digest[0])
+    for entry in result.advisor_verdicts:
+        assert "candidates" in entry
 
 
 def test_risk_classifier_keeps_forbidden_actions_blocked_and_requires_explicit_opt_in() -> None:

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -29,6 +30,23 @@ class AdvisorTurnResult(BaseModel):
 
     verdict: AdvisorVerdict
     history: list[Any] = Field(default_factory=list)
+
+
+class AdvisorTurnRecord(BaseModel):
+    """一次顾问调用的输入/输出留痕，供前端思考流与对话视图回放。
+
+    input 是构造给模型的完整 payload 文本（含页面状态与编号候选列表），
+    output 是模型返回（或验证裁剪后）的结构化建议；失败调用也会留痕。
+    """
+
+    turn: int
+    page_path: str
+    snapshot_path: str | None = None
+    input: str = ""
+    output: AdvisorVerdict | None = None
+    source: str = "model"  # model / heuristic-fallback / error
+    error: str | None = None
+    elapsed_ms: float | None = None
 
 
 ADVISOR_PROMPT = """你是 OpenHarmony 自动探索顾问，帮助测试 agent 用尽量少的高价值交互摸清应用的主要页面结构。
@@ -57,6 +75,7 @@ class ExplorationAdvisor:
         self.history_turns = policy.advisor_history_turns
         self.turn_count = 0
         self._history: list[Any] = []
+        self.turns: list[AdvisorTurnRecord] = []
 
     def advise(
         self,
@@ -65,9 +84,13 @@ class ExplorationAdvisor:
         context_note: str = "",
     ) -> tuple[AdvisorVerdict | None, str]:
         """同步入口（explorer 运行在工作线程）。返回 (verdict | None, source)。"""
+        turns_before = len(self.turns)
         try:
             return asyncio.run(self._advise_async(snapshot, candidates, context_note))
-        except Exception:
+        except Exception as exc:
+            # _advise_async 内部失败时已留痕，这里只兜底记录事件循环等同步阶段的异常。
+            if len(self.turns) == turns_before:
+                self._record_error(snapshot, f"advisor loop failed: {exc}")
             return None, "heuristic-fallback"
 
     async def _advise_async(
@@ -77,12 +100,59 @@ class ExplorationAdvisor:
         context_note: str,
     ) -> tuple[AdvisorVerdict | None, str]:
         payload = self._page_payload(snapshot, candidates, context_note)
-        turn = await self.provider.advise_turn(list(self._history), snapshot.image_path.read_bytes(), payload)
+        started = time.perf_counter()
+        try:
+            image = snapshot.image_path.read_bytes()
+            turn = await self.provider.advise_turn(list(self._history), image, payload)
+        except Exception as exc:
+            self._record(snapshot, payload, None, "error", str(exc), started)
+            raise
         if turn is None:
+            self._record(snapshot, payload, None, "heuristic-fallback", None, started)
             return None, "heuristic-fallback"
         self._history = self._prune(turn.history)
         self.turn_count += 1
-        return self._validated(turn.verdict, len(candidates)), "model"
+        verdict = self._validated(turn.verdict, len(candidates))
+        self._record(snapshot, payload, verdict, "model", None, started)
+        return verdict, "model"
+
+    def _record(
+        self,
+        snapshot: ScreenSnapshot,
+        payload: str,
+        verdict: AdvisorVerdict | None,
+        source: str,
+        error: str | None,
+        started: float,
+    ) -> None:
+        """追加一次调用的输入/输出留痕；turn 为调用序号，与 turn_count（成功轮数）独立。"""
+        self.turns.append(
+            AdvisorTurnRecord(
+                turn=len(self.turns) + 1,
+                page_path=snapshot.page_path,
+                snapshot_path=str(snapshot.image_path) if snapshot.image_path else None,
+                input=payload,
+                output=verdict,
+                source=source,
+                error=error,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
+        )
+
+    def _record_error(self, snapshot: ScreenSnapshot, error: str) -> None:
+        """同步入口阶段的失败兜底：payload 未能构造时只留最小痕迹。"""
+        self.turns.append(
+            AdvisorTurnRecord(
+                turn=len(self.turns) + 1,
+                page_path=snapshot.page_path,
+                snapshot_path=str(snapshot.image_path) if snapshot.image_path else None,
+                input="",
+                output=None,
+                source="error",
+                error=error,
+                elapsed_ms=None,
+            )
+        )
 
     def _prune(self, history: list[Any]) -> list[Any]:
         head = 1 if len(history) % 2 == 1 else 0
