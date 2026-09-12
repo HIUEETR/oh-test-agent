@@ -21,8 +21,25 @@ class SafetyPolicy:
     min_target_area: int = 16
 
     always_blocked: tuple[str, ...] = (
-        "支付", "付款", "购买", "确认购买", "删除", "移除", "卸载", "清除数据", "恢复出厂", "系统设置",
-        "payment", "pay now", "purchase", "delete", "remove", "uninstall", "clear data", "factory reset", "system settings",
+        "支付",
+        "付款",
+        "购买",
+        "确认购买",
+        "删除",
+        "移除",
+        "卸载",
+        "清除数据",
+        "恢复出厂",
+        "系统设置",
+        "payment",
+        "pay now",
+        "purchase",
+        "delete",
+        "remove",
+        "uninstall",
+        "clear data",
+        "factory reset",
+        "system settings",
     )
     gated_terms: dict[str, tuple[str, ...]] | None = None
 
@@ -42,7 +59,13 @@ class SafetyPolicy:
         if permanent:
             return permanent
         credentials = (
-            "密码", "验证码", "password", "captcha", "otp", "passcode", "pin",
+            "密码",
+            "验证码",
+            "password",
+            "captcha",
+            "otp",
+            "passcode",
+            "pin",
         )
         credential = next((term for term in credentials if term.casefold() in lowered), None)
         if credential:

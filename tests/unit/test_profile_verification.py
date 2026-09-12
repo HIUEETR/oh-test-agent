@@ -148,6 +148,7 @@ def _discovery(device: FakeVerificationDevice) -> DiscoveryResult:
         transitions=transitions,
     )
 
+
 def test_profile_verifier_replays_three_pages_across_three_independent_rounds(tmp_path: Path) -> None:
     device = FakeVerificationDevice(tmp_path)
     verifier = ProfileVerifier(

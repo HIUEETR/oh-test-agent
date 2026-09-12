@@ -249,6 +249,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
     def stop_app(self, bundle_name: str) -> CommandResult:
         """Force-stop an application without deleting its state."""
         return self._run("shell", "aa", "force-stop", bundle_name)
+
     def open_app(self, profile: TargetAppProfile, reset: bool = False) -> CommandResult:
         """按目标应用配置启动 Ability，并在要求时先执行受支持的重置策略。"""
         if reset:

@@ -7,9 +7,11 @@ import os
 import sys
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 
 from ..config import Settings
 from ..devices import DeviceAdapter, DeviceError, HarmonyDeviceAdapter
+from ..discovery import BoundedExplorer, ExplorationAction, ProfileVerifier, StabilityLevel
 from ..generation import HypiumGenerator
 from ..graph import PageGraphBuilder
 from ..models import (
@@ -22,14 +24,14 @@ from ..models import (
     EventType,
     LocatorCandidate,
     LocatorKind,
+    PlannedStep,
     ProfileProvenance,
     ProfileStatus,
-    PlannedStep,
+    ResolvedTarget,
     RunEvent,
     RunRequest,
     RunState,
     RunTrace,
-    ResolvedTarget,
     ScreenSnapshot,
     StableLocator,
     TargetAppProfile,
@@ -37,12 +39,11 @@ from ..models import (
     ToolName,
     utc_now,
 )
-from ..discovery import BoundedExplorer, ExplorationAction, ProfileVerifier, StabilityLevel
 from ..perception import PerceptionService
+from ..profiles import ProfileRegistry
 from ..reporting import ReportBuilder
 from ..runner import HypiumRunner
 from ..runtime import RunEventEmitter, SafetyError, SafetyPolicy, ToolExecutionError, ToolExecutor
-from ..profiles import ProfileRegistry
 from ..storage import ArtifactStore, RunRepository
 from ..targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
 from .providers import AgentProvider, create_provider
@@ -185,6 +186,7 @@ class AgentOrchestrator:
             for index, step in enumerate(trace.plan, start=1):
                 if self._should_stop(trace.run_id):
                     trace.state = RunState.STOPPED_BY_USER
+                    trace.agent_outcome = "stopped"
                     trace.ended_at = utc_now()
                     emitter.emit(EventType.RUN_FINISHED, "任务已由用户停止")
                     return trace
@@ -310,6 +312,7 @@ class AgentOrchestrator:
                 emitter.emit(EventType.EXECUTION_STARTED, "开始执行生成的 Hypium 用例")
                 runner = HypiumRunner(self.settings.resolved_runtime_home)
                 trace.replays = await self._run_replays(runner, trace.generated, trace.run_id, 3)
+                self._update_replay_summary(trace)
                 if not all(item.passed for item in trace.replays):
                     raise ToolExecutionError("one or more Hypium replay attempts failed", RunState.FAILED_SCRIPT)
                 emitter.emit(
@@ -318,8 +321,9 @@ class AgentOrchestrator:
                     {"replays": [item.model_dump(mode="json") for item in trace.replays]},
                 )
 
-
             trace.state = RunState.COMPLETED
+            trace.agent_outcome = "completed"
+            trace.agent_error = None
             trace.ended_at = utc_now()
             emitter.emit(
                 EventType.RUN_FINISHED,
@@ -398,14 +402,17 @@ class AgentOrchestrator:
             )
             await event.wait()
             if self._should_stop(trace.run_id):
-                raise asyncio.CancelledError
+                raise asyncio.CancelledError from exc
             selected = self._target_selections.get(trace.run_id)
             allowed = {item.bundle_name for item in exc.candidates}
             if selected not in allowed:
-                raise ToolExecutionError("selected target is not in the candidate set", RunState.FAILED_TARGET_RESOLUTION)
+                raise ToolExecutionError(
+                    "selected target is not in the candidate set", RunState.FAILED_TARGET_RESOLUTION
+                ) from exc
             trace.target_candidates = []
             resolved = await asyncio.to_thread(
-                TargetResolver(device).resolve, request.target.model_copy(update={"app_name": None, "bundle_name": selected})
+                TargetResolver(device).resolve,
+                request.target.model_copy(update={"app_name": None, "bundle_name": selected}),
             )
         except (TargetNotFoundError, ValueError) as exc:
             raise ToolExecutionError(str(exc), RunState.FAILED_TARGET_RESOLUTION) from exc
@@ -436,7 +443,9 @@ class AgentOrchestrator:
 
         existing = registry.get(bundle_name=resolved.bundle_name)
         if existing is not None:
-            emitter.emit(EventType.PROFILE_FOUND, "发现 verified Profile，开始快速复验", existing.model_dump(mode="json"))
+            emitter.emit(
+                EventType.PROFILE_FOUND, "发现 verified Profile，开始快速复验", existing.model_dump(mode="json")
+            )
             trace.state = RunState.PROFILE_REVALIDATING
             emitter.emit(EventType.PROFILE_REVALIDATION_STARTED, "开始 Profile 快速复验", {})
             if await asyncio.to_thread(self._quick_revalidate, device, resolved, existing, trace):
@@ -447,11 +456,7 @@ class AgentOrchestrator:
                     "run_id": trace.run_id,
                 }
                 existing = existing.model_copy(
-                    update={
-                        "provenance": existing.provenance.model_copy(
-                            update={"evidence": evidence}, deep=True
-                        )
-                    },
+                    update={"provenance": existing.provenance.model_copy(update={"evidence": evidence}, deep=True)},
                     deep=True,
                 )
                 registry.update_verified(existing)
@@ -460,12 +465,16 @@ class AgentOrchestrator:
                 )
                 emitter.emit(EventType.PROFILE_REVALIDATION_FINISHED, "Profile 快速复验通过", {"passed": True})
                 return existing
-            emitter.emit(EventType.PROFILE_REVALIDATION_FINISHED, "Profile 快速复验失败，转入完整探索", {"passed": False})
+            emitter.emit(
+                EventType.PROFILE_REVALIDATION_FINISHED, "Profile 快速复验失败，转入完整探索", {"passed": False}
+            )
             if not existing.locked:
                 registry.invalidate(existing.target_app_id, "quick revalidation failed")
 
         if not request.exploration_policy.enabled:
-            raise ToolExecutionError("no verified Profile and automatic discovery is disabled", RunState.FAILED_DISCOVERY)
+            raise ToolExecutionError(
+                "no verified Profile and automatic discovery is disabled", RunState.FAILED_DISCOVERY
+            )
         run_dir = self.artifacts.run_dir(trace.run_id)
         trace.state = RunState.PROBING_TARGET
         started = await asyncio.to_thread(
@@ -475,15 +484,24 @@ class AgentOrchestrator:
             raise ToolExecutionError(started.stderr or started.stdout, RunState.FAILED_TARGET_PROBE)
         foreground = await asyncio.to_thread(device.current_foreground_app)
         if not foreground:
-            raise ToolExecutionError("launched foreground application could not be determined", RunState.FAILED_TARGET_PROBE)
+            raise ToolExecutionError(
+                "launched foreground application could not be determined", RunState.FAILED_TARGET_PROBE
+            )
         if foreground.bundle_name != resolved.bundle_name:
-            raise ToolExecutionError("launched foreground bundle does not match resolved target", RunState.FAILED_TARGET_PROBE)
+            raise ToolExecutionError(
+                "launched foreground bundle does not match resolved target", RunState.FAILED_TARGET_PROBE
+            )
         if foreground.ability_name and foreground.ability_name != resolved.main_ability:
-            raise ToolExecutionError("launched foreground Ability does not match resolved target", RunState.FAILED_TARGET_PROBE)
+            raise ToolExecutionError(
+                "launched foreground Ability does not match resolved target", RunState.FAILED_TARGET_PROBE
+            )
         emitter.emit(EventType.TARGET_STARTED, "目标应用启动探测通过", {"bundle_name": resolved.bundle_name})
 
         trace.state = RunState.DISCOVERING
-        emitter.emit(EventType.DISCOVERY_STARTED, "开始有界自动探索", request.exploration_policy.model_dump(mode="json"))
+        emitter.emit(
+            EventType.DISCOVERY_STARTED, "开始有界自动探索", request.exploration_policy.model_dump(mode="json")
+        )
+
         def discovery_progress(kind: str, payload: dict[str, object]) -> None:
             event_type = EventType.DISCOVERY_PATH_BLOCKED if kind == "blocked" else EventType.DISCOVERY_PROGRESS
             emitter.emit(event_type, "自动探索进度", payload)
@@ -511,7 +529,11 @@ class AgentOrchestrator:
         emitter.emit(
             EventType.DISCOVERY_FINISHED,
             "自动探索完成",
-            {"pages": len(discovery.pages), "interactions": sorted(discovery.interaction_types), "stop_reason": discovery.stop_reason},
+            {
+                "pages": len(discovery.pages),
+                "interactions": sorted(discovery.interaction_types),
+                "stop_reason": discovery.stop_reason,
+            },
         )
 
         draft = self._build_profile(resolved, discovery, None, trace.run_id)
@@ -544,9 +566,7 @@ class AgentOrchestrator:
             if request.temporary_test:
                 trace.provisional = True
                 return failed_draft
-            raise ToolExecutionError(
-                "; ".join(verification.failures), RunState.FAILED_PROFILE_VERIFICATION
-            )
+            raise ToolExecutionError("; ".join(verification.failures), RunState.FAILED_PROFILE_VERIFICATION)
         candidate = self._build_profile(resolved, discovery, verification, trace.run_id)
         candidate_pages = {item.page_signature for item in candidate.stable_locator_inventory}
         if len(candidate.stable_locator_inventory) < 3:
@@ -583,7 +603,11 @@ class AgentOrchestrator:
             runner, trace.profile_validation_generated, trace.run_id, 3
         )
         for replay in trace.profile_validation_replays:
-            emitter.emit(EventType.HYPIUM_REPLAY_FINISHED, f"Profile Hypium 回放第 {replay.attempt} 次完成", replay.model_dump(mode="json"))
+            emitter.emit(
+                EventType.HYPIUM_REPLAY_FINISHED,
+                f"Profile Hypium 回放第 {replay.attempt} 次完成",
+                replay.model_dump(mode="json"),
+            )
         if not all(item.passed for item in trace.profile_validation_replays):
             raise ToolExecutionError("Profile Hypium replay gate failed", RunState.FAILED_SCRIPT)
         trace.state = RunState.PROFILE_PROMOTING
@@ -596,7 +620,9 @@ class AgentOrchestrator:
 
         trace.profile_snapshot = promoted
         trace.resolved_target = resolved.model_copy(update={"profile_snapshot": promoted}, deep=True)
-        emitter.emit(EventType.PROFILE_PROMOTED, "Profile 已自动晋级为 verified", {"target_app_id": promoted.target_app_id})
+        emitter.emit(
+            EventType.PROFILE_PROMOTED, "Profile 已自动晋级为 verified", {"target_app_id": promoted.target_app_id}
+        )
         return promoted
 
     @staticmethod
@@ -632,9 +658,7 @@ class AgentOrchestrator:
         locators_by_page: dict[str, list[StableLocator]] = {}
         for locator in profile.stable_locator_inventory:
             locators_by_page.setdefault(locator.page_signature, []).append(locator)
-        assertions_by_page = {
-            item.page_signature: item for item in profile.assertion_inventory
-        }
+        assertions_by_page = {item.page_signature: item for item in profile.assertion_inventory}
         for page_index, page in enumerate(core_pages):
             if page_index:
                 action = page.path_actions[-1]
@@ -701,13 +725,10 @@ class AgentOrchestrator:
         covered_pages = {
             action.assertion.message.rsplit(" ", 1)[-1]
             for action in validation.actions
-            if action.assertion
-            and action.assertion.message.startswith("verified application page ")
+            if action.assertion and action.assertion.message.startswith("verified application page ")
         }
         if len(covered_pages) < 3 or len(validation.assertions) < 2:
-            raise ValueError(
-                "Profile admission replay requires 3 page checks and 2 application assertions"
-            )
+            raise ValueError("Profile admission replay requires 3 page checks and 2 application assertions")
         validation.snapshots = [
             snapshot.model_copy(update={"run_id": validation_id}, deep=True)
             for round_result in verification.rounds
@@ -718,11 +739,11 @@ class AgentOrchestrator:
             **(trace.discovery_result or {}),
             "admission_pages": [item.page_id for item in core_pages],
             "admission_actions": [
-                item.model_dump(mode="json")
-                for item in (core_pages[-1].path_actions if core_pages else [])
+                item.model_dump(mode="json") for item in (core_pages[-1].path_actions if core_pages else [])
             ],
         }
         return validation
+
     @staticmethod
     def _profile_locator(locator: StableLocator) -> tuple[LocatorKind, str]:
         if locator.key:
@@ -744,18 +765,13 @@ class AgentOrchestrator:
             return False
         if profile.main_ability != resolved.main_ability:
             return False
-        if (
-            profile.app_version.signature_sha256
-            and resolved.signature_sha256 != profile.app_version.signature_sha256
-        ):
+        if profile.app_version.signature_sha256 and resolved.signature_sha256 != profile.app_version.signature_sha256:
             return False
         if type(device).stop_app is DeviceAdapter.stop_app or type(device).start_app is DeviceAdapter.start_app:
             started = device.open_app(profile, reset=True)
         else:
             stopped = device.stop_app(resolved.bundle_name)
-            started = device.start_app(
-                resolved.bundle_name, resolved.main_ability, resolved.module_name
-            )
+            started = device.start_app(resolved.bundle_name, resolved.main_ability, resolved.module_name)
             if not stopped.ok:
                 return False
         if not started.ok:
@@ -772,9 +788,7 @@ class AgentOrchestrator:
         locator_inventory = [
             item
             for item in profile.stable_locator_inventory
-            if item.observed_rounds >= 3
-            and item.unique_match_rounds >= 3
-            and item.evidence_snapshot_ids
+            if item.observed_rounds >= 3 and item.unique_match_rounds >= 3 and item.evidence_snapshot_ids
         ]
         page_locators = {
             page: next(
@@ -793,17 +807,13 @@ class AgentOrchestrator:
                 or (foreground.ability_name and foreground.ability_name != resolved.main_ability)
             ):
                 return False
-            snapshot = device.screenshot(
-                output_dir, trace.run_id, f"revalidate-{page_index:02d}"
-            )
+            snapshot = device.screenshot(output_dir, trace.run_id, f"revalidate-{page_index:02d}")
             if not self._snapshot_has_locator(snapshot, page_locators[page_signature]):
                 return False
             if page_index < len(pages) - 1:
                 if page_index >= len(recovery_actions):
                     return False
-                if not self._replay_profile_action(
-                    device, recovery_actions[page_index], snapshot, profile
-                ):
+                if not self._replay_profile_action(device, recovery_actions[page_index], snapshot, profile):
                     return False
                 device.wait(0.5)
         return True
@@ -820,8 +830,7 @@ class AgentOrchestrator:
         snapshot = device.screenshot(output_dir, trace.run_id, "revalidate")
         locators = profile.stable_locator_inventory[:3]
         return bool(locators) and all(
-            AgentOrchestrator._snapshot_has_locator(snapshot, locator)
-            for locator in locators
+            AgentOrchestrator._snapshot_has_locator(snapshot, locator) for locator in locators
         )
 
     @staticmethod
@@ -829,11 +838,7 @@ class AgentOrchestrator:
         return any(
             (locator.key and locator.key == item.key)
             or (locator.id and locator.id == item.id)
-            or (
-                locator.text
-                and locator.text == item.content
-                and (not locator.type or locator.type == item.type)
-            )
+            or (locator.text and locator.text == item.content and (not locator.type or locator.type == item.type))
             for item in snapshot.elements
         )
 
@@ -863,7 +868,7 @@ class AgentOrchestrator:
                 Path(snapshot.image_path).parent,
                 snapshot.run_id,
             ).resolve_replay_action(action, snapshot)
-        except (DeviceError, ValueError):
+        except DeviceError, ValueError:
             return False
         coordinate = action.coordinate
         if action.kind == "click" and coordinate:
@@ -880,6 +885,7 @@ class AgentOrchestrator:
         else:
             return False
         return result.ok
+
     @staticmethod
     def _build_profile(resolved, discovery, verification, run_id: str) -> TargetAppProfile:
         locators: list[StableLocator] = []
@@ -891,23 +897,26 @@ class AgentOrchestrator:
                     values["type"], _, values["text"] = item.value.partition("|")
                 elif item.kind in {LocatorKind.KEY, LocatorKind.ID, LocatorKind.TEXT}:
                     values[item.kind.value] = item.value
-                locators.append(StableLocator(
-                    name=item.name,
-                    page_signature=item.page_signatures[0] if item.page_signatures else "",
-                    confidence=ConfidenceLevel.HIGH if item.level == StabilityLevel.HIGH else ConfidenceLevel.MEDIUM,
-                    observed_rounds=len(item.rounds),
-                    unique_match_rounds=len(item.rounds) if item.unique_each_round else 0,
-                    evidence_snapshot_ids=[
-                        round_result.snapshot_ids[0]
-                        for round_result in verification.rounds
-                        if round_result.snapshot_ids
-                        and any(
-                            observation.value == item.value
-                            for observation in round_result.locator_observations
-                        )
-                    ],
-                    **values,
-                ))
+                locators.append(
+                    StableLocator(
+                        name=item.name,
+                        page_signature=item.page_signatures[0] if item.page_signatures else "",
+                        confidence=ConfidenceLevel.HIGH
+                        if item.level == StabilityLevel.HIGH
+                        else ConfidenceLevel.MEDIUM,
+                        observed_rounds=len(item.rounds),
+                        unique_match_rounds=len(item.rounds) if item.unique_each_round else 0,
+                        evidence_snapshot_ids=[
+                            round_result.snapshot_ids[0]
+                            for round_result in verification.rounds
+                            if round_result.snapshot_ids
+                            and any(
+                                observation.value == item.value for observation in round_result.locator_observations
+                            )
+                        ],
+                        **values,
+                    )
+                )
             for index, item in enumerate(verification.stability.assertions, 1):
                 assertions.append(
                     AssertionDefinition(
@@ -934,12 +943,16 @@ class AgentOrchestrator:
             bundle_name=resolved.bundle_name,
             main_ability=resolved.main_ability,
             module_name=resolved.module_name,
-            app_version=AppVersion(version_name=resolved.version_name, version_code=resolved.version_code, signature_sha256=resolved.signature_sha256),
+            app_version=AppVersion(
+                version_name=resolved.version_name,
+                version_code=resolved.version_code,
+                signature_sha256=resolved.signature_sha256,
+            ),
             device_compatibility=DeviceCompatibility(
                 validated_device_types=["phone"],
-                validated_resolutions=sorted(
-                    {item.resolution for item in verification.rounds if item.resolution}
-                ) if verification else [],
+                validated_resolutions=sorted({item.resolution for item in verification.rounds if item.resolution})
+                if verification
+                else [],
             ),
             launch_strategy={"kind": "hdc_aa_start", "command_template": "aa start -b {bundle_name} -a {main_ability}"},
             reset_strategy={
@@ -956,28 +969,36 @@ class AgentOrchestrator:
             },
             test_data_strategy={"fixed_input_text": discovery.policy.fixed_input_text, "secrets": []},
             permission_and_popup_strategy={
-                "login": "explicit_only", "permission": "explicit_only", "submit": "explicit_only",
-                "publish": "explicit_only", "download": "explicit_only", "payment": "always_blocked",
-                "delete": "always_blocked", "uninstall": "always_blocked", "clear_data": "always_blocked",
+                "login": "explicit_only",
+                "permission": "explicit_only",
+                "submit": "explicit_only",
+                "publish": "explicit_only",
+                "download": "explicit_only",
+                "payment": "always_blocked",
+                "delete": "always_blocked",
+                "uninstall": "always_blocked",
+                "clear_data": "always_blocked",
             },
             stable_locator_inventory=locators,
             assertion_inventory=assertions,
-            known_limitations=[
-                "coordinate fallbacks remain resolution-bound and do not count toward Profile admission"
-            ] if verification and any(item.level == StabilityLevel.LOW for item in verification.stability.locators) else [],
-            core_flows=[{
-                "pages": [page.signature for page in ProfileVerifier._core_pages(discovery)],
-                "page_ids": [page.page_id for page in ProfileVerifier._core_pages(discovery)],
-                "steps": [
-                    action.model_dump(mode="json")
-                    for action in (
-                        ProfileVerifier._core_pages(discovery)[-1].path_actions
-                        if ProfileVerifier._core_pages(discovery)
-                        else []
-                    )
-                ],
-                "interaction_types": sorted(discovery.interaction_types),
-            }],
+            known_limitations=["coordinate fallbacks remain resolution-bound and do not count toward Profile admission"]
+            if verification and any(item.level == StabilityLevel.LOW for item in verification.stability.locators)
+            else [],
+            core_flows=[
+                {
+                    "pages": [page.signature for page in ProfileVerifier._core_pages(discovery)],
+                    "page_ids": [page.page_id for page in ProfileVerifier._core_pages(discovery)],
+                    "steps": [
+                        action.model_dump(mode="json")
+                        for action in (
+                            ProfileVerifier._core_pages(discovery)[-1].path_actions
+                            if ProfileVerifier._core_pages(discovery)
+                            else []
+                        )
+                    ],
+                    "interaction_types": sorted(discovery.interaction_types),
+                }
+            ],
             provenance=ProfileProvenance(
                 discovery_run_id=run_id,
                 evidence={
@@ -994,8 +1015,7 @@ class AgentOrchestrator:
                     "cross_bundle_violations": sum(
                         1
                         for transition in discovery.transitions
-                        if transition.blocked_reason
-                        and "cross-bundle" in transition.blocked_reason
+                        if transition.blocked_reason and "cross-bundle" in transition.blocked_reason
                     ),
                     "cross_bundle_recovery_failed": False,
                 },
@@ -1104,8 +1124,25 @@ class AgentOrchestrator:
         stored = self.repository.get_trace(run_id)
         return bool(stored and stored.state == RunState.STOPPED_BY_USER)
 
+    @staticmethod
+    def _update_replay_summary(trace: RunTrace) -> None:
+        """Keep replay summary fields aligned after direct orchestrator execution."""
+        trace.replay_total = len(trace.replays)
+        trace.replay_completed = len(trace.replays)
+        trace.replay_passed = sum(item.passed for item in trace.replays)
+        if trace.replay_total == 0:
+            trace.replay_status = "not_requested"
+        elif trace.replay_passed == trace.replay_total:
+            trace.replay_status = "passed"
+        elif trace.replay_passed:
+            trace.replay_status = "partial"
+        else:
+            trace.replay_status = "failed"
+
     async def _fail(self, trace, emitter, state: RunState, message: str) -> None:
         trace.state = state
+        trace.agent_outcome = "stopped" if state == RunState.STOPPED_BY_USER else "failed"
+        trace.agent_error = message
         trace.error = message
         trace.ended_at = utc_now()
         event_type = EventType.ASSERTION_FAILED if state == RunState.FAILED_ASSERTION else EventType.RUN_FAILED

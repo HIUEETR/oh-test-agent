@@ -69,7 +69,10 @@ class ProfileVerifier:
         self.analyzer = analyzer or StabilityAnalyzer()
         self.should_stop = should_stop or (lambda: False)
         self._replay_resolver = BoundedExplorer(
-            device, target, output_dir, run_id,
+            device,
+            target,
+            output_dir,
+            run_id,
         )
 
     def verify(
@@ -94,9 +97,11 @@ class ProfileVerifier:
                 result.rounds.append(current)
                 break
             stopped = self.device.stop_app(self.target.bundle_name)
-            started = self.device.start_app(
-                self.target.bundle_name, self.target.main_ability, self.target.module_name
-            ) if stopped.ok else None
+            started = (
+                self.device.start_app(self.target.bundle_name, self.target.main_ability, self.target.module_name)
+                if stopped.ok
+                else None
+            )
             if not stopped.ok or started is None or not started.ok:
                 current.failures.append("independent stop/start failed")
                 result.rounds.append(current)
@@ -107,9 +112,7 @@ class ProfileVerifier:
             if foreground is None:
                 result.rounds.append(current)
                 continue
-            snapshot = self.device.screenshot(
-                self.output_dir, self.run_id, f"profile-verification-{round_number}-00"
-            )
+            snapshot = self.device.screenshot(self.output_dir, self.run_id, f"profile-verification-{round_number}-00")
             current.resolution = (snapshot.width, snapshot.height)
             current.snapshot_id = snapshot.snapshot_id
             current.snapshot_ids.append(snapshot.snapshot_id)
@@ -117,9 +120,7 @@ class ProfileVerifier:
 
             for page_index, page in enumerate(core_pages):
                 if page_index:
-                    action = self._replay_resolver.resolve_replay_action(
-                        page.path_actions[-1], snapshot
-                    )
+                    action = self._replay_resolver.resolve_replay_action(page.path_actions[-1], snapshot)
                     command = self._execute(action, snapshot)
                     current.action_commands.append(command)
                     if not command.ok:
@@ -142,9 +143,7 @@ class ProfileVerifier:
                     break
                 current.visited_page_signatures.append(signature)
                 current.page_signature = signature
-                locator_observations = self.analyzer.locator_observations(
-                    snapshot, round_number, signature
-                )
+                locator_observations = self.analyzer.locator_observations(snapshot, round_number, signature)
                 assertion_observations = (
                     assertion_probe(snapshot, round_number, signature)
                     if assertion_probe
@@ -156,11 +155,7 @@ class ProfileVerifier:
                 all_assertions.extend(assertion_observations)
 
             back_result = self.device.back()
-            stopped_again = (
-                self.device.stop_app(self.target.bundle_name)
-                if back_result.ok
-                else None
-            )
+            stopped_again = self.device.stop_app(self.target.bundle_name) if back_result.ok else None
             restarted = (
                 self.device.start_app(
                     self.target.bundle_name,
@@ -186,8 +181,7 @@ class ProfileVerifier:
                 and recovery_snapshot
                 and recovered.bundle_name == self.target.bundle_name
                 and (not recovered.ability_name or recovered.ability_name == self.target.main_ability)
-                and BoundedExplorer._snapshot_signature(recovery_snapshot, recovered)
-                == core_pages[0].signature
+                and BoundedExplorer._snapshot_signature(recovery_snapshot, recovered) == core_pages[0].signature
             )
             if not current.recovery_passed:
                 current.failures.append("return and restart recovery failed")
@@ -205,9 +199,11 @@ class ProfileVerifier:
         result.stability = self.analyzer.analyze(all_locators, all_assertions)
         if len(discovery.interaction_types) < 3:
             result.failures.append("fewer than 3 interaction types")
-        repeated_pages = set.intersection(
-            *(set(item.visited_page_signatures) for item in result.rounds)
-        ) if len(result.rounds) == 3 else set()
+        repeated_pages = (
+            set.intersection(*(set(item.visited_page_signatures) for item in result.rounds))
+            if len(result.rounds) == 3
+            else set()
+        )
         if len(repeated_pages) < 3:
             result.failures.append("fewer than 3 pages repeated in every verification round")
         if result.stability.promotable_locator_count < 3:
@@ -226,11 +222,7 @@ class ProfileVerifier:
             discovery.pages,
             key=lambda item: (len(item.path_actions), item.discovered_order),
         )
-        replayable = [
-            item
-            for item in candidates
-            if len({action.kind for action in item.path_actions}) >= 3
-        ]
+        replayable = [item for item in candidates if len({action.kind for action in item.path_actions}) >= 3]
         deepest = max(replayable, key=lambda item: len(item.path_actions), default=None)
         if deepest is None:
             return []
@@ -293,9 +285,7 @@ class ProfileVerifier:
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(
-                result.model_dump(
-                    mode="json", exclude={"rounds": {"__all__": {"snapshots"}}}
-                ),
+                result.model_dump(mode="json", exclude={"rounds": {"__all__": {"snapshots"}}}),
                 ensure_ascii=False,
                 indent=2,
             ),

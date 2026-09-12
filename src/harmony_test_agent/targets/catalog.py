@@ -155,6 +155,7 @@ def _truthy(value: Any) -> bool:
         return str(value).strip().casefold() in {"true", "1", "yes", "active", "focused"}
     return False
 
+
 def _json_payload(raw: str) -> Any | None:
     text = raw.strip()
     starts = [index for index in (text.find("{"), text.find("[")) if index >= 0]

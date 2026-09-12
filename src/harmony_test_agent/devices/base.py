@@ -80,6 +80,7 @@ class DeviceAdapter(ABC):
     def stop_app(self, bundle_name: str) -> CommandResult:
         """强制停止目标应用，但不清除应用数据。"""
         raise DeviceError(f"device adapter cannot stop application: {bundle_name}")
+
     @abstractmethod
     def click(self, x: int, y: int) -> CommandResult:
         """点击屏幕绝对像素坐标。"""

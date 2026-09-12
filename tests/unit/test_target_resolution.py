@@ -106,9 +106,7 @@ def test_resolver_prefers_an_exact_bundle_and_inspects_missing_launch_metadata()
     inspected_entry = installed_app("com.example.notes", "Pocket Notes", main_ability="MainAbility")
     device = CatalogDevice([catalog_entry], {inspected_entry.bundle_name: inspected_entry})
 
-    resolved = TargetResolver(device).resolve(
-        TargetQuery(app_name="  Pocket Notes  ", bundle_name="com.example.notes")
-    )
+    resolved = TargetResolver(device).resolve(TargetQuery(app_name="  Pocket Notes  ", bundle_name="com.example.notes"))
 
     assert resolved.bundle_name == "com.example.notes"
     assert resolved.target_app_id == "com-example-notes"

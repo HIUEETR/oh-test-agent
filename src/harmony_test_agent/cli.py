@@ -146,9 +146,12 @@ def main(argv: list[str] | None = None) -> None:
         from .devserver import DevServerConfig, DevServerError, run_dev_server
 
         config = DevServerConfig(
-            api_host=getattr(args, "api_host", "127.0.0.1"), api_port=getattr(args, "api_port", 8000),
-            web_host=getattr(args, "web_host", "127.0.0.1"), web_port=getattr(args, "web_port", 5173),
-            reload=getattr(args, "reload", False), install=getattr(args, "install", False),
+            api_host=getattr(args, "api_host", "127.0.0.1"),
+            api_port=getattr(args, "api_port", 8000),
+            web_host=getattr(args, "web_host", "127.0.0.1"),
+            web_port=getattr(args, "web_port", 5173),
+            reload=getattr(args, "reload", False),
+            install=getattr(args, "install", False),
         )
         try:
             code = run_dev_server(config)
@@ -195,7 +198,13 @@ def main(argv: list[str] | None = None) -> None:
                 if not sys.stdin.isatty():
                     orchestrator.request_stop(waiting["run_id"])
                     await task
-                    print(json.dumps({"state": RunState.WAITING_TARGET_SELECTION, "candidates": candidates}, ensure_ascii=False, indent=2))
+                    print(
+                        json.dumps(
+                            {"state": RunState.WAITING_TARGET_SELECTION, "candidates": candidates},
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
                     raise SystemExit(2)
                 print("检测到多个同名应用：")
                 for index, candidate in enumerate(candidates, 1):
@@ -218,22 +227,54 @@ def main(argv: list[str] | None = None) -> None:
         manager = RunManager(settings)
         identity = getattr(args, "profile_id", None) or getattr(args, "bundle_name", None)
         if args.profile_command == "list":
-            result = (_call_service(manager.profile_registry, ("list", "list_profiles", "all"))
-                      if manager.profile_registry else _fallback_profile_list(settings))
+            result = (
+                _call_service(manager.profile_registry, ("list", "list_profiles", "all"))
+                if manager.profile_registry
+                else _fallback_profile_list(settings)
+            )
         elif args.profile_command == "show":
-            result = (_call_service(manager.profile_registry, ("get", "get_profile", "load"), target_app_id=identity, profile_id=identity, identifier=identity)
-                      if manager.profile_registry else _fallback_profile_get(settings, identity))
+            result = (
+                _call_service(
+                    manager.profile_registry,
+                    ("get", "get_profile", "load"),
+                    target_app_id=identity,
+                    profile_id=identity,
+                    identifier=identity,
+                )
+                if manager.profile_registry
+                else _fallback_profile_get(settings, identity)
+            )
         elif args.profile_command == "verify":
             if not manager.profile_registry:
                 raise SystemExit("Profile verification service is unavailable")
-            result = _call_service(manager.profile_registry, ("verify", "verify_profile", "request_verification"),
-                                   profile_id=identity, identifier=identity, device_id=args.device)
+            result = _call_service(
+                manager.profile_registry,
+                ("verify", "verify_profile", "request_verification"),
+                profile_id=identity,
+                identifier=identity,
+                device_id=args.device,
+            )
         else:
             locked = args.profile_command == "lock"
-            result = (_call_service(manager.profile_registry, ("set_locked", "lock", "lock_profile"),
-                                    target_app_id=identity, profile_id=identity, identifier=identity, locked=locked)
-                      if manager.profile_registry else _fallback_profile_lock(settings, identity, locked))
-        print(json.dumps(result.model_dump(mode="json") if hasattr(result, "model_dump") else result, ensure_ascii=False, indent=2))
+            result = (
+                _call_service(
+                    manager.profile_registry,
+                    ("set_locked", "lock", "lock_profile"),
+                    target_app_id=identity,
+                    profile_id=identity,
+                    identifier=identity,
+                    locked=locked,
+                )
+                if manager.profile_registry
+                else _fallback_profile_lock(settings, identity, locked)
+            )
+        print(
+            json.dumps(
+                result.model_dump(mode="json") if hasattr(result, "model_dump") else result,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
 
     if command == "generate":
@@ -265,7 +306,9 @@ def main(argv: list[str] | None = None) -> None:
     if command == "serve":
         import uvicorn
 
-        uvicorn.run("harmony_test_agent.api.app:create_app", factory=True, host=args.host, port=args.port, reload=args.reload)
+        uvicorn.run(
+            "harmony_test_agent.api.app:create_app", factory=True, host=args.host, port=args.port, reload=args.reload
+        )
 
 
 if __name__ == "__main__":

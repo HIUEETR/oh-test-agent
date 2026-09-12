@@ -10,7 +10,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +23,10 @@ from ..devices import DeviceError, HarmonyDeviceAdapter
 from ..generation import HypiumGenerator
 from ..models import (
     TERMINAL_STATES,
+    CommandResult,
     ProfileStatus,
+    ReplayError,
+    ReplayResult,
     RunRequest,
     RunState,
     TargetAppProfile,
@@ -41,7 +44,6 @@ from ..runner import HypiumRunner
 from ..storage import ArtifactStore, RunRepository
 from ..targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
 
-
 _SMOKE_TASK = "启动应用，探索可达页面，验证返回和重启恢复。"
 
 
@@ -53,10 +55,14 @@ class RunManager:
         self.repository = RunRepository(settings.resolved_database_path)
         self.artifacts = ArtifactStore(settings.resolved_runtime_dir)
         self.tasks: dict[str, asyncio.Task] = {}
+        self.replay_tasks: dict[str, asyncio.Task] = {}
+        self.replay_locks: dict[str, asyncio.Lock] = {}
         self.orchestrators: dict[str, AgentOrchestrator] = {}
         self.profile_registry = _build_optional_service(
-            (("harmony_test_agent.targets.profiles", "ProfileRegistry"),
-             ("harmony_test_agent.profiles.registry", "ProfileRegistry")),
+            (
+                ("harmony_test_agent.targets.profiles", "ProfileRegistry"),
+                ("harmony_test_agent.profiles.registry", "ProfileRegistry"),
+            ),
             root=_profile_dir(settings),
             settings=settings,
             artifacts=self.artifacts,
@@ -88,11 +94,7 @@ class RunManager:
         """Validate one candidate selection before resuming a waiting Run."""
         orchestrator = self.orchestrators.get(run_id)
         trace = self.repository.get_trace(run_id)
-        if (
-            not orchestrator
-            or not trace
-            or trace.state != RunState.WAITING_TARGET_SELECTION
-        ):
+        if not orchestrator or not trace or trace.state != RunState.WAITING_TARGET_SELECTION:
             raise HTTPException(status_code=409, detail="run is not waiting for target selection")
         candidate_id = selection.get("candidate_id")
         bundle_name = selection.get("bundle_name")
@@ -111,6 +113,7 @@ class RunManager:
             return await orchestrator.select_target(run_id, bundle_name=str(selected_bundle))
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     def stop(self, run_id: str) -> bool:
         """请求运行在下一个安全检查点停止，并标记已持久化的非活动运行。"""
         orchestrator = self.orchestrators.get(run_id)
@@ -120,7 +123,7 @@ class RunManager:
 
     async def shutdown(self, timeout: float = 8.0) -> None:
         """Request cooperative stops and bound how long shutdown waits for cleanup."""
-        tasks = list(self.tasks.values())
+        tasks = [*self.tasks.values(), *self.replay_tasks.values()]
         for run_id, orchestrator in list(self.orchestrators.items()):
             orchestrator.request_stop(run_id)
         if not tasks:
@@ -133,6 +136,85 @@ class RunManager:
         for task in done:
             if not task.cancelled():
                 task.exception()
+
+    def replay_running(self, run_id: str) -> bool:
+        """Return whether this process is already replaying the Run."""
+        task = self.replay_tasks.get(run_id)
+        lock = self.replay_locks.get(run_id)
+        return bool((task and not task.done()) or (lock and lock.locked()))
+
+    def recover_stale_replay(self, trace) -> None:
+        """Convert an unowned persisted pending replay into a retryable terminal state."""
+        if trace.replay_status != "pending" or self.replay_running(trace.run_id):
+            return
+        trace.replay_status = "failed"
+        trace.replay_completed = len(trace.replays)
+        trace.replay_passed = sum(item.passed for item in trace.replays)
+        self._save_trace_and_report(trace)
+
+    def start_replay(self, run_id: str, attempts: int) -> None:
+        """Persist the queued state and execute attempts in a background task."""
+        trace = self.repository.get_trace(run_id)
+        if trace is None or trace.generated is None:
+            raise ValueError("generated artifact is missing")
+        lock = self.replay_locks.setdefault(run_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("Hypium replay is already running")
+        trace.replays = []
+        trace.replay_status = "pending"
+        trace.replay_total = attempts
+        trace.replay_completed = 0
+        trace.replay_passed = 0
+        self._save_trace_and_report(trace)
+        task = asyncio.create_task(self._run_replay(run_id), name=f"replay-{run_id}")
+        self.replay_tasks[run_id] = task
+
+        def cleanup(completed: asyncio.Task) -> None:
+            self.replay_tasks.pop(run_id, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(cleanup)
+
+    async def _run_replay(self, run_id: str) -> None:
+        """Execute and persist every replay attempt independently."""
+        trace = self.repository.get_trace(run_id)
+        if trace is None or trace.generated is None:
+            return
+        runner = HypiumRunner(self.settings.resolved_runtime_home)
+        lock = self.replay_locks.setdefault(run_id, asyncio.Lock())
+        try:
+            await lock.acquire()
+            for attempt in range(1, trace.replay_total + 1):
+                result = await asyncio.to_thread(runner.execute, trace.generated, attempt)
+                trace.replays.append(result)
+                trace.replay_completed = len(trace.replays)
+                trace.replay_passed = sum(item.passed for item in trace.replays)
+                trace.replay_status = "pending"
+                self._save_trace_and_report(trace)
+            if trace.replay_passed == trace.replay_total:
+                trace.replay_status = "passed"
+            elif trace.replay_passed:
+                trace.replay_status = "partial"
+            else:
+                trace.replay_status = "failed"
+        except asyncio.CancelledError:
+            trace.replay_status = "failed"
+            raise
+        except Exception as exc:
+            trace.replay_status = "failed"
+            trace.replays.append(_unexpected_replay_result(trace.replay_completed + 1, exc))
+            trace.replay_completed = len(trace.replays)
+            trace.replay_passed = sum(item.passed for item in trace.replays)
+        finally:
+            self._save_trace_and_report(trace)
+            if lock.locked():
+                lock.release()
+
+    def _save_trace_and_report(self, trace) -> None:
+        self.repository.save_trace(trace)
+        self.artifacts.save_trace(trace)
+        ReportBuilder(self.artifacts).build(trace)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -210,7 +292,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.post("/api/targets/resolve")
-    async def resolve_target(payload: dict[str, Any] = Body(...)):
+    async def resolve_target(payload: Annotated[dict[str, Any], Body()]):
         """按应用名或 bundleName 解析唯一目标；多匹配时返回候选而不猜测。"""
         query_data = payload.get("target", payload)
         if not isinstance(query_data, dict):
@@ -243,15 +325,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "target": resolved.model_dump(mode="json"),
             "candidates": [],
         }
+
     @app.get("/api/profiles")
     async def list_profiles():
         """列出 verified、candidate、draft 与无效 Profile 摘要。"""
         if manager.profile_registry:
             profiles = await _invoke_optional(manager.profile_registry, ("list", "list_profiles", "all"))
-            return [
-                _profile_summary(item, manager.profile_registry)
-                for item in profiles
-            ]
+            return [_profile_summary(item, manager.profile_registry) for item in profiles]
         return _fallback_profile_list(settings)
 
     @app.get("/api/profiles/{profile_id}")
@@ -270,19 +350,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 if stored is not None:
                     return stored
-            except (ProfileNotFoundError, KeyError, FileNotFoundError):
+            except ProfileNotFoundError, KeyError, FileNotFoundError:
                 pass
             except (ProfileTransitionError, ValueError) as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
-        profile = _fallback_profile_get(settings, profile_id) or _fallback_profile_get(
-            settings, target_app_id
-        )
+        profile = _fallback_profile_get(settings, profile_id) or _fallback_profile_get(settings, target_app_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="profile not found")
         return profile
 
     @app.post("/api/profiles/{profile_id}/verify", status_code=status.HTTP_202_ACCEPTED)
-    async def verify_profile(profile_id: str, payload: dict[str, Any] = Body(default_factory=dict)):
+    async def verify_profile(profile_id: str, payload: Annotated[dict[str, Any] | None, Body()] = None):
+        payload = payload or {}
         if not manager.profile_registry:
             raise HTTPException(status_code=501, detail="Profile verification service is unavailable")
         target_app_id, identifier_status = _split_profile_identifier(profile_id)
@@ -293,9 +372,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=422, detail="invalid Profile status") from exc
         try:
-            profile = manager.profile_registry.get_any(
-                target_app_id=target_app_id, preferred_status=preferred_status
-            )
+            profile = manager.profile_registry.get_any(target_app_id=target_app_id, preferred_status=preferred_status)
             if profile is None:
                 raise ProfileNotFoundError(f"Profile not found: {target_app_id}")
         except (ProfileNotFoundError, KeyError, FileNotFoundError) as exc:
@@ -307,8 +384,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 target={"bundle_name": profile.bundle_name},
                 task=payload.get("task") or _SMOKE_TASK,
                 device_id=payload.get("device_id"),
-                auto_generate=True,
-                auto_execute=bool(payload.get("execute", False)),
+                bootstrap_only=True,
+                auto_generate=False,
+                auto_execute=False,
             )
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
@@ -317,7 +395,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"run_id": manager.start(request), "state": RunState.CREATED, "profile_id": profile_id}
 
     @app.post("/api/profiles/{profile_id}/lock")
-    async def lock_profile(profile_id: str, payload: dict[str, Any] = Body(default_factory=dict)):
+    async def lock_profile(profile_id: str, payload: Annotated[dict[str, Any] | None, Body()] = None):
+        payload = payload or {}
         if "locked" in payload and not isinstance(payload["locked"], bool):
             raise HTTPException(status_code=422, detail="locked must be a boolean")
         locked = payload.get("locked", True)
@@ -341,7 +420,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _fallback_profile_lock(settings, target_app_id, locked)
 
     @app.post("/api/profiles/{profile_id}/rollback")
-    async def rollback_profile(profile_id: str, payload: dict[str, Any] = Body(default_factory=dict)):
+    async def rollback_profile(profile_id: str, payload: Annotated[dict[str, Any] | None, Body()] = None):
+        payload = payload or {}
         if not manager.profile_registry:
             raise HTTPException(status_code=501, detail="Profile registry is unavailable")
         backup_path = payload.get("backup_path")
@@ -369,7 +449,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"profile_id": profile_id, "path": path, "status": "verified"}
 
     @app.post("/api/profiles/{profile_id}/invalidate")
-    async def invalidate_profile(profile_id: str, payload: dict[str, Any] = Body(...)):
+    async def invalidate_profile(profile_id: str, payload: Annotated[dict[str, Any], Body()]):
         if not manager.profile_registry:
             raise HTTPException(status_code=501, detail="Profile registry is unavailable")
         reason = payload.get("reason")
@@ -377,16 +457,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="a non-empty invalidation reason is required")
         target_app_id, _ = _split_profile_identifier(profile_id)
         try:
-            current = manager.profile_registry.get(
-                target_app_id=target_app_id, status=ProfileStatus.VERIFIED
-            )
+            current = manager.profile_registry.get(target_app_id=target_app_id, status=ProfileStatus.VERIFIED)
             if current is None:
                 raise ProfileNotFoundError(f"verified Profile not found: {target_app_id}")
             if current.locked:
                 raise ProfileLockedError(f"verified Profile is locked: {target_app_id}")
-            path = await asyncio.to_thread(
-                manager.profile_registry.invalidate, target_app_id, reason.strip()
-            )
+            path = await asyncio.to_thread(manager.profile_registry.invalidate, target_app_id, reason.strip())
         except (ProfileNotFoundError, KeyError, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ProfileLockedError as exc:
@@ -400,7 +476,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return manager.repository.list_runs(limit)
 
     @app.post("/api/runs", status_code=status.HTTP_202_ACCEPTED)
-    async def create_run(payload: dict[str, Any] = Body(...)):
+    async def create_run(payload: Annotated[dict[str, Any], Body()]):
         """接受新目标契约并继续兼容历史 target_app_id 请求。"""
         try:
             request = _build_run_request(payload)
@@ -421,7 +497,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return trace
 
     @app.post("/api/runs/{run_id}/target-selection")
-    async def target_selection(run_id: str, selection: dict[str, Any] = Body(...)):
+    async def target_selection(run_id: str, selection: Annotated[dict[str, Any], Body()]):
         if not (selection.get("candidate_id") or selection.get("bundle_name")):
             raise HTTPException(status_code=422, detail="candidate_id or bundle_name is required")
         result = await manager.select_target(run_id, selection)
@@ -495,6 +571,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "python": trace.generated.python_path.read_text(encoding="utf-8"),
             "config": json.loads(trace.generated.config_path.read_text(encoding="utf-8")),
             "warnings": trace.generated.warnings,
+            "generated_at": trace.generated.generated_at,
+            "purpose": trace.generated.purpose,
+            "diagnostic": trace.generated.purpose == "diagnostic",
+            "acceptance_replay_enabled": trace.generated.replay_eligible,
+            "source_agent_outcome": trace.generated.source_agent_outcome,
+            "source_action_count": trace.generated.source_action_count,
+            "included_action_count": trace.generated.included_action_count,
+            "incomplete_reasons": trace.generated.incomplete_reasons,
         }
 
     @app.post("/api/runs/{run_id}/generate")
@@ -507,21 +591,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ReportBuilder(manager.artifacts).build(trace)
         return trace.generated
 
-    @app.post("/api/runs/{run_id}/execute")
+    @app.post("/api/runs/{run_id}/execute", status_code=status.HTTP_202_ACCEPTED)
     async def execute(run_id: str, attempts: int = Query(default=3, ge=1, le=3)):
+        """Queue eligible Hypium replays and return before device execution starts."""
         trace = _trace_or_404(manager, run_id)
         if not trace.generated:
             raise HTTPException(status_code=409, detail="generate the Hypium script first")
         if trace.provisional:
-            raise HTTPException(status_code=409, detail="provisional runs cannot execute formal Hypium regression cases")
-        trace.state = RunState.SCRIPT_EXECUTING
-        runner = HypiumRunner(settings.resolved_runtime_home)
-        trace.replays = await asyncio.to_thread(runner.execute_repeated, trace.generated, attempts)
-        trace.state = RunState.COMPLETED if all(item.passed for item in trace.replays) else RunState.FAILED_SCRIPT
-        manager.repository.save_trace(trace)
-        manager.artifacts.save_trace(trace)
-        ReportBuilder(manager.artifacts).build(trace)
-        return {"passed": all(item.passed for item in trace.replays), "replays": trace.replays}
+            raise HTTPException(
+                status_code=409,
+                detail="provisional runs cannot execute formal Hypium regression cases",
+            )
+        if manager.replay_running(run_id):
+            raise HTTPException(status_code=409, detail="Hypium replay is already running")
+        if trace.replay_status == "pending":
+            manager.recover_stale_replay(trace)
+        if not trace.generated.replay_eligible:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "diagnostic script is not eligible for acceptance replay",
+                    "incomplete_reasons": trace.generated.incomplete_reasons,
+                },
+            )
+        try:
+            manager.start_replay(run_id, attempts)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"run_id": run_id, "status": "pending", "attempts": attempts}
 
     @app.get("/api/runs/{run_id}/report")
     async def report(run_id: str, download: bool = False):
@@ -557,9 +654,7 @@ def _build_run_request(payload: dict[str, Any]) -> RunRequest:
         if not isinstance(discovery, dict):
             raise ValueError("discovery must be an object")
         policy = dict(discovery)
-        data["temporary_test"] = bool(
-            policy.pop("temporary_test", data.get("temporary_test", False))
-        )
+        data["temporary_test"] = bool(policy.pop("temporary_test", data.get("temporary_test", False)))
         data["exploration_policy"] = policy
     return RunRequest.model_validate(data)
 
@@ -575,7 +670,7 @@ def _build_optional_service(candidates: tuple[tuple[str, str], ...], **dependenc
     for module_name, symbol_name in candidates:
         try:
             symbol = getattr(importlib.import_module(module_name), symbol_name)
-        except (ImportError, AttributeError):
+        except ImportError, AttributeError:
             continue
         try:
             return _call_filtered(symbol, dependencies)
@@ -587,7 +682,9 @@ def _build_optional_service(candidates: tuple[tuple[str, str], ...], **dependenc
 def _call_filtered(callable_object: Any, values: dict[str, Any]) -> Any:
     signature = inspect.signature(callable_object)
     accepts_kwargs = any(parameter.kind == parameter.VAR_KEYWORD for parameter in signature.parameters.values())
-    arguments = values if accepts_kwargs else {key: value for key, value in values.items() if key in signature.parameters}
+    arguments = (
+        values if accepts_kwargs else {key: value for key, value in values.items() if key in signature.parameters}
+    )
     return callable_object(**arguments)
 
 
@@ -606,7 +703,9 @@ async def _invoke_optional(service: Any, names: tuple[str, ...], **values: Any) 
 
 
 async def _list_targets_from_device(settings: Settings, device_id: str | None) -> Any:
-    device = HarmonyDeviceAdapter(device_id or settings.harmony_device, settings.hdc_path, settings.agent_action_timeout)
+    device = HarmonyDeviceAdapter(
+        device_id or settings.harmony_device, settings.hdc_path, settings.agent_action_timeout
+    )
     try:
         return await _invoke_optional(device, ("list_installed_apps", "list_applications", "installed_apps"))
     finally:
@@ -622,7 +721,9 @@ def _resolve_from_candidates(query: dict[str, Any], candidates: Any) -> dict[str
         data = item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
         bundle = str(data.get("bundle_name") or data.get("bundleName") or "")
         name = str(data.get("display_name") or data.get("app_name") or data.get("label") or "")
-        if (bundle_name and bundle.casefold() == bundle_name) or (not bundle_name and app_name and name.casefold() == app_name):
+        if (bundle_name and bundle.casefold() == bundle_name) or (
+            not bundle_name and app_name and name.casefold() == app_name
+        ):
             matches.append(data)
     if len(matches) == 1:
         return {"status": "resolved", "target": matches[0], "candidates": matches}
@@ -650,11 +751,7 @@ def _profile_summary(profile: Any, registry: Any | None = None) -> dict[str, Any
     data = profile.model_dump(mode="json") if hasattr(profile, "model_dump") else dict(profile)
     target_id = data.get("target_app_id")
     profile_status = data.get("status")
-    profile_id = (
-        target_id
-        if profile_status == ProfileStatus.VERIFIED
-        else f"{profile_status}:{target_id}"
-    )
+    profile_id = target_id if profile_status == ProfileStatus.VERIFIED else f"{profile_status}:{target_id}"
     version = data.get("app_version") or {}
     provenance = data.get("provenance") or {}
     evidence = provenance.get("evidence") or {}
@@ -665,11 +762,9 @@ def _profile_summary(profile: Any, registry: Any | None = None) -> dict[str, Any
         for path in sorted(history_dir.glob("*.json")):
             try:
                 json.loads(path.read_text(encoding="utf-8-sig"))
-            except (OSError, json.JSONDecodeError):
+            except OSError, json.JSONDecodeError:
                 continue
-            history.append(
-                {"backup_name": str(path.relative_to(registry.history_dir)).replace("\\", "/")}
-            )
+            history.append({"backup_name": str(path.relative_to(registry.history_dir)).replace("\\", "/")})
     return {
         "profile_id": profile_id,
         "target_app_id": target_id,
@@ -698,7 +793,11 @@ def _split_profile_identifier(profile_id: str) -> tuple[str, ProfileStatus | Non
 
 def _fallback_profile_get(settings: Settings, profile_id: str) -> dict[str, Any] | None:
     for profile in _fallback_profile_list(settings):
-        if profile.get("profile_id") == profile_id or profile.get("target_app_id") == profile_id or profile.get("bundle_name") == profile_id:
+        if (
+            profile.get("profile_id") == profile_id
+            or profile.get("target_app_id") == profile_id
+            or profile.get("bundle_name") == profile_id
+        ):
             return profile
     return None
 
@@ -708,7 +807,11 @@ def _fallback_profile_lock(settings: Settings, profile_id: str, locked: bool) ->
     if profile is None:
         raise HTTPException(status_code=404, detail="profile not found")
     path = next(
-        (candidate for candidate in _profile_dir(settings).glob("*.json") if candidate.stem == profile.get("target_app_id")),
+        (
+            candidate
+            for candidate in _profile_dir(settings).glob("*.json")
+            if candidate.stem == profile.get("target_app_id")
+        ),
         None,
     )
     if path is None:
@@ -728,3 +831,14 @@ def _trace_or_404(manager: RunManager, run_id: str):
     if not trace:
         raise HTTPException(status_code=404, detail="run not found")
     return trace
+
+
+def _unexpected_replay_result(attempt: int, exc: Exception) -> ReplayResult:
+    """Convert an unexpected runner failure into a persisted structured result."""
+    message = f"{type(exc).__name__}: {exc}"
+    return ReplayResult(
+        attempt=attempt,
+        command=CommandResult(command="HypiumRunner.execute", returncode=None),
+        status="failed",
+        error=ReplayError(kind="process_exit", message=message),
+    )

@@ -10,7 +10,6 @@ from .explorer import (
     DiscoveryTransition,
     ExplorationAction,
 )
-from ..models import ExplorationPolicy
 from .stability import (
     AssertionObservation,
     LocatorObservation,

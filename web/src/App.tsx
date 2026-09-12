@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  Activity, Bot, Braces, CircleStop, FileCode2, GitBranch, Lock, MonitorSmartphone,
-  Play, RefreshCw, Search, ServerCog, ShieldCheck, TerminalSquare, Unlock,
+  Activity, Bot, Braces, CircleStop, ExternalLink, FileCode2, GitBranch, Lock,
+  MonitorSmartphone, Play, RefreshCw, RotateCcw, Search, ServerCog, ShieldCheck, TerminalSquare, Unlock,
 } from "lucide-react";
 import PageGraphView from "./components/PageGraphView";
 import type {
-  DiscoveryPolicy, DiscoveryStatus, Health, ProfileSummary, RunEvent, RunTrace,
-  ScriptResult, TargetCandidate,
+  DiscoveryPolicy, DiscoveryStatus, ExecuteResult, Health, ProfileSummary, ReplayResult,
+  RunEvent, RunTrace, ScriptResult, TargetCandidate,
 } from "./types";
 
-const API = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+const configuredApi = String(import.meta.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
+const API_DISPLAY = configuredApi || `${window.location.origin}/api`;
 const terminalStates = new Set([
   "completed", "failed_device", "failed_model", "failed_element", "failed_action",
   "failed_assertion", "failed_script", "failed_target_resolution", "failed_target_probe",
@@ -20,12 +21,14 @@ const eventTypes = [
   "profile_revalidation_started", "profile_revalidation_finished", "discovery_started", "discovery_progress",
   "discovery_finished", "discovery_path_blocked", "locator_candidate_observed", "profile_draft_saved",
   "profile_verification_round_finished", "hypium_replay_finished", "profile_promoted", "original_task_started",
-  "preflight_passed", "screen_captured", "elements_detected", "plan_created", "action_started",
-  "action_finished", "assertion_passed", "assertion_failed", "page_discovered", "edge_created",
-  "script_generated", "execution_started", "execution_finished", "run_failed", "run_finished",
+  "preflight_passed", "screen_captured", "elements_detected", "plan_created",
+  "action_started", "action_finished", "assertion_passed", "assertion_failed", "page_discovered",
+  "edge_created", "script_generated", "execution_started", "execution_finished", "run_failed", "run_finished",
 ];
 type Tab = "live" | "graph" | "script" | "profiles" | "report";
 type TargetKind = "app_name" | "bundle_name";
+type Operation = "idle" | "generating" | "executing";
+type ProfileAction = "verify" | "lock" | "rollback";
 
 const defaultPolicy: DiscoveryPolicy = {
   enabled: true, allow_login: false, allow_permission: false, allow_submit: false,
@@ -33,13 +36,29 @@ const defaultPolicy: DiscoveryPolicy = {
   max_actions_per_page: 8, max_duration_seconds: 900, temporary_test: false,
 };
 
+function apiUrl(path: string) {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  if (!configuredApi) return normalized;
+  if (configuredApi.endsWith("/api") && normalized.startsWith("/api/")) {
+    return configuredApi + normalized.slice(4);
+  }
+  return configuredApi + normalized;
+}
+
+function apiError(label: string, cause: unknown) {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return `${label}：${detail}`;
+}
+
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [healthUnavailable, setHealthUnavailable] = useState(false);
+  const [healthLoading, setHealthLoading] = useState(false);
   const [targetKind, setTargetKind] = useState<TargetKind>("app_name");
   const [targetValue, setTargetValue] = useState("");
   const [task, setTask] = useState("");
-  const [mode, setMode] = useState("regression");
   const [policy, setPolicy] = useState(defaultPolicy);
+  const [mode, setMode] = useState("regression");
   const [runId, setRunId] = useState(() => new URLSearchParams(window.location.search).get("run_id") ?? "");
   const [trace, setTrace] = useState<RunTrace | null>(null);
   const [discovery, setDiscovery] = useState<DiscoveryStatus | null>(null);
@@ -50,161 +69,309 @@ export default function App() {
   const [selectedCandidate, setSelectedCandidate] = useState("");
   const [tab, setTab] = useState<Tab>(() => {
     const requested = new URLSearchParams(window.location.search).get("tab");
-    return requested && ["live", "graph", "script", "profiles", "report"].includes(requested)
-      ? requested as Tab : "live";
+    return requested && ["live", "graph", "script", "profiles", "report"].includes(requested) ? requested as Tab : "live";
   });
-  const [busy, setBusy] = useState(false);
+  const [runBusy, setRunBusy] = useState(false);
+  const [operation, setOperation] = useState<Operation>("idle");
+  const [attemptCount, setAttemptCount] = useState<1 | 3>(3);
+  const [executionStartedAt, setExecutionStartedAt] = useState<number | null>(null);
+  const [clock, setClock] = useState(Date.now());
   const [error, setError] = useState("");
+  const [reportReady, setReportReady] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportRevision, setReportRevision] = useState(0);
+  const locks = useRef(new Set<string>());
 
-  const loadHealth = async () => {
+  const loadHealth = useCallback(async () => {
+    if (locks.current.has("health")) return;
+    locks.current.add("health");
+    setHealthLoading(true);
     try {
-      const response = await fetch(API + "/api/health");
-      if (!response.ok) throw new Error("health " + response.status);
-      setHealth(await response.json());
-    } catch (cause) { setError("无法连接后端：" + String(cause)); }
-  };
-  const loadProfiles = async () => {
-    const response = await fetch(API + "/api/profiles");
-    if (response.ok) setProfiles(await response.json());
-  };
-  useEffect(() => { void loadHealth(); void loadProfiles(); }, []);
+      const response = await fetch(apiUrl("/api/health"));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setHealth(await response.json() as Health);
+      setHealthUnavailable(false);
+      setError("");
+    } catch (cause) {
+      setHealth(null);
+      setHealthUnavailable(true);
+      setError(apiError("API 不可用", cause));
+    } finally {
+      setHealthLoading(false);
+      locks.current.delete("health");
+    }
+  }, []);
+
+  const loadProfiles = useCallback(async (quiet = false) => {
+    try {
+      const response = await fetch(apiUrl("/api/profiles"));
+      if (!response.ok) throw new Error(await response.text());
+      setProfiles(await response.json() as ProfileSummary[]);
+    } catch (cause) {
+      if (!quiet) setError(apiError("读取 Profile 失败", cause));
+    }
+  }, []);
+
+  useEffect(() => { void loadHealth(); void loadProfiles(true); }, [loadHealth, loadProfiles]);
 
   useEffect(() => {
     if (!runId) return;
-    const source = new EventSource(API + "/api/runs/" + runId + "/events");
+    const source = new EventSource(apiUrl(`/api/runs/${encodeURIComponent(runId)}/events`));
     const handler = (message: MessageEvent) => {
-      const event = JSON.parse(message.data) as RunEvent;
-      setEvents((current) => current.some((item) => item.event_id === event.event_id) ? current : [...current, event]);
-      if (event.type === "target_candidates_found") {
-        const next = event.payload.candidates;
-        if (Array.isArray(next)) setCandidates(next as TargetCandidate[]);
+      try {
+        const event = JSON.parse(String(message.data)) as RunEvent;
+        setEvents((current) => current.some((item) => item.event_id === event.event_id) ? current : [...current, event]);
+        if (event.type === "target_candidates_found") {
+          const next = event.payload.candidates;
+          if (Array.isArray(next)) setCandidates(next as TargetCandidate[]);
+        }
+      } catch (cause) {
+        setError(apiError("无法解析运行事件", cause));
       }
     };
     eventTypes.forEach((name) => source.addEventListener(name, handler as EventListener));
-    source.onerror = () => {
-      if (source.readyState === EventSource.CLOSED) source.close();
-    };
+    source.onerror = () => source.close();
     return () => source.close();
+  }, [runId]);
+
+  const refreshTrace = useCallback(async (id = runId, quiet = false) => {
+    if (!id) return null;
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(id)}`));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const next = await response.json() as RunTrace;
+      if (next.snapshots) setTrace(next);
+      if (next.target_candidates?.length) setCandidates(next.target_candidates);
+      return next;
+    } catch (cause) {
+      if (!quiet) setError(apiError("无法刷新运行状态", cause));
+      return null;
+    } finally {
+      // 调用方负责下一轮调度，确保任何请求结局都不会形成重叠轮询。
+    }
+  }, [runId]);
+
+  const refreshDiscovery = useCallback(async (id = runId, quiet = false) => {
+    if (!id) return null;
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(id)}/discovery`));
+      if (!response.ok) throw new Error(await response.text());
+      const next = await response.json() as DiscoveryStatus;
+      setDiscovery(next);
+      if (next.target_candidates?.length) setCandidates(next.target_candidates);
+      return next;
+    } catch (cause) {
+      if (!quiet) setError(apiError("无法刷新目标发现状态", cause));
+      return null;
+    }
   }, [runId]);
 
   useEffect(() => {
     if (!runId) return;
     let cancelled = false;
+    let timer = 0;
     const poll = async () => {
       try {
-        const [traceResponse, discoveryResponse] = await Promise.all([
-          fetch(API + "/api/runs/" + runId), fetch(API + "/api/runs/" + runId + "/discovery"),
-        ]);
-        if (traceResponse.ok && !cancelled) {
-          const next = (await traceResponse.json()) as RunTrace;
-          if (next.snapshots) setTrace(next);
-          if (next.target_candidates?.length) setCandidates(next.target_candidates);
-          if (!terminalStates.has(next.state)) window.setTimeout(poll, 800);
-          else { setBusy(false); void loadProfiles(); }
-        } else if (!cancelled && traceResponse.status === 404) {
-          setBusy(false);
-          setError("运行不存在或已经被清理");
-        } else if (!cancelled) window.setTimeout(poll, 500);
-        if (discoveryResponse.ok && !cancelled) {
-          const nextDiscovery = (await discoveryResponse.json()) as DiscoveryStatus;
-          setDiscovery(nextDiscovery);
-          if (nextDiscovery.target_candidates?.length) setCandidates(nextDiscovery.target_candidates);
+        const [next] = await Promise.all([refreshTrace(runId, true), refreshDiscovery(runId, true)]);
+        if (!cancelled && next && terminalStates.has(next.state)) setRunBusy(false);
+        if (!cancelled && (!next || !terminalStates.has(next.state) || next.replay_status === "pending" || operation === "executing")) {
+          timer = window.setTimeout(poll, next ? 900 : 550);
         }
-      } catch (cause) { if (!cancelled) setError(String(cause)); }
+      } catch (cause) {
+        if (!cancelled) setError(apiError("运行轮询失败", cause));
+      } finally {
+        // timer 在成功和失败路径中均由上方串行安排。
+      }
     };
     void poll();
-    return () => { cancelled = true; };
-  }, [runId]);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [runId, operation, refreshDiscovery, refreshTrace]);
+
+  useEffect(() => {
+    if (operation !== "executing") return;
+    const timer = window.setInterval(() => setClock(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [operation]);
 
   const resolveTarget = async () => {
-    if (!targetValue.trim()) return;
-    setBusy(true); setError("");
+    if (!targetValue.trim() || locks.current.has("resolve")) return;
+    locks.current.add("resolve"); setError("");
     try {
-      const response = await fetch(API + "/api/targets/resolve", {
+      const response = await fetch(apiUrl("/api/targets/resolve"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: { [targetKind]: targetValue.trim() } }),
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail ?? response.statusText);
-      const nextCandidates = (result.candidates ?? []) as TargetCandidate[];
-      setCandidates(nextCandidates);
+      const result = await response.json() as { target?: TargetCandidate; candidates?: TargetCandidate[]; detail?: unknown };
+      if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : JSON.stringify(result.detail));
+      setCandidates(result.candidates ?? []); setSelectedCandidate("");
       if (result.target?.bundle_name && targetKind === "bundle_name") setTargetValue(result.target.bundle_name);
-      if (result.status === "not_found") setError("未找到匹配的已安装应用");
-    } catch (cause) { setError(String(cause)); }
-    finally { setBusy(false); }
+    } catch (cause) {
+      setError(apiError("解析目标失败", cause));
+    } finally {
+      locks.current.delete("resolve");
+    }
   };
 
   const startRun = async () => {
-    if (!targetValue.trim()) return;
-    setBusy(true); setError(""); setEvents([]); setTrace(null); setDiscovery(null); setScript(null); setCandidates([]); setTab("live");
+    if (!targetValue.trim() || locks.current.has("start")) return;
+    locks.current.add("start");
+    setRunBusy(true); setError(""); setEvents([]); setTrace(null); setDiscovery(null);
+    setScript(null); setCandidates([]); setSelectedCandidate(""); setTab("live");
     try {
-      const response = await fetch(API + "/api/runs", {
+      const response = await fetch(apiUrl("/api/runs"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          target: { [targetKind]: targetValue.trim() },
-          task: task.trim() || undefined,
+          target: { [targetKind]: targetValue.trim() }, task: task.trim() || undefined,
           mode, max_steps: 20, auto_generate: true, discovery: policy,
         }),
       });
       if (!response.ok) throw new Error(await response.text());
-      setRunId((await response.json()).run_id);
-    } catch (cause) { setBusy(false); setError(String(cause)); }
+      const result = await response.json() as { run_id: string };
+      setRunId(result.run_id);
+    } catch (cause) {
+      setError(apiError("启动 Agent 失败", cause)); setRunBusy(false);
+    } finally {
+      locks.current.delete("start");
+    }
   };
 
   const submitCandidate = async () => {
-    if (!runId || !selectedCandidate) return;
+    if (!runId || !selectedCandidate || locks.current.has("candidate")) return;
     const candidate = candidates.find((item) => (item.candidate_id ?? item.bundle_name) === selectedCandidate);
     if (!candidate) return;
-    const response = await fetch(API + "/api/runs/" + runId + "/target-selection", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ candidate_id: candidate.candidate_id, bundle_name: candidate.bundle_name }),
-    });
-    if (!response.ok) setError(await response.text()); else setCandidates([]);
+    locks.current.add("candidate"); setError("");
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(runId)}/target-selection`), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate_id: candidate.candidate_id, bundle_name: candidate.bundle_name }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setCandidates([]); setSelectedCandidate("");
+    } catch (cause) {
+      setError(apiError("确认目标失败", cause));
+    } finally {
+      locks.current.delete("candidate");
+    }
   };
 
   const stopRun = async () => {
-    if (!runId) return;
-    await fetch(API + "/api/runs/" + runId + "/stop", { method: "POST" });
-    setBusy(false);
-  };
-  const loadScript = async () => {
-    if (!runId) return;
-    const response = await fetch(API + "/api/runs/" + runId + "/script");
-    if (response.ok) setScript(await response.json());
-  };
-  const generate = async () => {
-    if (!runId) return;
-    setBusy(true);
-    const response = await fetch(API + "/api/runs/" + runId + "/generate", { method: "POST" });
-    setBusy(false);
-    if (!response.ok) return setError(await response.text());
-    await loadScript(); setTab("script");
-  };
-  const execute = async () => {
-    if (!runId) return;
-    setBusy(true);
-    const response = await fetch(API + "/api/runs/" + runId + "/execute?attempts=3", { method: "POST" });
-    setBusy(false);
-    if (!response.ok) setError(await response.text());
-    else { const latest = await fetch(API + "/api/runs/" + runId); if (latest.ok) setTrace(await latest.json()); }
-  };
-  const updateProfile = async (profile: ProfileSummary, action: "verify" | "lock" | "rollback") => {
-    const response = await fetch(API + "/api/profiles/" + encodeURIComponent(profile.target_app_id ?? profile.profile_id) + "/" + action, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: action === "lock" ? JSON.stringify({ locked: !profile.locked }) : action === "rollback" ? JSON.stringify({ backup_name: profile.history?.at(-1)?.backup_name }) : JSON.stringify({ status: profile.status }),
-    });
-    if (!response.ok) setError(await response.text());
-    else {
-      const result = await response.json();
-      if (action === "verify" && result.run_id) {
-        setRunId(result.run_id as string);
-        setTab("live");
-        setBusy(true);
-      }
-      void loadProfiles();
+    if (!runId || locks.current.has("stop")) return;
+    locks.current.add("stop");
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(runId)}/stop`), { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+    } catch (cause) {
+      setError(apiError("停止运行失败", cause));
+    } finally {
+      setRunBusy(false);
+      locks.current.delete("stop");
     }
   };
-  useEffect(() => { if (tab === "script") void loadScript(); if (tab === "profiles") void loadProfiles(); }, [tab, runId]);
+
+  const loadScript = useCallback(async (quiet = false) => {
+    if (!runId) return;
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(runId)}/script`));
+      if (response.status === 404) { setScript(null); return; }
+      if (!response.ok) throw new Error(await response.text());
+      setScript(await response.json() as ScriptResult);
+    } catch (cause) {
+      if (!quiet) setError(apiError("读取 Hypium 脚本失败", cause));
+    } finally {
+      // 读取结束后不保留独立忙碌状态。
+    }
+  }, [runId]);
+
+  const generate = async () => {
+    if (!runId || locks.current.has("generate")) return;
+    locks.current.add("generate");
+    setOperation("generating"); setError("");
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(runId)}/generate`), { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+      await loadScript();
+      await refreshTrace(runId, true);
+      setReportRevision((value) => value + 1);
+      setTab("script");
+    } catch (cause) {
+      setError(apiError("生成 Hypium 脚本失败", cause));
+    } finally {
+      setOperation("idle");
+      locks.current.delete("generate");
+    }
+  };
+
+  const execute = async () => {
+    if (!runId || locks.current.has("execute")) return;
+    locks.current.add("execute");
+    setOperation("executing"); setExecutionStartedAt(Date.now()); setClock(Date.now()); setError("");
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(runId)}/execute?attempts=${attemptCount}`), { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json() as ExecuteResult;
+      if (result.replays) setTrace((current) => current ? { ...current, replays: result.replays ?? current.replays } : current);
+      let next = await refreshTrace(runId, true);
+      while (next?.replay_status === "pending") {
+        await new Promise((resolve) => window.setTimeout(resolve, 900));
+        next = await refreshTrace(runId, true);
+      }
+      setReportRevision((value) => value + 1);
+    } catch (cause) {
+      setError(apiError("Hypium 验收回放失败", cause));
+    } finally {
+      setOperation("idle");
+      setExecutionStartedAt(null);
+      locks.current.delete("execute");
+    }
+  };
+
+  const updateProfile = async (profile: ProfileSummary, action: ProfileAction) => {
+    const key = `profile-${profile.profile_id}-${action}`;
+    if (locks.current.has(key)) return;
+    locks.current.add(key); setError("");
+    const profileId = encodeURIComponent(profile.target_app_id ?? profile.profile_id);
+    const body = action === "lock" ? { locked: !profile.locked }
+      : action === "rollback" ? { backup_name: profile.history?.at(-1)?.backup_name }
+        : { status: profile.status };
+    try {
+      const response = await fetch(apiUrl(`/api/profiles/${profileId}/${action}`), {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json() as { run_id?: string };
+      if (action === "verify" && result.run_id) {
+        setRunId(result.run_id); setTab("live"); setRunBusy(true);
+        setEvents([]); setTrace(null); setDiscovery(null);
+      }
+      await loadProfiles(true);
+    } catch (cause) {
+      setError(apiError("更新 Profile 失败", cause));
+    } finally {
+      locks.current.delete(key);
+    }
+  };
+
+  useEffect(() => { if (tab === "script") void loadScript(true); if (tab === "profiles") void loadProfiles(true); }, [tab, runId, loadProfiles, loadScript]);
+
+  const traceRevision = trace?.revision ?? trace?.updated_at ?? `${trace?.state ?? "none"}-${trace?.replays.length ?? 0}-${trace?.generated ? 1 : 0}`;
+  const probeReport = useCallback(async () => {
+    if (!runId || locks.current.has("report")) return;
+    locks.current.add("report");
+    setReportLoading(true); setReportReady(false);
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(runId)}/report?revision=${encodeURIComponent(String(traceRevision))}`));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      await response.text();
+      setReportReady(true);
+    } catch (cause) {
+      setError(apiError("报告暂不可用", cause));
+    } finally {
+      setReportLoading(false);
+      locks.current.delete("report");
+    }
+  }, [runId, traceRevision]);
+
+  useEffect(() => { if (tab === "report" && runId) void probeReport(); }, [tab, runId, reportRevision, probeReport]);
 
   const latestSnapshot = trace?.snapshots.at(-1);
   const graphArtifactUrl = useCallback((path: string) => artifactUrl(runId, path), [runId]);
@@ -212,92 +379,206 @@ export default function App() {
   const resolved = discovery?.resolved_target ?? trace?.resolved_target;
   const profileStatus = discovery?.profile_status ?? trace?.profile_snapshot?.status ?? trace?.profile_status_at_start ?? "未创建";
   const blockedPaths = discovery?.blocked_paths ?? [];
+  const scriptDiagnostic = script?.diagnostic ?? (script?.purpose ? script.purpose === "diagnostic" : !["regression", "stability"].includes(trace?.mode ?? mode));
+  const replayAllowed = (script?.acceptance_replay_enabled ?? !scriptDiagnostic) && !trace?.provisional;
+  const scriptStatus = operation === "generating" ? "生成中" : script ? (scriptDiagnostic ? "诊断脚本" : "已生成") : trace?.generated ? "正在读取" : "待自动生成";
+  const operationBusy = operation !== "idle";
+  const completedAttempts = trace?.replay_completed ?? trace?.replays.filter((item) => ["passed", "failed", "timed_out", "ineligible", "invalid_result"].includes(replayStatus(item))).length ?? 0;
+  const progress = operation === "executing" ? Math.min(95, Math.max(8, (completedAttempts / attemptCount) * 100)) : trace?.replays.length ? 100 : 0;
+  const reportUrl = apiUrl(`/api/runs/${encodeURIComponent(runId)}/report?revision=${encodeURIComponent(`${traceRevision}-${reportRevision}`)}`);
 
-  return <div className="app-shell">
-    <header className="topbar">
-      <div className="brand-mark"><Bot size={21} aria-hidden="true" /></div>
-      <div><p className="eyebrow">OPENHARMONY QUALITY LAB</p><h1>Multimodal Test Agent</h1></div>
-      <div className="topbar-status">
-        <StatusDot ok={Boolean(health?.device.connected)} label={health?.device.connected ? "设备在线" : "设备离线"} />
-        <StatusDot ok={Boolean(health?.model.configured)} label={health?.model.configured ? "VLM 已配置" : "Mock 模式"} />
-      </div>
-    </header>
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand-mark"><Bot size={21} aria-hidden="true" /></div>
+        <div><p className="eyebrow">OPENHARMONY QUALITY LAB</p><h1>Multimodal Test Agent</h1></div>
+        <div className="topbar-status">
+          <StatusDot ok={Boolean(health?.device.connected)} label={health?.device.connected ? "设备在线" : "设备离线"} />
+          <StatusDot ok={Boolean(health?.model.configured)} label={health?.model.configured ? "VLM 已配置" : "Mock 模式"} />
+        </div>
+      </header>
 
-    <main className="workspace">
-      <aside className="control-panel">
-        <section className="panel intro-panel">
-          <div className="section-title"><TerminalSquare size={18} /><span>目标与任务</span></div>
-          <div className="target-kind" role="group" aria-label="目标输入类型">
-            <button className={targetKind === "app_name" ? "active" : ""} onClick={() => setTargetKind("app_name")}>应用名称</button>
-            <button className={targetKind === "bundle_name" ? "active" : ""} onClick={() => setTargetKind("bundle_name")}>bundleName</button>
-          </div>
-          <label htmlFor="target">{targetKind === "app_name" ? "已安装应用名称" : "精确 bundleName"}</label>
-          <div className="input-action"><input id="target" value={targetValue} onChange={(event) => setTargetValue(event.target.value)} placeholder={targetKind === "app_name" ? "例如：备忘录" : "com.example.app"} /><button className="secondary" onClick={resolveTarget} disabled={busy || !targetValue.trim()}><Search size={15} />解析</button></div>
-          <label htmlFor="task">自然语言测试目标（可选）</label>
-          <textarea id="task" value={task} onChange={(event) => setTask(event.target.value)} rows={4} placeholder="留空时执行启动、探索、返回和重启恢复冒烟测试" />
-          <div className="field-row"><div><label htmlFor="mode">运行模式</label><select id="mode" value={mode} onChange={(event) => setMode(event.target.value)}><option value="regression">回归测试</option><option value="exploration">探索测试</option><option value="stability">稳定性测试</option><option value="reproduction">问题复现</option></select></div><div><label>当前 Profile</label><div className="static-field"><StatusBadge value={profileStatus} /></div></div></div>
-          <PolicyEditor policy={policy} onChange={setPolicy} />
-          <div className="button-row"><button className="primary" onClick={startRun} disabled={busy || !targetValue.trim()}><Play size={17} />启动 Agent</button><button className="danger" onClick={stopRun} disabled={!busy || !runId}><CircleStop size={17} />停止</button></div>
+      <main className="workspace">
+        <aside className="control-panel">
+          <section className="panel intro-panel">
+            <div className="section-title"><TerminalSquare size={18} /><span>目标与任务</span></div>
+            <div className="target-kind" role="group" aria-label="目标输入类型">
+              <button className={targetKind === "app_name" ? "active" : ""} onClick={() => setTargetKind("app_name")}>应用名称</button>
+              <button className={targetKind === "bundle_name" ? "active" : ""} onClick={() => setTargetKind("bundle_name")}>bundleName</button>
+            </div>
+            <label htmlFor="target">{targetKind === "app_name" ? "已安装应用名称" : "精确 bundleName"}</label>
+            <div className="input-action"><input id="target" value={targetValue} onChange={(event) => setTargetValue(event.target.value)} placeholder={targetKind === "app_name" ? "例如：备忘录" : "com.example.app"} /><button className="secondary" onClick={resolveTarget} disabled={runBusy || operationBusy || !targetValue.trim()}><Search size={15} />解析</button></div>
+            <label htmlFor="task">自然语言测试目标（可选）</label>
+            <textarea id="task" value={task} onChange={(event) => setTask(event.target.value)} rows={4} placeholder="留空时执行启动、探索、返回和重启恢复冒烟测试" />
+            <div className="field-row">
+              <div><label htmlFor="mode">运行模式</label><select id="mode" value={mode} onChange={(event) => setMode(event.target.value)}><option value="regression">回归测试</option><option value="exploration">探索诊断</option><option value="stability">稳定性测试</option><option value="reproduction">问题诊断</option></select></div>
+              <div><label>当前 Profile</label><div className="static-field"><StatusBadge value={profileStatus} /></div></div>
+            </div>
+            <PolicyEditor policy={policy} onChange={setPolicy} />
+            <div className="button-row">
+              <button className="primary" onClick={startRun} disabled={runBusy || operationBusy || !targetValue.trim()}><Play size={17} />启动 Agent</button>
+              <button className="danger" onClick={stopRun} disabled={!runBusy || !runId}><CircleStop size={17} />停止</button>
+            </div>
+          </section>
+
+          <section className="panel health-panel">
+            <div className="section-title"><ServerCog size={18} /><span>运行环境</span>
+              <button className="icon-button" onClick={loadHealth} disabled={healthLoading} aria-label="刷新环境状态"><RefreshCw size={15} /></button>
+            </div>
+            <HealthRow icon={<MonitorSmartphone size={16} />} label="HDC Device" value={health?.device.id ?? "unknown"} ok={Boolean(health?.device.connected)} />
+            <HealthRow icon={<Bot size={16} />} label="Agent Provider" value={health?.model.provider ?? "unknown"} ok={Boolean(health)} />
+            <HealthRow icon={<ShieldCheck size={16} />} label="Hypium" value={health?.hypium.version ?? "not found"} ok={Boolean(health?.hypium.importable)} />
+          </section>
+
+          {runId && <section className="panel run-card">
+            <p className="eyebrow">CURRENT RUN</p><code>{runId}</code><div className={`state-pill state-${state}`}>{state}</div>
+            <div className="metrics"><Metric label="步骤" value={trace?.actions.length ?? 0} /><Metric label="页面" value={trace?.graph.nodes.length ?? 0} /><Metric label="断言" value={trace?.assertions.length ?? 0} /></div>
+          </section>}
+        </aside>
+
+        <section className="main-panel">
+          <nav className="tabs" aria-label="运行结果视图">
+            <TabButton active={tab === "live"} onClick={() => setTab("live")} icon={<Activity size={16} />} label="实时执行" />
+            <TabButton active={tab === "graph"} onClick={() => setTab("graph")} icon={<GitBranch size={16} />} label="页面关系图" />
+            <TabButton active={tab === "script"} onClick={() => setTab("script")} icon={<FileCode2 size={16} />} label="Hypium 脚本" />
+            <TabButton active={tab === "report"} onClick={() => setTab("report")} icon={<Braces size={16} />} label="报告" />
+          </nav>
+          {healthUnavailable && <div className="api-unavailable" role="alert">
+            <strong>API 服务不可用</strong><span>当前 API：<code>{API_DISPLAY}</code></span><span>请在项目根目录运行 <code>uv run main.py</code>，然后重试。</span>
+            <button className="secondary" onClick={loadHealth} disabled={healthLoading}><RotateCcw size={15} />重试连接</button>
+          </div>}
+          {error && <div className="error-banner" role="alert">{error}</div>}
+          {candidates.length > 1 && <section className="selection-banner"><div><strong>发现多个同名应用</strong><span>请选择目标，系统不会自动猜测。</span></div><select value={selectedCandidate} onChange={(event) => setSelectedCandidate(event.target.value)}><option value="">选择应用</option>{candidates.map((candidate) => <option key={candidate.candidate_id ?? candidate.bundle_name} value={candidate.candidate_id ?? candidate.bundle_name}>{candidate.display_name ?? candidate.app_name ?? "未知应用"} · {candidate.bundle_name}</option>)}</select><button className="primary compact" onClick={submitCandidate} disabled={!selectedCandidate}>确认目标</button></section>}
+
+          {tab === "live" && <div className="live-grid">
+            <section className="viewport-card">
+              <div className="card-heading"><span>设备画面</span><small>{latestSnapshot ? `${latestSnapshot.width} × ${latestSnapshot.height}` : "等待截图"}</small></div>
+              <div className="device-stage">{latestSnapshot ? <RetryImage src={artifactUrl(runId, imagePath(latestSnapshot))} alt="当前 OpenHarmony 设备截图" /> : <EmptyState />}</div>
+            </section>
+            <section className="timeline-card">
+              <div className="card-heading"><span>Agent Trace</span><small>{events.length} events</small></div>
+              <div className="timeline" aria-live="polite">{events.length ? [...events].reverse().map((event) => <div className="event" key={event.event_id}>
+                <span className={`event-dot event-${event.type}`} /><div><strong>{event.message}</strong><small>{event.type} · {new Date(event.timestamp).toLocaleTimeString()}</small></div>
+              </div>) : <EmptyLog />}</div>
+            </section>
+            <section className="elements-card">
+              <div className="card-heading"><span>当前元素</span><small>{latestSnapshot?.elements.length ?? 0} detected</small></div>
+              <div className="element-table">{latestSnapshot?.elements.slice(0, 20).map((element) => <div className="element-row" key={element.element_id}>
+                <span className="element-type">{element.type || "Node"}</span><div><strong>{element.content || element.key || element.id}</strong><small>{element.key || element.id || element.source}</small></div>
+                <span className={element.clickable || element.editable ? "tag active" : "tag"}>{element.editable ? "input" : element.clickable ? "click" : "read"}</span>
+              </div>)}</div>
+            </section>
+          </div>}
+
+          {tab === "graph" && <section className="graph-card">
+            {trace?.graph.nodes.length ? <PageGraphView runId={runId} graph={trace.graph} artifactUrl={graphArtifactUrl} /> : <EmptyState title="页面图尚未生成" />}
+          </section>}
+
+          {tab === "script" && <section className="script-layout">
+            <div className="script-heading">
+              <div><p className="eyebrow">DETERMINISTIC OUTPUT</p><h2>Hypium Python 脚本</h2><span className={`script-status ${scriptDiagnostic ? "diagnostic" : ""}`}>{scriptStatus}</span></div>
+              <div className="action-strip">
+                <button className="secondary" onClick={generate} disabled={!runId || operationBusy}><FileCode2 size={16} />{script ? "重新生成" : "生成脚本"}</button>
+                <label className="attempt-select" htmlFor="attempts">回放次数<select id="attempts" value={attemptCount} onChange={(event) => setAttemptCount(Number(event.target.value) as 1 | 3)} disabled={operationBusy}><option value={1}>1 次</option><option value={3}>3 次</option></select></label>
+                <button className="primary" onClick={execute} disabled={!script || operationBusy || !replayAllowed} title={!replayAllowed ? "诊断或临时 Profile 脚本不能用于验收回放" : undefined}><Play size={16} />验收回放 {attemptCount} 次</button>
+              </div>
+            </div>
+            <p className="generation-note">Agent 运行成功后会自动生成脚本；也可以在此手动生成或重新生成。诊断脚本仅供排查，验收回放已禁用。</p>
+            {!replayAllowed && <div className="warning-list" role="alert">当前脚本或 Profile 不具备正式 Hypium 验收回放资格。</div>}
+            {script?.warnings.length ? <div className="warning-list" role="alert">{script.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : null}
+            {(operation === "executing" || Boolean(trace?.replays.length)) && <ReplayProgress replays={trace?.replays ?? []} attempts={attemptCount} running={operation === "executing"} progress={progress} elapsedMs={executionStartedAt ? clock - executionStartedAt : 0} runId={runId} />}
+            <pre className="code-view"><code>{script?.python ?? "运行 Agent 后将在这里展示自动生成的 Hypium Python 用例。"}</code></pre>
+          </section>}
+
+          {tab === "profiles" && <ProfileManager profiles={profiles} onAction={updateProfile} />}
+
+          {tab === "report" && <section className="report-layout">
+            {runId ? <>
+              <div className="report-toolbar">
+                <button className="secondary" onClick={probeReport} disabled={reportLoading}><RefreshCw size={15} />重试报告</button>
+                {reportReady && <a className="secondary report-download" href={`${reportUrl}&download=true`}>下载 HTML 报告</a>}
+              </div>
+              <div className="report-card">{reportLoading ? <EmptyState title="正在探测报告" /> : reportReady ? <iframe key={reportUrl} title="测试运行报告" src={reportUrl} /> : <ReportUnavailable onRetry={probeReport} />}</div>
+            </> : <section className="report-card"><EmptyState title="尚无可查看的报告" /></section>}
+          </section>}
         </section>
-
-        <section className="panel health-panel">
-          <div className="section-title"><ServerCog size={18} /><span>运行环境</span><button className="icon-button" onClick={loadHealth} aria-label="刷新环境状态"><RefreshCw size={15} /></button></div>
-          <HealthRow icon={<MonitorSmartphone size={16} />} label="HDC Device" value={health?.device.id ?? "unknown"} ok={Boolean(health?.device.connected)} />
-          <HealthRow icon={<Bot size={16} />} label="Agent Provider" value={health?.model.provider ?? "unknown"} ok={Boolean(health)} />
-          <HealthRow icon={<ShieldCheck size={16} />} label="Hypium" value={health?.hypium.version ?? "not found"} ok={Boolean(health?.hypium.importable)} />
-        </section>
-
-        {runId && <section className="panel run-card"><p className="eyebrow">CURRENT RUN</p><code>{runId}</code><div className={"state-pill state-" + state}>{state}</div>{resolved && <p className="resolved-target">{resolved.display_name ?? resolved.app_name ?? resolved.bundle_name}<small>{resolved.bundle_name}</small></p>}<div className="metrics"><Metric label="动作" value={discovery?.actions_executed ?? trace?.actions.length ?? 0} /><Metric label="页面" value={discovery?.pages_discovered ?? trace?.graph.nodes.length ?? 0} /><Metric label="断言" value={trace?.assertions.length ?? 0} /></div></section>}
-      </aside>
-
-      <section className="main-panel">
-        <nav className="tabs" aria-label="运行结果视图">
-          <TabButton active={tab === "live"} onClick={() => setTab("live")} icon={<Activity size={16} />} label="实时执行" />
-          <TabButton active={tab === "graph"} onClick={() => setTab("graph")} icon={<GitBranch size={16} />} label="页面关系图" />
-          <TabButton active={tab === "script"} onClick={() => setTab("script")} icon={<FileCode2 size={16} />} label="生成脚本" />
-          <TabButton active={tab === "profiles"} onClick={() => setTab("profiles")} icon={<ShieldCheck size={16} />} label="Profile" />
-          <TabButton active={tab === "report"} onClick={() => setTab("report")} icon={<Braces size={16} />} label="报告" />
-        </nav>
-        {error && <div className="error-banner" role="alert">{error}</div>}
-
-        {candidates.length > 1 && <section className="selection-banner"><div><strong>发现多个同名应用</strong><span>请选择目标，系统不会自动猜测。</span></div><select value={selectedCandidate} onChange={(event) => setSelectedCandidate(event.target.value)}><option value="">选择应用</option>{candidates.map((candidate) => <option key={candidate.candidate_id ?? candidate.bundle_name} value={candidate.candidate_id ?? candidate.bundle_name}>{candidate.display_name ?? candidate.app_name ?? "未知应用"} · {candidate.bundle_name}</option>)}</select><button className="primary compact" onClick={submitCandidate} disabled={!selectedCandidate}>确认目标</button></section>}
-
-        {tab === "live" && <div className="live-grid">
-          <section className="viewport-card"><div className="card-heading"><span>设备画面</span><small>{latestSnapshot ? latestSnapshot.width + " × " + latestSnapshot.height : "waiting"}</small></div><div className="device-stage">{latestSnapshot ? <img src={artifactUrl(runId, latestSnapshot.image_path)} alt={latestSnapshot.summary || "设备截图"} /> : <EmptyState />}</div></section>
-          <section className="timeline-card"><div className="card-heading"><span>执行时间线</span><small>{events.length} events</small></div><div className="event-list">{events.length ? events.slice().reverse().map((event) => <div className="event" key={event.event_id}><span className={"event-dot event-" + event.type} /><div><strong>{event.message}</strong><small>{event.type} · {new Date(event.timestamp).toLocaleTimeString()}</small></div></div>) : <EmptyLog />}</div></section>
-          <section className="elements-card"><div className="card-heading"><span>当前元素</span><small>{latestSnapshot?.elements.length ?? 0} detected</small></div><div className="element-table">{latestSnapshot?.elements.slice(0, 20).map((element) => <div className="element-row" key={element.element_id}><span className="element-type">{element.type || "Node"}</span><div><strong>{element.content || element.key || element.id}</strong><small>{element.key || element.id || element.source}</small></div><span className={element.clickable || element.editable ? "tag active" : "tag"}>{element.editable ? "input" : element.clickable ? "click" : "read"}</span></div>)}</div></section>
-          <DiscoveryPanel discovery={discovery} blockedPaths={blockedPaths} />
-        </div>}
-
-        {tab === "graph" && <section className="graph-card">{trace?.graph.nodes.length ? <PageGraphView runId={runId} graph={trace.graph} artifactUrl={graphArtifactUrl} /> : <EmptyState title="页面图尚未生成" />}</section>}
-        {tab === "script" && <section className="script-layout"><div className="action-strip"><button className="secondary" onClick={generate} disabled={!runId || busy}><FileCode2 size={16} />重新生成</button><button className="primary" onClick={execute} disabled={!script || busy}><Play size={16} />连续回放 3 次</button></div>{script?.warnings.length ? <div className="warning-list">{script.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : null}<pre className="code-view"><code>{script?.python ?? "Profile 通过门禁后将在这里展示确定性生成的 Hypium Python 用例。"}</code></pre></section>}
-        {tab === "profiles" && <ProfileManager profiles={profiles} onAction={updateProfile} />}
-        {tab === "report" && <section className="report-layout">{runId ? <><div className="report-toolbar"><a className="secondary report-download" href={API + "/api/runs/" + runId + "/report?download=true"}>下载 HTML 报告</a></div><div className="report-card"><iframe title="测试运行报告" src={API + "/api/runs/" + runId + "/report"} /></div></> : <section className="report-card"><EmptyState title="尚无可查看的报告" /></section>}</section>}
-      </section>
-    </main>
-  </div>;
+      </main>
+    </div>
+  );
 }
 
 function PolicyEditor({ policy, onChange }: { policy: DiscoveryPolicy; onChange: (value: DiscoveryPolicy) => void }) {
   const patch = (value: Partial<DiscoveryPolicy>) => onChange({ ...policy, ...value });
-  const permissions: Array<[keyof DiscoveryPolicy, string]> = [["allow_login", "登录"], ["allow_permission", "授权"], ["allow_submit", "提交"], ["allow_publish", "发布"], ["allow_download", "下载"]];
-  return <details className="policy-editor"><summary>探索与安全策略</summary><label className="switch-row"><input type="checkbox" checked={policy.enabled} onChange={(event) => patch({ enabled: event.target.checked })} /><span>自动探索（默认开启）</span></label><div className="policy-note">导航、滑动、返回和固定文本输入默认允许；支付、删除、卸载、清除数据始终禁止。</div><div className="permission-grid">{permissions.map(([key, label]) => <label className="check-row" key={key}><input type="checkbox" checked={Boolean(policy[key])} onChange={(event) => patch({ [key]: event.target.checked })} />允许{label}</label>)}</div><div className="limit-grid"><label>页面上限<input type="number" min={1} max={20} value={policy.max_pages} onChange={(event) => patch({ max_pages: Number(event.target.value) })} /></label><label>每页动作<input type="number" min={1} max={8} value={policy.max_actions_per_page} onChange={(event) => patch({ max_actions_per_page: Number(event.target.value) })} /></label><label>超时（秒）<input type="number" min={1} max={900} value={policy.max_duration_seconds} onChange={(event) => patch({ max_duration_seconds: Number(event.target.value) })} /></label></div><label className="switch-row"><input type="checkbox" checked={policy.temporary_test} onChange={(event) => patch({ temporary_test: event.target.checked })} /><span>探索失败后允许受限临时测试</span></label></details>;
+  return <details className="policy-editor"><summary>探索策略与安全边界</summary><label className="switch-row"><input type="checkbox" checked={policy.enabled} onChange={(event) => patch({ enabled: event.target.checked })} /><span>Profile 缺失时自动发现</span></label><div className="limit-grid"><label>页面上限<input type="number" min={1} value={policy.max_pages} onChange={(event) => patch({ max_pages: Number(event.target.value) })} /></label><label>每页动作<input type="number" min={1} value={policy.max_actions_per_page} onChange={(event) => patch({ max_actions_per_page: Number(event.target.value) })} /></label><label>秒数上限<input type="number" min={30} value={policy.max_duration_seconds} onChange={(event) => patch({ max_duration_seconds: Number(event.target.value) })} /></label></div></details>;
 }
 
 function DiscoveryPanel({ discovery, blockedPaths }: { discovery: DiscoveryStatus | null; blockedPaths: DiscoveryStatus["blocked_paths"] }) {
-  const gates = discovery?.gates ?? {};
-  return <section className="discovery-card"><div className="card-heading"><span>探索与晋级门禁</span><small>{discovery?.phase ?? "waiting"}</small></div><div className="gate-grid"><Metric label="定位器" value={discovery?.locator_candidates?.length ?? 0} /><Metric label="断言点" value={discovery?.assertion_candidates?.length ?? 0} /><Metric label="验证轮次" value={discovery?.validation_rounds?.filter((item) => item.passed).length ?? 0} /><Metric label="回放通过" value={discovery?.replays?.filter((item) => item.passed).length ?? 0} /></div>{Object.keys(gates).length > 0 && <div className="gate-list">{Object.entries(gates).map(([name, value]) => <span className={value === true ? "passed" : ""} key={name}>{name}: {String(value)}</span>)}</div>}{blockedPaths?.length ? <div className="blocked-list"><strong>已阻塞路径</strong>{blockedPaths.map((item, index) => <span key={index}>{typeof item === "string" ? item : item.label ?? item.reason ?? item.risk_reason ?? item.target_text ?? "blocked"}</span>)}</div> : null}</section>;
+  return <section className="discovery-card"><div className="card-heading"><span>探索与晋级门禁</span><small>{discovery?.phase ?? "waiting"}</small></div><div className="gate-grid"><Metric label="定位器" value={discovery?.locator_candidates?.length ?? 0} /><Metric label="断言点" value={discovery?.assertion_candidates?.length ?? 0} /><Metric label="验证轮次" value={discovery?.validation_rounds?.filter((item) => item.passed).length ?? 0} /><Metric label="回放通过" value={discovery?.replays?.filter((item) => item.passed).length ?? 0} /></div>{blockedPaths?.length ? <div className="blocked-list"><strong>已阻塞路径</strong>{blockedPaths.map((item, index) => <span key={index}>{typeof item === "string" ? item : item.label ?? item.reason ?? item.risk_reason ?? item.target_text ?? "blocked"}</span>)}</div> : null}</section>;
 }
 
-function ProfileManager({ profiles, onAction }: { profiles: ProfileSummary[]; onAction: (profile: ProfileSummary, action: "verify" | "lock" | "rollback") => void }) {
-  return <section className="profile-layout"><div className="profile-header"><div><p className="eyebrow">PROFILE REGISTRY</p><h2>应用测试资产</h2></div><span>{profiles.length} profiles</span></div><div className="profile-list">{profiles.map((profile) => <article className="profile-card" key={profile.profile_id}><div><strong>{profile.display_name ?? profile.target_app_id ?? profile.profile_id}</strong><code>{profile.bundle_name ?? profile.profile_id}</code></div><StatusBadge value={profile.status} /><dl><div><dt>版本</dt><dd>{profile.version_name ?? profile.version_code ?? "未知"}</dd></div><div><dt>Ability</dt><dd>{profile.main_ability ?? "未知"}</dd></div><div><dt>快速复验</dt><dd>{profile.quick_verification?.passed === undefined ? "未执行" : profile.quick_verification.passed ? "通过" : "失败"}</dd></div></dl><div className="profile-actions"><button className="secondary" onClick={() => onAction(profile, "verify")}><RefreshCw size={14} />{profile.status === "verified" ? "快速复验" : "重新探索验证"}</button><button className="secondary" onClick={() => onAction(profile, "lock")} disabled={profile.status !== "verified"}>{profile.locked ? <Unlock size={14} /> : <Lock size={14} />}{profile.locked ? "解锁" : "锁定"}</button><button className="secondary" onClick={() => onAction(profile, "rollback")} disabled={profile.status !== "verified" || profile.locked || !profile.history?.length}><RefreshCw size={14} />回退</button></div></article>)}{profiles.length === 0 && <EmptyState title="暂无 Profile" />}</div></section>;
+function ProfileManager({ profiles, onAction }: { profiles: ProfileSummary[]; onAction: (profile: ProfileSummary, action: ProfileAction) => void }) {
+  return <section className="profile-layout"><div className="profile-header"><div><p className="eyebrow">PROFILE REGISTRY</p><h2>应用测试资产</h2></div><span>{profiles.length} profiles</span></div><div className="profile-list">{profiles.map((profile) => <article className="profile-card" key={profile.profile_id}><div><strong>{profile.display_name ?? profile.target_app_id ?? profile.profile_id}</strong><code>{profile.bundle_name ?? profile.profile_id}</code></div><StatusBadge value={profile.status} /><div className="profile-actions"><button className="secondary" onClick={() => onAction(profile, "verify")}><RefreshCw size={14} />快速复验</button><button className="secondary" onClick={() => onAction(profile, "lock")} disabled={profile.status !== "verified"}>{profile.locked ? <Unlock size={14} /> : <Lock size={14} />}{profile.locked ? "解锁" : "锁定"}</button><button className="secondary" onClick={() => onAction(profile, "rollback")} disabled={profile.status !== "verified" || profile.locked || !profile.history?.length}><RefreshCw size={14} />回退</button></div></article>)}{profiles.length === 0 && <EmptyState title="暂无 Profile" />}</div></section>;
 }
 
-function StatusBadge({ value }: { value: string }) { return <span className={"profile-status status-" + value}>{value}</span>; }
+function StatusBadge({ value }: { value: string }) { return <span className={`profile-status status-${value}`}>{value}</span>; }
+function ReplayProgress({ replays, attempts, running, progress, elapsedMs, runId }: { replays: ReplayResult[]; attempts: 1 | 3; running: boolean; progress: number; elapsedMs: number; runId: string }) {
+  return <section className="replay-progress" aria-live="polite" aria-busy={running}>
+    <div className="progress-heading"><strong>异步回放进度</strong><span>{running ? `执行中 · ${formatDuration(elapsedMs)}` : `${replays.filter((item) => item.passed).length}/${replays.length || attempts} 通过`}</span></div>
+    <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
+    <div className="attempt-grid">{Array.from({ length: attempts }, (_, index) => {
+      const attempt = replays.find((item) => item.attempt === index + 1);
+      const status = attempt ? replayStatus(attempt) : running && index === replays.length ? "running" : "queued";
+      const duration = attempt?.command.duration_ms;
+      const exitCode = attempt?.exit_code ?? attempt?.command.returncode;
+      const failure = attempt?.error?.message || attempt?.command.stderr || (attempt?.timed_out ? "执行超时" : "");
+      const evidence = attempt ? replayEvidence(attempt) : [];
+      return <article className={`attempt-card attempt-${status}`} key={index}>
+        <div><strong>Attempt {index + 1}</strong><span className="attempt-status">{statusLabel(status)}</span></div>
+        <dl><div><dt>耗时</dt><dd>{duration === undefined ? "—" : formatDuration(duration)}</dd></div><div><dt>退出码</dt><dd>{exitCode === undefined || exitCode === null ? "—" : exitCode}</dd></div></dl>
+        {failure && <p className="attempt-error" role="alert">{failure}</p>}
+        {evidence.length > 0 && <div className="evidence-links">{evidence.map((item, evidenceIndex) => <a href={artifactUrl(runId, item.path)} target="_blank" rel="noreferrer" key={`${item.path}-${evidenceIndex}`}><ExternalLink size={12} />{item.label}</a>)}</div>}
+      </article>;
+    })}</div>
+  </section>;
+}
+
+function replayEvidence(attempt: ReplayResult) {
+  return attempt.evidence_paths.map((path) => ({ label: evidenceLabel(path), path }));
+}
+
+function replayStatus(attempt: ReplayResult) {
+  if (attempt.status) return attempt.status.toLowerCase();
+  return attempt.passed ? "passed" : "failed";
+}
+function statusLabel(status: string) { return ({ queued: "等待", pending: "等待", running: "执行中", passed: "通过", failed: "失败" } as Record<string, string>)[status] ?? status; }
+function evidenceLabel(path: string) { const name = path.replaceAll("\\", "/").split("/").at(-1); return name || "证据"; }
+function formatDuration(milliseconds: number) { return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(1)} s` : `${Math.max(0, Math.round(milliseconds))} ms`; }
+function imagePath(item: { artifact_path?: string; image_path?: string }) { return item.artifact_path || item.image_path || ""; }
 function StatusDot({ ok, label }: { ok: boolean; label: string }) { return <span className="status-dot"><i className={ok ? "ok" : "muted"} />{label}</span>; }
 function HealthRow({ icon, label, value, ok }: { icon: ReactNode; label: string; value: string; ok: boolean }) { return <div className="health-row"><span className="health-icon">{icon}</span><div><small>{label}</small><strong>{value}</strong></div><i className={ok ? "health-ok" : "health-off"} /></div>; }
 function Metric({ label, value }: { label: string; value: number }) { return <div><strong>{String(value).padStart(2, "0")}</strong><small>{label}</small></div>; }
-function TabButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: ReactNode; label: string }) { return <button className={active ? "tab active" : "tab"} onClick={onClick}>{icon}{label}</button>; }
+function TabButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: ReactNode; label: string }) { return <button className={active ? "tab active" : "tab"} onClick={onClick} aria-current={active ? "page" : undefined}>{icon}{label}</button>; }
 function EmptyState({ title = "等待 Agent 采集设备画面" }: { title?: string }) { return <div className="empty-state"><MonitorSmartphone size={38} /><strong>{title}</strong><span>运行状态和证据会实时出现在这里</span></div>; }
-function EmptyLog() { return <div className="empty-log"><Activity size={24} /><span>启动任务后显示目标解析、探索、工具调用和断言事件</span></div>; }
-function artifactUrl(runId: string, absolutePath: string) { const normalized = absolutePath.replaceAll("\\", "/"); const marker = "/" + runId + "/"; const index = normalized.indexOf(marker); const relative = index >= 0 ? normalized.slice(index + marker.length) : normalized.split("/").slice(-2).join("/"); return API + "/api/runs/" + runId + "/artifacts/" + relative; }
+function EmptyLog() { return <div className="empty-log"><Activity size={24} /><span>启动任务后显示规划、工具调用和断言事件</span></div>; }
+function ReportUnavailable({ onRetry }: { onRetry: () => void }) { return <div className="empty-state" role="alert"><Braces size={38} /><strong>报告尚未就绪</strong><span>生成或回放完成后可以再次探测。</span><button className="secondary" onClick={onRetry}><RefreshCw size={15} />重试报告</button></div>; }
+
+function RetryImage({ src, alt }: { src: string; alt: string }) {
+  const [revision, setRevision] = useState(0);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); setRevision(0); }, [src]);
+  const retry = () => { setFailed(false); setRevision((value) => value + 1); };
+  if (!src || failed) return <div className="image-retry" role="alert"><span>图片加载失败</span><button className="secondary" onClick={retry}><RefreshCw size={14} />重试图片</button></div>;
+  return <img key={`${src}-${revision}`} src={`${src}${src.includes("?") ? "&" : "?"}revision=${revision}`} alt={alt} onError={() => setFailed(true)} />;
+}
+
+function artifactUrl(runId: string, path: string) {
+  if (!runId || !path) return "";
+  const normalized = path.replaceAll("\\", "/");
+  const marker = `/${runId}/`;
+  const markerIndex = normalized.indexOf(marker);
+  let relative = markerIndex >= 0 ? normalized.slice(markerIndex + marker.length) : normalized;
+  relative = relative.replace(/^\.?\//, "").replace(/^artifacts\/runs\/[^/]+\//, "");
+  if (/^[A-Za-z]:\//.test(relative) || relative.startsWith("/")) relative = relative.split("/").slice(-2).join("/");
+  const encoded = relative.split("/").filter(Boolean).map((segment) => encodeURIComponent(segment)).join("/");
+  return apiUrl(`/api/runs/${encodeURIComponent(runId)}/artifacts/${encoded}`);
+}

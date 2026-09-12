@@ -1,4 +1,4 @@
-// 本文件描述前端实际消费的 API JSON 子集；字段命名保持后端序列化格式。
+// 本文件描述前端实际消费的 API JSON 子集；可选字段兼容旧 Trace 与并行演进中的后端契约。
 export type Health = {
   status: string;
   model: { configured: boolean; vision_configured: boolean; provider: string };
@@ -15,9 +15,13 @@ export type RunEvent = {
   payload: Record<string, unknown>;
 };
 
-export type Snapshot = {
+export type ArtifactImage = {
+  artifact_path?: string;
+  image_path?: string;
+};
+
+export type Snapshot = ArtifactImage & {
   snapshot_id: string;
-  image_path: string;
   width: number;
   height: number;
   page_path: string;
@@ -74,6 +78,34 @@ export type DiscoveryPolicy = {
   temporary_test: boolean;
 };
 
+export type ReplayError = {
+  kind: string;
+  message: string;
+  details?: Record<string, unknown>;
+};
+
+export type ReplayResult = {
+  attempt: number;
+  passed: boolean;
+  status: "passed" | "failed" | "timed_out" | "ineligible" | "invalid_result" | string;
+  exit_code?: number | null;
+  timed_out?: boolean;
+  error?: ReplayError | null;
+  report_path?: string | null;
+  evidence_paths: string[];
+  generated_result_path?: string | null;
+  generated_result?: Record<string, unknown> | null;
+  command: {
+    command: string;
+    args: string[];
+    returncode?: number | null;
+    stdout: string;
+    stderr: string;
+    timed_out: boolean;
+    duration_ms: number;
+  };
+};
+
 export type DiscoveryStatus = {
   phase?: "bootstrap" | "task";
   provisional?: boolean;
@@ -89,7 +121,7 @@ export type DiscoveryStatus = {
   locator_candidates?: unknown[];
   assertion_candidates?: unknown[];
   validation_rounds?: Array<{ round_number: number; passed: boolean; failures?: string[] }>;
-  replays?: Array<{ attempt: number; passed: boolean }>;
+  replays?: ReplayResult[];
   gates?: Record<string, boolean | number | string>;
 };
 
@@ -98,6 +130,11 @@ export type RunTrace = {
   target_app_id: string;
   task: string;
   state: string;
+  mode: string;
+  model_used: string;
+  model_mock: boolean;
+  revision?: string | number;
+  updated_at?: string;
   phase?: "bootstrap" | "task";
   provisional?: boolean;
   profile_status_at_start?: string;
@@ -106,11 +143,8 @@ export type RunTrace = {
   target_candidates?: TargetCandidate[];
   discovery_result?: Record<string, unknown>;
   verification_result?: Record<string, unknown>;
-  profile_validation_replays?: Array<{ attempt: number; passed: boolean }>;
+  profile_validation_replays?: ReplayResult[];
   discovery?: DiscoveryStatus;
-  mode: string;
-  model_used: string;
-  model_mock: boolean;
   error?: string;
   plan: Array<{ step_id: string; instruction: string; tool: string; target?: string }>;
   snapshots: Snapshot[];
@@ -124,12 +158,11 @@ export type RunTrace = {
   }>;
   assertions: Array<{ kind: string; target: string; passed: boolean; message: string }>;
   graph: {
-    nodes: Array<{
+    nodes: Array<ArtifactImage & {
       node_id: string;
       title: string;
       page_path: string;
       snapshot_id: string;
-      image_path: string;
       element_count: number;
       discovered_order: number;
     }>;
@@ -141,12 +174,44 @@ export type RunTrace = {
       target_description: string;
     }>;
   };
-  generated?: { warnings: string[] };
-  replays: Array<{ attempt: number; passed: boolean }>;
+  generated?: {
+    warnings: string[];
+    generated_at?: string;
+    purpose?: string;
+    diagnostic?: boolean;
+    replay_eligible?: boolean;
+    incomplete_reasons?: string[];
+  };
+  replays: ReplayResult[];
+  agent_outcome?: "completed" | "failed" | "stopped" | "unknown";
+  agent_error?: string;
+  replay_status?: "not_requested" | "not_eligible" | "pending" | "passed" | "failed" | "partial";
+  replay_total?: number;
+  replay_completed?: number;
+  replay_passed?: number;
 };
 
 export type ScriptResult = {
   python: string;
   config: Record<string, unknown>;
   warnings: string[];
+  python_path?: string;
+  config_path?: string;
+  generated_at?: string;
+  auto_generated?: boolean;
+  purpose?: "acceptance" | "diagnostic" | string;
+  diagnostic?: boolean;
+  acceptance_replay_enabled?: boolean;
+  source_agent_outcome?: string;
+  source_action_count?: number;
+  included_action_count?: number;
+  incomplete_reasons?: string[];
+};
+
+export type ExecuteResult = {
+  run_id?: string;
+  passed?: boolean;
+  status?: string;
+  attempts?: number;
+  replays?: ReplayResult[];
 };

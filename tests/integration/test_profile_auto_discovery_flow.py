@@ -35,8 +35,8 @@ from harmony_test_agent.models import (
     EventType,
     LocatorCandidate,
     LocatorKind,
-    PlanResult,
     PlannedStep,
+    PlanResult,
     ProfileStatus,
     ReplayResult,
     RunRequest,
@@ -51,7 +51,6 @@ from harmony_test_agent.models import (
 from harmony_test_agent.profiles import ProfileRegistry
 from harmony_test_agent.storage import ArtifactStore, RunRepository
 from harmony_test_agent.targets import ForegroundApp, InstalledApp, ResolvedTarget
-
 
 BUNDLE_A = "com.example.notes.alpha"
 BUNDLE_B = "com.example.notes.beta"
@@ -215,10 +214,7 @@ def _profile(
             key=f"page-key-{index}",
             observed_rounds=3,
             unique_match_rounds=3,
-            evidence_snapshot_ids=[
-                f"page-{index}-round-{round_number}"
-                for round_number in range(1, 4)
-            ],
+            evidence_snapshot_ids=[f"page-{index}-round-{round_number}" for round_number in range(1, 4)],
         )
         for index in range(1, 4)
     ]
@@ -242,26 +238,26 @@ def _profile(
                 target=f"page-key-{index}",
                 page_signature=f"page-{index}",
                 observed_rounds=3,
-                evidence_snapshot_ids=[
-                    f"assertion-{index}-round-{round_number}"
-                    for round_number in range(1, 4)
-                ],
+                evidence_snapshot_ids=[f"assertion-{index}-round-{round_number}" for round_number in range(1, 4)],
             )
             for index in range(1, 3)
         ],
-        core_flows=[{
-            "pages": ["page-1", "page-2", "page-3"],
-            "steps": [],
-            "interaction_types": ["click", "input", "swipe"],
-        }],
+        core_flows=[
+            {
+                "pages": ["page-1", "page-2", "page-3"],
+                "steps": [],
+                "interaction_types": ["click", "input", "swipe"],
+            }
+        ],
         provenance={
             "discovery_run_id": "run-profile",
             "evidence": {
                 "verification_passed": True,
                 "cross_bundle_violations": 0,
-            }
+            },
         },
     )
+
 
 def _promote(registry: ProfileRegistry, profile: TargetAppProfile) -> TargetAppProfile:
     registry.save_candidate(profile)
@@ -687,7 +683,3 @@ def test_profile_api_lifecycle_errors_and_explicit_history_rollback(tmp_path: Pa
     assert restored_detail.json()["display_name"] == "Notes v1"
     assert locked.status_code == 200
     assert locked_rollback.status_code == 409
-
-
-
-

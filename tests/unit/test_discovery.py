@@ -214,9 +214,7 @@ def test_restore_path_relaunches_and_replays_every_action_to_expected_page(tmp_p
     expected = device.snapshot(2)
     device.state = 7
 
-    restored, foreground = explorer._restore_path(
-        path, expected, device.current_foreground_app(), sequence=10
-    )
+    restored, foreground = explorer._restore_path(path, expected, device.current_foreground_app(), sequence=10)
 
     assert restored.page_path == "/page/2"
     assert foreground.bundle_name == _target().bundle_name

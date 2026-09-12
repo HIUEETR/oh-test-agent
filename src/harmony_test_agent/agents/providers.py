@@ -19,7 +19,6 @@ from ..models import (
 )
 
 
-
 class PlanningContext(BaseModel):
     """Minimal immutable application context exposed to the planner."""
 
@@ -31,7 +30,7 @@ class PlanningContext(BaseModel):
     known_limitations: list[str] = Field(default_factory=list)
 
     @classmethod
-    def from_profile(cls, profile: TargetAppProfile) -> "PlanningContext":
+    def from_profile(cls, profile: TargetAppProfile) -> PlanningContext:
         return cls(
             target_app_id=profile.target_app_id,
             display_name=profile.display_name,

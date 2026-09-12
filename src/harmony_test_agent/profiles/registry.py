@@ -6,9 +6,9 @@ import json
 import os
 import re
 import threading
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 from uuid import uuid4
 
 from ..models import ProfileStatus, TargetAppProfile, utc_now
@@ -59,7 +59,7 @@ class ProfileRegistry:
         for path in sorted(paths):
             try:
                 profiles.append(load_compatible_profile(path))
-            except (OSError, ValueError, json.JSONDecodeError):
+            except OSError, ValueError, json.JSONDecodeError:
                 continue
         return [profile for profile in profiles if normalized is None or profile.status == normalized]
 
@@ -155,33 +155,23 @@ class ProfileRegistry:
         """Promote only the persisted candidate after three independent replay IDs."""
         with self._lock:
             target_app_id = (
-                profile_or_id.target_app_id
-                if isinstance(profile_or_id, TargetAppProfile)
-                else profile_or_id
+                profile_or_id.target_app_id if isinstance(profile_or_id, TargetAppProfile) else profile_or_id
             )
             candidate = self.require(
                 target_app_id=target_app_id,
                 status=ProfileStatus.CANDIDATE,
             )
-            if (
-                isinstance(profile_or_id, TargetAppProfile)
-                and candidate.model_dump(mode="json") != profile_or_id.model_dump(mode="json")
-            ):
+            if isinstance(profile_or_id, TargetAppProfile) and candidate.model_dump(
+                mode="json"
+            ) != profile_or_id.model_dump(mode="json"):
                 raise ProfileTransitionError("in-memory candidate does not match persisted candidate")
             if candidate.status != ProfileStatus.CANDIDATE:
                 raise ProfileTransitionError(f"only candidate Profiles can be promoted, got {candidate.status}")
             self._validate_admission_assets(candidate, "promotion")
 
             replay_ids = list(replay_run_ids or candidate.provenance.hypium_replay_run_ids)
-            expected = {
-                f"{candidate.provenance.discovery_run_id}:profile-attempt-{attempt}"
-                for attempt in range(1, 4)
-            }
-            if (
-                len(replay_ids) != 3
-                or set(replay_ids) != expected
-                or not candidate.provenance.discovery_run_id
-            ):
+            expected = {f"{candidate.provenance.discovery_run_id}:profile-attempt-{attempt}" for attempt in range(1, 4)}
+            if len(replay_ids) != 3 or set(replay_ids) != expected or not candidate.provenance.discovery_run_id:
                 raise ProfileTransitionError(
                     "promotion requires three independent Hypium replay run IDs for the discovery Run"
                 )
@@ -249,7 +239,7 @@ class ProfileRegistry:
         for path in sorted(directory.glob("*.json")):
             try:
                 profiles.append(load_compatible_profile(path))
-            except (OSError, ValueError, json.JSONDecodeError):
+            except OSError, ValueError, json.JSONDecodeError:
                 continue
         return profiles
 
@@ -297,11 +287,7 @@ class ProfileRegistry:
             current = load_compatible_profile(current_path) if current_path.exists() else None
             if backup_path is None and backup_name:
                 candidate_name = Path(backup_name)
-                if (
-                    candidate_name.is_absolute()
-                    or ".." in candidate_name.parts
-                    or len(candidate_name.parts) != 2
-                ):
+                if candidate_name.is_absolute() or ".." in candidate_name.parts or len(candidate_name.parts) != 2:
                     raise ProfileRegistryError("backup name is outside Profile history")
                 if current:
                     expected_directories = {self._safe_component(current.bundle_name)}
@@ -322,7 +308,7 @@ class ProfileRegistry:
                 try:
                     if load_compatible_profile(item).target_app_id == target_app_id:
                         valid_candidates.append(item)
-                except (OSError, ValueError, json.JSONDecodeError):
+                except OSError, ValueError, json.JSONDecodeError:
                     continue
             candidates = valid_candidates
             if backup_path is not None:
@@ -333,11 +319,10 @@ class ProfileRegistry:
                 try:
                     candidates = (
                         [resolved]
-                        if resolved.exists()
-                        and load_compatible_profile(resolved).target_app_id == target_app_id
+                        if resolved.exists() and load_compatible_profile(resolved).target_app_id == target_app_id
                         else []
                     )
-                except (OSError, ValueError, json.JSONDecodeError):
+                except OSError, ValueError, json.JSONDecodeError:
                     candidates = []
             if not candidates:
                 raise ProfileNotFoundError(f"Profile history not found: {target_app_id}")
@@ -395,7 +380,7 @@ class ProfileRegistry:
         if path.exists():
             try:
                 stored = load_compatible_profile(path)
-            except (OSError, ValueError, json.JSONDecodeError):
+            except OSError, ValueError, json.JSONDecodeError:
                 stored = None
             if stored is not None and stored.target_app_id != target_app_id:
                 raise ProfileRegistryError(
@@ -413,36 +398,24 @@ class ProfileRegistry:
         admitted_locators = [
             item
             for item in locators
-            if item.observed_rounds >= 3
-            and item.unique_match_rounds >= 3
-            and item.evidence_snapshot_ids
+            if item.observed_rounds >= 3 and item.unique_match_rounds >= 3 and item.evidence_snapshot_ids
         ]
         if len(admitted_locators) < 3:
-            raise ProfileTransitionError(
-                f"{transition} requires three-round unique locator evidence"
-            )
+            raise ProfileTransitionError(f"{transition} requires three-round unique locator evidence")
         assertions = profile.assertion_inventory
         if len(assertions) < 2:
             raise ProfileTransitionError(f"{transition} requires two application-level assertions")
         if any(item.observed_rounds < 3 or not item.evidence_snapshot_ids for item in assertions):
-            raise ProfileTransitionError(
-                f"{transition} requires three-round assertion evidence"
-            )
+            raise ProfileTransitionError(f"{transition} requires three-round assertion evidence")
         if not profile.core_flows or len(profile.core_flows[0].get("pages", [])) < 3:
-            raise ProfileTransitionError(
-                f"{transition} requires a replayable three-page core flow"
-            )
+            raise ProfileTransitionError(f"{transition} requires a replayable three-page core flow")
         if len(set(profile.core_flows[0].get("interaction_types", []))) < 3:
             raise ProfileTransitionError(f"{transition} requires three interaction types")
         evidence = profile.provenance.evidence
         if not evidence.get("verification_passed"):
-            raise ProfileTransitionError(
-                f"{transition} requires passed device verification evidence"
-            )
+            raise ProfileTransitionError(f"{transition} requires passed device verification evidence")
         if evidence.get("cross_bundle_recovery_failed", False):
-            raise ProfileTransitionError(
-                f"{transition} cannot contain unrecovered cross-bundle violations"
-            )
+            raise ProfileTransitionError(f"{transition} cannot contain unrecovered cross-bundle violations")
 
     @staticmethod
     def _immutable_profile_payload(profile: TargetAppProfile) -> dict[str, object]:
@@ -454,7 +427,7 @@ class ProfileRegistry:
     def _history_matches(path: Path, target_app_id: str) -> bool:
         try:
             return load_compatible_profile(path).target_app_id == target_app_id
-        except (OSError, ValueError, json.JSONDecodeError):
+        except OSError, ValueError, json.JSONDecodeError:
             return False
 
     @staticmethod

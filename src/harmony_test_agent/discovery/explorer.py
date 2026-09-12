@@ -6,10 +6,10 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from collections.abc import Callable
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -110,7 +110,13 @@ class ActionRiskClassifier:
         if permanent:
             return ActionRisk.FORBIDDEN, f"permanently forbidden operation: {permanent}", None
         credential_terms = (
-            "密码", "验证码", "password", "captcha", "otp", "passcode", "pin",
+            "密码",
+            "验证码",
+            "password",
+            "captcha",
+            "otp",
+            "passcode",
+            "pin",
         )
         if any(term in value for term in credential_terms):
             return (
@@ -132,12 +138,28 @@ class ActionRiskClassifier:
                     return ActionRisk.DEFAULT_ALLOWED, f"explicitly allowed: {permission}", permission
                 return ActionRisk.REQUIRES_OPT_IN, f"requires {setting}", permission
         uncertain = (
-            "密码", "验证码", "password", "captcha", "otp", "充值", "转账", "transfer",
-            "同意", "接受", "开启", "启用", "继续", "allow", "accept", "enable", "continue",
+            "密码",
+            "验证码",
+            "password",
+            "captcha",
+            "otp",
+            "充值",
+            "转账",
+            "transfer",
+            "同意",
+            "接受",
+            "开启",
+            "启用",
+            "继续",
+            "allow",
+            "accept",
+            "enable",
+            "continue",
         )
         if any(term in value for term in uncertain):
             return ActionRisk.BLOCKED_UNCERTAIN, "sensitive intent is uncertain", None
         return ActionRisk.DEFAULT_ALLOWED, "ordinary UI interaction", None
+
 
 DiscoveryProgress = Callable[[str, dict[str, object]], None]
 
@@ -183,9 +205,7 @@ class BoundedExplorer:
         stopped = self.device.stop_app(self.target.bundle_name)
         if not stopped.ok:
             raise DeviceError(f"force-stop failed: {stopped.stderr or stopped.stdout}")
-        started = self.device.start_app(
-            self.target.bundle_name, self.target.main_ability, self.target.module_name
-        )
+        started = self.device.start_app(self.target.bundle_name, self.target.main_ability, self.target.module_name)
         if not started.ok:
             raise DeviceError(f"aa start failed: {started.stderr or started.stdout}")
 
@@ -209,9 +229,7 @@ class BoundedExplorer:
                 current_foreground,
                 len(result.transitions),
             )
-            page = self._page(
-                current_snapshot, current_foreground, len(page_by_signature) + 1, current_path
-            )
+            page = self._page(current_snapshot, current_foreground, len(page_by_signature) + 1, current_path)
             if page.signature not in page_by_signature:
                 if len(page_by_signature) >= self.policy.max_pages:
                     result.stop_reason = "page_limit"
@@ -252,7 +270,14 @@ class BoundedExplorer:
                 result.transitions.append(transition)
                 if transition.blocked_reason and "cross-bundle" in transition.blocked_reason:
                     result.blocked_actions.append(action)
-                    self._progress("blocked", {"page_id": page.page_id, "action": action.model_dump(mode="json"), "reason": transition.blocked_reason})
+                    self._progress(
+                        "blocked",
+                        {
+                            "page_id": page.page_id,
+                            "action": action.model_dump(mode="json"),
+                            "reason": transition.blocked_reason,
+                        },
+                    )
                 self._progress(
                     "progress",
                     {
@@ -354,19 +379,10 @@ class BoundedExplorer:
             (
                 item
                 for item in snapshot.elements
-                if (
-                    action.locator_kind == "key" and item.key == action.locator_value
-                )
-                or (
-                    action.locator_kind == "id" and item.id == action.locator_value
-                )
-                or (
-                    action.locator_kind == "text" and item.content == action.locator_value
-                )
-                or (
-                    action.locator_kind == "type_text"
-                    and f"{item.type}|{item.content}" == action.locator_value
-                )
+                if (action.locator_kind == "key" and item.key == action.locator_value)
+                or (action.locator_kind == "id" and item.id == action.locator_value)
+                or (action.locator_kind == "text" and item.content == action.locator_value)
+                or (action.locator_kind == "type_text" and f"{item.type}|{item.content}" == action.locator_value)
             ),
             None,
         )
@@ -391,6 +407,7 @@ class BoundedExplorer:
                 "required_permission": permission,
             }
         )
+
     def _perform(
         self,
         page: DiscoveryPage,
@@ -432,10 +449,7 @@ class BoundedExplorer:
         if (
             not after_foreground
             or after_foreground.bundle_name != self.target.bundle_name
-            or (
-                after_foreground.ability_name
-                and after_foreground.ability_name != self.target.main_ability
-            )
+            or (after_foreground.ability_name and after_foreground.ability_name != self.target.main_ability)
         ):
             transition.success = False
             actual = after_foreground.bundle_name if after_foreground else "unknown"
@@ -469,15 +483,11 @@ class BoundedExplorer:
         stopped = self.device.stop_app(self.target.bundle_name)
         if not stopped.ok:
             raise DeviceError(f"force-stop failed while restoring exploration path: {stopped.stderr or stopped.stdout}")
-        started = self.device.start_app(
-            self.target.bundle_name, self.target.main_ability, self.target.module_name
-        )
+        started = self.device.start_app(self.target.bundle_name, self.target.main_ability, self.target.module_name)
         if not started.ok:
             raise DeviceError(f"launch failed while restoring exploration path: {started.stderr or started.stdout}")
         foreground = self._assert_target_foreground()
-        snapshot = self.device.screenshot(
-            self.output_dir, self.run_id, f"restore-{sequence:03d}-000"
-        )
+        snapshot = self.device.screenshot(self.output_dir, self.run_id, f"restore-{sequence:03d}-000")
         for index, action in enumerate(path, 1):
             source = self._page(snapshot, foreground, 0, path[: index - 1])
             action = self.resolve_replay_action(action, snapshot)
@@ -515,9 +525,7 @@ class BoundedExplorer:
 
     @staticmethod
     def _snapshot_signature(snapshot: ScreenSnapshot, foreground: ForegroundApp) -> str:
-        stable_keys = sorted(
-            {item.key or item.id for item in snapshot.elements if item.key or item.id}
-        )
+        stable_keys = sorted({item.key or item.id for item in snapshot.elements if item.key or item.id})
         texts = sorted(
             {_normalize_text(item.content) for item in snapshot.elements if item.content and len(item.content) <= 80}
         )[:30]
@@ -528,10 +536,7 @@ class BoundedExplorer:
                 foreground.window_type,
                 stable_keys,
                 texts,
-                sorted(
-                    (item.type, item.clickable, item.editable, item.scrollable)
-                    for item in snapshot.elements
-                ),
+                sorted((item.type, item.clickable, item.editable, item.scrollable) for item in snapshot.elements),
             ],
             ensure_ascii=False,
             sort_keys=True,
@@ -565,10 +570,10 @@ class BoundedExplorer:
     def _early_success(result: DiscoveryResult) -> bool:
         # Metrics split across branches cannot satisfy the replay admission gate.
         return any(
-            len(page.path_actions) >= 3
-            and len({action.kind for action in page.path_actions}) >= 3
+            len(page.path_actions) >= 3 and len({action.kind for action in page.path_actions}) >= 3
             for page in result.pages
         )
+
     def _save_observations(self, result: DiscoveryResult) -> None:
         locator_observations: list[dict[str, object]] = []
         assertion_candidates: list[dict[str, object]] = []

@@ -172,6 +172,44 @@ button:not(:disabled):hover { transform: translateY(-1px); }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
 
+.api-unavailable { display: grid; grid-template-columns: 1fr auto; gap: 6px 16px; align-items: center; margin-bottom: 16px; padding: 14px 16px; border: 1px solid rgba(255, 113, 134, .32); border-radius: 12px; color: #ffd0d7; background: rgba(255, 113, 134, .09); }
+.api-unavailable strong, .api-unavailable span { grid-column: 1; }
+.api-unavailable button { grid-column: 2; grid-row: 1 / span 3; }
+.api-unavailable code { color: #fff; overflow-wrap: anywhere; }
+.image-retry { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #ffb8c3; }
+.script-heading { display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; margin-bottom: 10px; }
+.script-heading h2 { display: inline-block; margin: 3px 10px 0 0; color: #eef7ff; font-size: 20px; }
+.script-status { display: inline-block; border: 1px solid rgba(53, 214, 164, .3); border-radius: 99px; padding: 4px 8px; color: var(--green); background: rgba(53, 214, 164, .08); font-size: 10px; }
+.script-status.diagnostic { color: var(--amber); border-color: rgba(245, 186, 98, .3); background: rgba(245, 186, 98, .08); }
+.generation-note { margin: 0 0 14px; color: #8ea4ba; font-size: 12px; line-height: 1.6; }
+.attempt-select { display: inline-flex; gap: 8px; align-items: center; margin: 0; color: #9eb2c6; font-size: 12px; }
+.attempt-select select { width: auto; min-width: 74px; }
+.replay-progress { margin-bottom: 14px; padding: 14px; border: 1px solid #294560; border-radius: 13px; background: rgba(11, 27, 45, .78); }
+.progress-heading { display: flex; justify-content: space-between; gap: 12px; color: #dce9f5; font-size: 12px; }
+.progress-heading span { color: #8da4ba; font-family: "Cascadia Code", Consolas, monospace; }
+.progress-track { height: 5px; overflow: hidden; margin: 10px 0 13px; border-radius: 99px; background: #142a43; }
+.progress-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2bc793, #65e8bb); transition: width 300ms ease; }
+.attempt-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.attempt-card { min-width: 0; padding: 11px; border: 1px solid #29445f; border-radius: 10px; background: #0b1b2d; }
+.attempt-card > div:first-child { display: flex; justify-content: space-between; gap: 8px; color: #dce9f5; font-size: 11px; }
+.attempt-status { color: #8299b0; }
+.attempt-passed { border-color: rgba(53, 214, 164, .32); }
+.attempt-passed .attempt-status { color: var(--green); }
+.attempt-failed { border-color: rgba(255, 113, 134, .35); }
+.attempt-failed .attempt-status { color: var(--red); }
+.attempt-running { border-color: rgba(101, 191, 255, .38); }
+.attempt-running .attempt-status { color: var(--blue); }
+.attempt-card dl { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 10px 0 0; }
+.attempt-card dl div { padding: 6px; border-radius: 7px; background: rgba(24, 49, 76, .55); }
+.attempt-card dt { color: #6f879f; font-size: 9px; }
+.attempt-card dd { margin: 3px 0 0; color: #c6d6e5; font: 10px "Cascadia Code", Consolas, monospace; }
+.attempt-error { max-height: 72px; overflow: auto; margin: 9px 0 0; color: #ffabb7; font: 10px/1.45 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.evidence-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.evidence-links a { display: inline-flex; align-items: center; gap: 4px; color: #8dd2ff; font-size: 10px; text-decoration: none; }
+.report-toolbar { gap: 9px; }
+.report-card .empty-state button { margin-top: 8px; }
+@media (max-width: 760px) { .script-heading { align-items: stretch; flex-direction: column; } .action-strip { flex-wrap: wrap; justify-content: flex-start; } .attempt-grid { grid-template-columns: 1fr; } .api-unavailable { grid-template-columns: 1fr; } .api-unavailable button { grid-column: 1; grid-row: auto; width: fit-content; } }
+
 /* Target discovery, safety policy, promotion gates and Profile registry. */
 input { width: 100%; color: var(--text); background: rgba(5, 14, 25, 0.66); border: 1px solid #29415f; border-radius: 11px; padding: 11px 12px; transition: border-color 180ms, box-shadow 180ms; }
 input:hover, input:focus { border-color: #3d5e81; }

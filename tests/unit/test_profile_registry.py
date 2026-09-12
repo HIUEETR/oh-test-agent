@@ -37,10 +37,7 @@ def profile(display_name: str = "Pocket Notes") -> TargetAppProfile:
                 key=f"key-{index}",
                 observed_rounds=3,
                 unique_match_rounds=3,
-                evidence_snapshot_ids=[
-                    f"snapshot-{index}-round-{round_number}"
-                    for round_number in range(1, 4)
-                ],
+                evidence_snapshot_ids=[f"snapshot-{index}-round-{round_number}" for round_number in range(1, 4)],
             )
             for index in range(1, 4)
         ],
@@ -51,24 +48,23 @@ def profile(display_name: str = "Pocket Notes") -> TargetAppProfile:
                 target=f"key-{index}",
                 page_signature=f"page-{index}",
                 observed_rounds=3,
-                evidence_snapshot_ids=[
-                    f"assertion-{index}-round-{round_number}"
-                    for round_number in range(1, 4)
-                ],
+                evidence_snapshot_ids=[f"assertion-{index}-round-{round_number}" for round_number in range(1, 4)],
             )
             for index in range(1, 3)
         ],
-        core_flows=[{
-            "pages": ["page-1", "page-2", "page-3"],
-            "steps": [],
-            "interaction_types": ["click", "input", "swipe"],
-        }],
+        core_flows=[
+            {
+                "pages": ["page-1", "page-2", "page-3"],
+                "steps": [],
+                "interaction_types": ["click", "input", "swipe"],
+            }
+        ],
         provenance={
             "discovery_run_id": "run-profile",
             "evidence": {
                 "verification_passed": True,
                 "cross_bundle_violations": 0,
-            }
+            },
         },
     )
 
@@ -96,6 +92,7 @@ def test_promotion_rejects_candidates_without_admission_assets(tmp_path: Path) -
     )
     with pytest.raises(ProfileTransitionError, match="three stable locators"):
         registry.save_candidate(empty)
+
 
 def test_registry_persists_draft_candidate_and_verified_lifecycle(tmp_path: Path) -> None:
     registry = ProfileRegistry(tmp_path / "profiles")
@@ -128,10 +125,10 @@ def test_registry_persists_draft_candidate_and_verified_lifecycle(tmp_path: Path
     assert verified.status == ProfileStatus.VERIFIED
     assert verified.provenance.verified_at is not None
     assert verified.provenance.hypium_replay_run_ids == [
-            "run-profile:profile-attempt-1",
-            "run-profile:profile-attempt-2",
-            "run-profile:profile-attempt-3",
-        ]
+        "run-profile:profile-attempt-1",
+        "run-profile:profile-attempt-2",
+        "run-profile:profile-attempt-3",
+    ]
     assert not candidate_path.exists()
     assert not draft_path.exists()
     assert list(registry.root.rglob("*.tmp")) == []
@@ -171,10 +168,10 @@ def test_locked_verified_profile_rejects_automatic_replacement(tmp_path: Path) -
         registry.promote(
             TARGET_APP_ID,
             replay_run_ids=[
-            "run-profile:profile-attempt-1",
-            "run-profile:profile-attempt-2",
-            "run-profile:profile-attempt-3",
-        ],
+                "run-profile:profile-attempt-1",
+                "run-profile:profile-attempt-2",
+                "run-profile:profile-attempt-3",
+            ],
         )
 
     assert registry.read(TARGET_APP_ID).display_name == "Approved Name"
@@ -190,10 +187,10 @@ def test_replacement_creates_history_and_rollback_restores_prior_version(tmp_pat
         registry,
         profile("Version Two"),
         (
-        "run-profile:profile-attempt-1",
-        "run-profile:profile-attempt-2",
-        "run-profile:profile-attempt-3",
-    ),
+            "run-profile:profile-attempt-1",
+            "run-profile:profile-attempt-2",
+            "run-profile:profile-attempt-3",
+        ),
     )
 
     history_before_rollback = registry.history(BUNDLE_NAME)
@@ -232,9 +229,7 @@ def test_registry_listing_skips_corrupt_files_and_keeps_valid_profiles(tmp_path:
 
     listed = registry.list()
 
-    assert [(item.target_app_id, item.display_name) for item in listed] == [
-        (TARGET_APP_ID, "Valid Draft")
-    ]
+    assert [(item.target_app_id, item.display_name) for item in listed] == [(TARGET_APP_ID, "Valid Draft")]
     assert registry.get(target_app_id=TARGET_APP_ID, status=ProfileStatus.DRAFT) is not None
     assert valid_path.exists()
 
@@ -269,11 +264,7 @@ def test_update_verified_persists_quick_verification_metadata(tmp_path: Path) ->
     evidence = dict(current.provenance.evidence)
     evidence["quick_verification"] = {"passed": True, "run_id": "run-1"}
     updated = current.model_copy(
-        update={
-            "provenance": current.provenance.model_copy(
-                update={"evidence": evidence}, deep=True
-            )
-        },
+        update={"provenance": current.provenance.model_copy(update={"evidence": evidence}, deep=True)},
         deep=True,
     )
 

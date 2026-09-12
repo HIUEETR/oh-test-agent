@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from ..devices.base import DeviceAdapter
+from ..devices.base import DeviceAdapter, DeviceError
 from ..models import ResolvedTarget, TargetQuery
 from .catalog import InstalledApp
 
@@ -36,8 +36,11 @@ class TargetResolver:
         if query.bundle_name:
             try:
                 matches = [self.device.inspect_app(query.bundle_name)]
-            except Exception as exc:
-                raise TargetNotFoundError(f"installed bundle not found: {query.bundle_name}") from exc
+            except DeviceError:
+                installed = self.device.list_installed_apps()
+                if any(app.bundle_name == query.bundle_name for app in installed):
+                    raise
+                raise TargetNotFoundError(f"installed bundle not found: {query.bundle_name}") from None
             if len(matches) != 1:
                 raise TargetAmbiguousError(matches)
             selected = matches[0]
@@ -78,9 +81,7 @@ class TargetResolver:
             return exact[0]
         if len(exact) > 1:
             raise TargetAmbiguousError(exact)
-        candidates = [
-            app for app in apps if needle in _name(app.display_name) or _name(app.display_name) in needle
-        ]
+        candidates = [app for app in apps if needle in _name(app.display_name) or _name(app.display_name) in needle]
         if len(candidates) == 1:
             return candidates[0]
         if candidates:
@@ -95,7 +96,6 @@ def _name(value: str) -> str:
 def _app_id(bundle_name: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", bundle_name.casefold()).strip("-")
     return value or "target-app"
-
 
 
 _BLOCKED_SYSTEM_BUNDLE_MARKERS = (
