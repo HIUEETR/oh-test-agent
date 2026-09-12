@@ -149,6 +149,25 @@ export type AdvisorVerdictEntry = AdvisorVerdictView & {
 
 /* ---------- 运行状态 ---------- */
 
+/** 探索发现的页面（DiscoveryResult.pages 列表项）。 */
+export type DiscoveryPageView = {
+  page_id: string;
+  page_path: string;
+  snapshot_id: string;
+  image_path?: string;
+  element_count: number;
+  discovered_order: number;
+};
+
+/** 探索执行的跳转（DiscoveryResult.transitions 列表项，action 为探索动作摘要）。 */
+export type DiscoveryTransitionView = {
+  source_page_id: string;
+  target_page_id: string | null;
+  success: boolean;
+  blocked_reason?: string | null;
+  action: { kind: string; target_text?: string; locator_value?: string; locator_kind?: string };
+};
+
 export type DiscoveryStatus = {
   phase?: "bootstrap" | "task";
   provisional?: boolean;
@@ -168,6 +187,8 @@ export type DiscoveryStatus = {
   replays?: ReplayResult[];
   gates?: Record<string, boolean | number | string>;
   /* DiscoveryResult 展开字段（advisor 相关为本次增量） */
+  pages?: DiscoveryPageView[];
+  transitions?: DiscoveryTransitionView[];
   advisor_turns?: number;
   advisor_verdicts?: AdvisorVerdictEntry[];
   advisor_log?: AdvisorTurnRecord[];

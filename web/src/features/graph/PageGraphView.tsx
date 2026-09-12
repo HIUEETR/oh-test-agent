@@ -9,7 +9,7 @@ import {
 import { GitBranch } from "lucide-react";
 import { EmptyState } from "../../components/ui/primitives";
 import { artifactUrl } from "../../utils/artifact";
-import type { RunTrace } from "../../api/types";
+import type { DiscoveryStatus, RunTrace } from "../../api/types";
 
 type PageGraph = RunTrace["graph"];
 
@@ -24,9 +24,7 @@ type PageNodeData = {
 function PageNode({ data, selected }: NodeProps<Node<PageNodeData>>) {
   return (
     <div className={`graph-node${selected ? " selected" : ""}`}>
-      {data.imageSrc
-        ? <img src={data.imageSrc} alt="" loading="lazy" />
-        : <div style={{ height: 92, background: "#0e1620" }} />}
+      <NodeImage src={data.imageSrc} />
       <div className="graph-node-body">
         <span className="graph-node-order">STATE {data.order}</span>
         <strong title={data.label}>{data.label}</strong>
@@ -38,7 +36,46 @@ function PageNode({ data, selected }: NodeProps<Node<PageNodeData>>) {
   );
 }
 
+/** 节点截图：加载失败时降级为深色占位，不显示破碎图标。 */
+function NodeImage({ src }: { src: string }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
+  if (!src || failed) {
+    return <div style={{ height: 92, background: "#0e1620", display: "grid", placeItems: "center", color: "#5b7186", fontSize: 11 }}>无截图</div>;
+  }
+  return <img src={src} alt="" loading="lazy" onError={() => setFailed(true)} />;
+}
+
 const nodeTypes = { page: PageNode };
+
+/** trace.graph 为空时用探索阶段的页面与跳转构造等价图。 */
+function buildEffectiveGraph(graph: PageGraph, discovery?: DiscoveryStatus | null): PageGraph {
+  if (graph.nodes.length > 0 || !discovery?.pages?.length) return graph;
+  const nodes = discovery.pages.map((page) => ({
+    node_id: page.page_id,
+    title: page.page_path,
+    page_path: page.page_path,
+    snapshot_id: page.snapshot_id,
+    element_count: page.element_count,
+    discovered_order: page.discovered_order,
+    image_path: page.image_path,
+    artifact_path: page.image_path,
+  }));
+  const edges = (discovery.transitions ?? [])
+    .filter((transition) => transition.target_page_id)
+    .map((transition, index) => {
+      const target = transition.action.target_text || transition.action.locator_value || transition.action.kind;
+      const prefix = transition.success ? "" : "已拦截 · ";
+      return {
+        edge_id: `discovery-${index}`,
+        source: transition.source_page_id,
+        target: transition.target_page_id!,
+        action: transition.action.kind,
+        target_description: `${prefix}${transition.action.kind} ${target}`.trim(),
+      };
+    });
+  return { nodes, edges };
+}
 
 /** 简单三列网格布局：按发现顺序排布（探索图本身即近似广度优先）。 */
 function layout(graph: PageGraph, runId: string): Node<Node<PageNodeData>["data"]>[] {
@@ -75,25 +112,27 @@ function toEdges(graph: PageGraph, selected: string | null): Edge[] {
   }));
 }
 
-export function PageGraphView({ runId, graph }: { runId: string; graph: PageGraph }) {
+export function PageGraphView({ runId, graph, discovery }: { runId: string; graph: PageGraph; discovery?: DiscoveryStatus | null }) {
   const [selected, setSelected] = useState<string | null>(null);
-  const nodes = useMemo(() => layout(graph, runId), [graph, runId]);
-  const edges = useMemo(() => toEdges(graph, selected), [graph, selected]);
+  // 任务阶段未产出 trace.graph 时，回退到探索阶段发现的页面状态图（比赛挑战目标之一）。
+  const effectiveGraph = useMemo(() => buildEffectiveGraph(graph, discovery), [graph, discovery]);
+  const nodes = useMemo(() => layout(effectiveGraph, runId), [effectiveGraph, runId]);
+  const edges = useMemo(() => toEdges(effectiveGraph, selected), [effectiveGraph, selected]);
 
   // 新运行或节点增多时重新取景，保证最新页面可见。
   useEffect(() => {
     setSelected(null);
   }, [runId]);
 
-  const selectedNode = graph.nodes.find((node) => node.node_id === selected) ?? null;
-  const incoming = graph.edges.filter((edge) => edge.target === selected);
-  const outgoing = graph.edges.filter((edge) => edge.source === selected);
+  const selectedNode = effectiveGraph.nodes.find((node) => node.node_id === selected) ?? null;
+  const incoming = effectiveGraph.edges.filter((edge) => edge.target === selected);
+  const outgoing = effectiveGraph.edges.filter((edge) => edge.source === selected);
 
   const onNodeClick = useCallback((_: unknown, node: Node) => {
     setSelected((current) => (current === node.id ? null : node.id));
   }, []);
 
-  if (graph.nodes.length === 0) {
+  if (effectiveGraph.nodes.length === 0) {
     return <EmptyState title="页面图尚未生成" hint="探索运行发现页面状态后会自动绘制" icon={<GitBranch size={38} />} />;
   }
 

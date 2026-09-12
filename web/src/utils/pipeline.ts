@@ -22,8 +22,10 @@ export function derivePipeline(events: RunEvent[], trace: RunTrace | null, repor
     return PIPELINE_LABELS.map(([key, label]) => ({ key, label, state: "pending" }));
   }
   const terminal = Boolean(trace && TERMINAL_STATES.has(trace.state));
-  const captured = hasEvent(events, "screen_captured") || Boolean(trace?.snapshots.length);
-  const perceived = hasEvent(events, "elements_detected");
+  // 探索流程自身包含截图采集与元素感知：探索一旦启动，前两个阶段即视为完成。
+  const explorationStarted = hasEvent(events, "discovery_started") || hasEvent(events, "discovery_finished");
+  const captured = hasEvent(events, "screen_captured") || Boolean(trace?.snapshots.length) || explorationStarted;
+  const perceived = hasEvent(events, "elements_detected") || explorationStarted;
   const planned = hasEvent(events, "plan_created");
   const exploring = hasEvent(events, "discovery_started") && !hasEvent(events, "discovery_finished");
   const explored = hasEvent(events, "discovery_finished");

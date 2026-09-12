@@ -25,11 +25,15 @@ export function useRunRuntime(): void {
     };
   }, [runId]);
 
-  // 运行进入终态后主动收流，避免 EventSource 空转重连。
+  // 运行进入终态后延迟收流：历史运行打开时 trace 先到、SSE 历史事件后到，
+  // 立即停止会丢失整段思考流回放；给事件流 3 秒窗口补齐历史。
   const state = useConsole((state) => state.trace?.state ?? null);
   const replayPending = useConsole((state) => state.trace?.replay_status === "pending");
   useEffect(() => {
-    if (state && TERMINAL_STATES.has(state) && !replayPending) streamRef.current?.stop();
+    if (state && TERMINAL_STATES.has(state) && !replayPending) {
+      const timer = window.setTimeout(() => streamRef.current?.stop(), 3000);
+      return () => window.clearTimeout(timer);
+    }
   }, [state, replayPending]);
 
   // 轮询：串行刷新 trace + discovery，直到终态且回放不处于 pending。

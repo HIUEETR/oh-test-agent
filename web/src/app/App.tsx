@@ -177,12 +177,13 @@ export default function App() {
   );
 }
 
-/** 图标签内容：从 trace 取图数据；组件内部处理空态。 */
+/** 图标签内容：优先任务阶段 trace.graph，探索阶段回退 discovery 页面图。 */
 function GraphTabContent() {
   const runId = useConsole((state) => state.runId);
   const graph = useConsole((state) => state.trace?.graph ?? null);
-  if (!graph) {
+  const discovery = useConsole((state) => state.discovery);
+  if (!graph && !discovery?.pages?.length) {
     return <div className="panel-pad"><p style={{ color: "var(--text-3)", textAlign: "center" }}>尚无运行数据，页面图随探索运行实时生成。</p></div>;
   }
-  return <PageGraphView runId={runId} graph={graph} />;
+  return <PageGraphView runId={runId} graph={graph ?? { nodes: [], edges: [] }} discovery={discovery} />;
 }

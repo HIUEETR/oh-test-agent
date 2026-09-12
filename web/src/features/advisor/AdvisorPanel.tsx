@@ -5,7 +5,7 @@ import { BrainCircuit, MessageSquareQuote, ScanEye } from "lucide-react";
 import { EmptyState, JsonViewer, RetryImage } from "../../components/ui/primitives";
 import { useConsole } from "../../stores/console";
 import { artifactUrl } from "../../utils/artifact";
-import type { AdvisorTurnRecord } from "../../api/types";
+import type { AdvisorTurnRecord, AdvisorVerdictEntry } from "../../api/types";
 
 export function AdvisorPanel() {
   const runId = useConsole((state) => state.runId);
@@ -32,7 +32,11 @@ export function AdvisorPanel() {
 
       <div className="advisor-list">
         {turns.map((turn) => <AdvisorTurn key={turn.turn} runId={runId} turn={turn} />)}
-        {turns.length === 0 && (
+        {/* 旧运行没有对话留痕，但逐页结论（advisor_verdicts）始终可用 */}
+        {turns.length === 0 && (discovery?.advisor_verdicts?.length ?? 0) > 0 && (
+          <VerdictCards verdicts={discovery!.advisor_verdicts!} />
+        )}
+        {turns.length === 0 && (discovery?.advisor_verdicts?.length ?? 0) === 0 && (
           <EmptyState
             title={runId ? "顾问尚未介入" : "尚无顾问对话"}
             hint={runId
@@ -43,6 +47,49 @@ export function AdvisorPanel() {
         )}
       </div>
     </section>
+  );
+}
+
+/** 逐页结论卡片：按页面展示顾问的摘要、推荐/回避与理由（含候选可读标签）。 */
+function VerdictCards({ verdicts }: { verdicts: AdvisorVerdictEntry[] }) {
+  if (!verdicts?.length) return null;
+  return (
+    <>
+      {verdicts.map((verdict) => {
+        const labelOf = (index: number) =>
+          verdict.candidates?.find((item) => item.index === index)?.label ?? `#${index}`;
+        const kindOf = (index: number) =>
+          verdict.candidates?.find((item) => item.index === index)?.kind ?? "";
+        return (
+          <article className="advisor-turn" key={verdict.identity}>
+            <div className="advisor-card input-card">
+              <div className="advisor-card-title"><ScanEye size={13} />页面</div>
+              <div className="advisor-card-body"><code>{verdict.identity}</code></div>
+            </div>
+            <div className="advisor-card output-card">
+              <div className="advisor-card-title">
+                <MessageSquareQuote size={13} />顾问结论
+                <small>{verdict.source}</small>
+              </div>
+              <div className="advisor-card-body">
+                <p><strong>页面理解：</strong>{verdict.page_summary || "（无摘要）"}</p>
+                {(verdict.recommended.length > 0 || verdict.avoid.length > 0) && (
+                  <div className="verdict-tags">
+                    {verdict.recommended.map((index) => (
+                      <span className="verdict-tag reco" key={`r-${index}`}>推荐 · {kindOf(index)}「{labelOf(index)}」</span>
+                    ))}
+                    {verdict.avoid.map((index) => (
+                      <span className="verdict-tag avoid" key={`a-${index}`}>回避 · {kindOf(index)}「{labelOf(index)}」</span>
+                    ))}
+                  </div>
+                )}
+                {verdict.reason && <p>{verdict.reason}</p>}
+              </div>
+            </div>
+          </article>
+        );
+      })}
+    </>
   );
 }
 
