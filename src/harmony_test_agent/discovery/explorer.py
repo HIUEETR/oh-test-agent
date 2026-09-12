@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from ..devices import DeviceAdapter, DeviceError
 from ..models import CommandResult, ExplorationPolicy, ScreenSnapshot, UIElement
+from ..perception.normalizer import normalize_layout, page_path
 from ..runtime.safety import SafetyPolicy
 from ..targets import ForegroundApp, ResolvedTarget
 
@@ -163,6 +164,11 @@ class ActionRiskClassifier:
 
 DiscoveryProgress = Callable[[str, dict[str, object]], None]
 
+_LOADING_TEXT_PATTERN = re.compile(r"正在加载|加载中|加载更多|loading|refreshing|请稍候|请等待", re.IGNORECASE)
+_TIME_TEXT_PATTERN = re.compile(r"^\d{1,2}[:：]\d{2}([:：]\d{2})?$")
+_DIGIT_PUNCT_TEXT_PATTERN = re.compile(r"^[\d\s:：.，,。、%/+-]+$")
+_STRUCTURAL_KEY_ID_PATTERN = re.compile(r"\d{4,}")
+
 
 class BoundedExplorer:
     """Explore safe UI candidates within page, action, duration, and bundle boundaries."""
@@ -211,7 +217,7 @@ class BoundedExplorer:
 
         visited_actions: set[tuple[str, str]] = set()
         page_by_signature: dict[str, DiscoveryPage] = {}
-        snapshot = self.device.screenshot(self.output_dir, self.run_id, "discovery-000")
+        snapshot = self._capture_settled("discovery-000")
         foreground = self._assert_target_foreground()
         queue: list[tuple[ScreenSnapshot, ForegroundApp, list[ExplorationAction]]] = [(snapshot, foreground, [])]
 
@@ -223,12 +229,16 @@ class BoundedExplorer:
                 result.stop_reason = "duration_limit"
                 break
             current_snapshot, current_foreground, current_path = queue.pop(0)
-            current_snapshot, current_foreground = self._restore_path(
-                current_path,
-                current_snapshot,
-                current_foreground,
-                len(result.transitions),
-            )
+            try:
+                current_snapshot, current_foreground = self._restore_path(
+                    current_path,
+                    current_snapshot,
+                    current_foreground,
+                    len(result.transitions),
+                )
+            except DeviceError as exc:
+                self._progress("page_unreachable", {"path_length": len(current_path), "error": str(exc)})
+                continue
             page = self._page(current_snapshot, current_foreground, len(page_by_signature) + 1, current_path)
             if page.signature not in page_by_signature:
                 if len(page_by_signature) >= self.policy.max_pages:
@@ -298,12 +308,16 @@ class BoundedExplorer:
                         queue.append((after, transition.foreground_after, [*current_path, action]))
                     elif after_page.signature in page_by_signature:
                         transition.target_page_id = page_by_signature[after_page.signature].page_id
-                current_snapshot, current_foreground = self._restore_path(
-                    current_path,
-                    current_snapshot,
-                    current_foreground,
-                    len(result.transitions),
-                )
+                try:
+                    current_snapshot, current_foreground = self._restore_path(
+                        current_path,
+                        current_snapshot,
+                        current_foreground,
+                        len(result.transitions),
+                    )
+                except DeviceError as exc:
+                    self._progress("source_unreachable", {"page_id": page.page_id, "error": str(exc)})
+                    break
             if self._early_success(result):
                 result.stop_reason = "admission_metrics_reached"
                 break
@@ -479,7 +493,28 @@ class BoundedExplorer:
         expected_foreground: ForegroundApp,
         sequence: int,
     ) -> tuple[ScreenSnapshot, ForegroundApp]:
-        """Rebuild one queued state from a clean launch and verify every path step."""
+        """Rebuild one queued state from a clean launch with bounded retries per attempt."""
+        attempts = 1 + self.policy.restore_retries
+        failure: str | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._restore_attempt(path, expected, expected_foreground, sequence, attempt)
+            except DeviceError as exc:
+                failure = str(exc)
+                if attempt >= attempts:
+                    break
+                self._progress("restore_retry", {"sequence": sequence, "attempt": attempt, "error": failure})
+        raise DeviceError(failure or "exploration path restoration failed")
+
+    def _restore_attempt(
+        self,
+        path: list[ExplorationAction],
+        expected: ScreenSnapshot,
+        expected_foreground: ForegroundApp,
+        sequence: int,
+        attempt: int,
+    ) -> tuple[ScreenSnapshot, ForegroundApp]:
+        """Rebuild one queued state from a clean launch and verify the structural match."""
         stopped = self.device.stop_app(self.target.bundle_name)
         if not stopped.ok:
             raise DeviceError(f"force-stop failed while restoring exploration path: {stopped.stderr or stopped.stdout}")
@@ -487,7 +522,7 @@ class BoundedExplorer:
         if not started.ok:
             raise DeviceError(f"launch failed while restoring exploration path: {started.stderr or started.stdout}")
         foreground = self._assert_target_foreground()
-        snapshot = self.device.screenshot(self.output_dir, self.run_id, f"restore-{sequence:03d}-000")
+        snapshot = self._capture_settled(f"restore-{sequence + attempt - 1:03d}-000")
         for index, action in enumerate(path, 1):
             source = self._page(snapshot, foreground, 0, path[: index - 1])
             action = self.resolve_replay_action(action, snapshot)
@@ -499,11 +534,99 @@ class BoundedExplorer:
                 )
             snapshot = after
             foreground = transition.foreground_after
-        actual = self._page(snapshot, foreground, 0, path)
-        expected_signature = self._snapshot_signature(expected, expected_foreground)
-        if actual.signature != expected_signature:
-            raise DeviceError("restored exploration state does not match the queued page signature")
+        if not self._structural_match(expected, expected_foreground, snapshot, foreground):
+            raise DeviceError(self._restore_mismatch_detail(expected, snapshot))
         return snapshot, foreground
+
+    def _capture_settled(self, label: str) -> ScreenSnapshot:
+        """Capture one frame and poll the hierarchy within the settle budget for stability."""
+        snapshot = self.device.screenshot(self.output_dir, self.run_id, label)
+        if self.policy.settle_timeout_seconds <= 0:
+            return snapshot
+        fingerprint = self._stability_fingerprint(snapshot.page_path, snapshot.elements)
+        deadline = time.monotonic() + self.policy.settle_timeout_seconds
+        while time.monotonic() < deadline:
+            self.device.wait(0.5)
+            try:
+                hierarchy = self.device.collect_ui_hierarchy()
+            except DeviceError:
+                break
+            elements = normalize_layout(hierarchy, snapshot.width, snapshot.height)
+            if self._stability_fingerprint(page_path(hierarchy), elements) == fingerprint:
+                return snapshot
+        return self.device.screenshot(self.output_dir, self.run_id, f"{label}-settled")
+
+    @classmethod
+    def _stability_fingerprint(cls, page: str, elements: list[UIElement]) -> tuple[str, int, tuple[str, ...]]:
+        return (page, len(elements), tuple(sorted(cls._stable_texts(elements))))
+
+    @staticmethod
+    def _stable_texts(elements: list[UIElement]) -> set[str]:
+        return {
+            _normalize_text(item.content)
+            for item in elements
+            if item.content and len(item.content) <= 80 and not _is_volatile_text(item.content)
+        }
+
+    @classmethod
+    def _structural_match(
+        cls,
+        expected: ScreenSnapshot,
+        expected_foreground: ForegroundApp,
+        actual: ScreenSnapshot,
+        actual_foreground: ForegroundApp,
+    ) -> bool:
+        """Page identity holds when the queued page's interactive structure is still present.
+
+        key/id 集合不参与判定：真实应用的 key 常携带内容实例 ID 或面板模式（热榜/历史），
+        跨启动不可复现；错误页由每个回放动作的定位符重解析兜底。
+        """
+        _, expected_interactive = cls._structural_features(expected)
+        _, actual_interactive = cls._structural_features(actual)
+        if (
+            expected.page_path != actual.page_path
+            or expected_foreground.bundle_name != actual_foreground.bundle_name
+            or expected_foreground.window_type != actual_foreground.window_type
+        ):
+            return False
+        return expected_interactive.issubset(actual_interactive)
+
+    @staticmethod
+    def _structural_features(snapshot: ScreenSnapshot) -> tuple[set[str], set[tuple[str, bool, bool, bool]]]:
+        """卡片 key 常携带内容实例 ID（如知乎流卡片），长数字串折叠后才能跨启动比较同类结构。"""
+        keys = {
+            _STRUCTURAL_KEY_ID_PATTERN.sub("#", item.key or item.id)
+            for item in snapshot.elements
+            if item.key or item.id
+        }
+        interactive = {
+            (item.type, item.clickable, item.editable, item.scrollable)
+            for item in snapshot.elements
+            if item.clickable or item.editable or item.scrollable
+        }
+        return keys, interactive
+
+    @staticmethod
+    def _restore_mismatch_detail(expected: ScreenSnapshot, actual: ScreenSnapshot) -> str:
+        expected_texts = BoundedExplorer._stable_texts(expected.elements)
+        actual_texts = BoundedExplorer._stable_texts(actual.elements)
+        expected_keys, expected_interactive = BoundedExplorer._structural_features(expected)
+        actual_keys, actual_interactive = BoundedExplorer._structural_features(actual)
+        missing_texts = sorted(expected_texts - actual_texts)[:5]
+        unexpected_texts = sorted(actual_texts - expected_texts)[:5]
+        missing_keys = sorted(expected_keys - actual_keys)[:5]
+        unexpected_keys = sorted(actual_keys - expected_keys)[:5]
+        missing_widgets = sorted(
+            f"{kind}/{clickable}/{editable}/{scrollable}"
+            for kind, clickable, editable, scrollable in (expected_interactive - actual_interactive)
+        )[:5]
+        return (
+            "restored exploration state does not match the queued page structure: "
+            f"expected page_path={expected.page_path!r}, actual page_path={actual.page_path!r}; "
+            f"missing widgets={missing_widgets}; "
+            f"missing keys={missing_keys}, unexpected keys={unexpected_keys}; "
+            f"missing texts={missing_texts}, unexpected texts={unexpected_texts}"
+        )
 
     def _progress(self, kind: str, payload: dict[str, object]) -> None:
         if self.progress:
@@ -526,9 +649,7 @@ class BoundedExplorer:
     @staticmethod
     def _snapshot_signature(snapshot: ScreenSnapshot, foreground: ForegroundApp) -> str:
         stable_keys = sorted({item.key or item.id for item in snapshot.elements if item.key or item.id})
-        texts = sorted(
-            {_normalize_text(item.content) for item in snapshot.elements if item.content and len(item.content) <= 80}
-        )[:30]
+        texts = sorted(BoundedExplorer._stable_texts(snapshot.elements))[:30]
         raw = json.dumps(
             [
                 snapshot.page_path,
@@ -612,3 +733,15 @@ class BoundedExplorer:
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _is_volatile_text(value: str) -> bool:
+    """加载占位、时间样式与纯数字/标点文本跨启动或跨分钟不稳定，不参与页面签名。"""
+    normalized = _normalize_text(value)
+    if not normalized:
+        return True
+    if _LOADING_TEXT_PATTERN.search(normalized):
+        return True
+    if _TIME_TEXT_PATTERN.match(normalized):
+        return True
+    return bool(_DIGIT_PUNCT_TEXT_PATTERN.match(normalized))

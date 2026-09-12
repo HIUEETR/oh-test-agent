@@ -244,6 +244,8 @@ class ExplorationPolicy(BaseModel):
     max_actions_per_page: int = Field(default=8, ge=1, le=8)
     max_duration_seconds: int = Field(default=900, ge=1, le=900)
     fixed_input_text: str = Field(default="OpenHarmony", min_length=1, max_length=200)
+    settle_timeout_seconds: int = Field(default=1, ge=0, le=30)
+    restore_retries: int = Field(default=2, ge=0, le=3)
     allow_login: bool = False
     allow_permission: bool = False
     allow_submit: bool = False
