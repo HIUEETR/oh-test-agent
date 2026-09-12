@@ -36,12 +36,12 @@ function PageNode({ data, selected }: NodeProps<Node<PageNodeData>>) {
   );
 }
 
-/** 节点截图：加载失败时降级为深色占位，不显示破碎图标。 */
+/** 节点截图：加载失败时降级为浅色占位，不显示破碎图标。 */
 function NodeImage({ src }: { src: string }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
   if (!src || failed) {
-    return <div style={{ height: 92, background: "#0e1620", display: "grid", placeItems: "center", color: "#5b7186", fontSize: 11 }}>无截图</div>;
+    return <div style={{ height: 92, background: "#e7eef6", display: "grid", placeItems: "center", color: "#7e90a4", fontSize: 11 }}>无截图</div>;
   }
   return <img src={src} alt="" loading="lazy" onError={() => setFailed(true)} />;
 }
