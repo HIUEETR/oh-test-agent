@@ -75,15 +75,16 @@ class ReportBuilder:
         for replay in trace.replays:
             error = html.escape(replay.error.message) if replay.error else ""
             exit_code = replay.exit_code if replay.exit_code is not None else ""
+            evidence = "<br>".join(html.escape(path) for path in replay.evidence_paths)
             rows.append(
                 f"<tr><td>{replay.attempt}</td><td>{html.escape(replay.status)}</td><td>{exit_code}</td>"
-                f"<td>{'是' if replay.timed_out else '否'}</td><td>{error}</td></tr>"
+                f"<td>{'是' if replay.timed_out else '否'}</td><td>{error}</td><td>{evidence}</td></tr>"
             )
-        body = "".join(rows) or '<tr><td colspan="5">尚无回放结果</td></tr>'
+        body = "".join(rows) or '<tr><td colspan="6">尚无回放结果</td></tr>'
         progress = f"完成 {trace.replay_completed} / {trace.replay_total}；通过 {trace.replay_passed}"
         return f"""<section class="summary"><h2>回放结果</h2>
 <p>状态：<b>{html.escape(trace.replay_status)}</b>；{progress}</p>
-<table><thead><tr><th>尝试</th><th>状态</th><th>退出码</th><th>超时</th><th>错误</th></tr></thead>
+<table><thead><tr><th>尝试</th><th>状态</th><th>退出码</th><th>超时</th><th>错误</th><th>证据</th></tr></thead>
 <tbody>{body}</tbody></table></section>"""
 
     @staticmethod
@@ -111,6 +112,17 @@ img { display: block; max-width: 420px; max-height: 620px; object-fit: contain; 
 table { width: 100%; border-collapse: collapse; margin-top: 12px; }
 th, td { border-bottom: 1px solid #324865; padding: 10px; text-align: left; }
 """
+        error = html.escape(trace.agent_error or trace.error or "")
+        target = trace.resolved_target.model_dump(mode="json") if trace.resolved_target else {}
+        profile = trace.profile_snapshot.model_dump(mode="json") if trace.profile_snapshot else {}
+        discovery = trace.discovery_result or {}
+        verification = trace.verification_result or {}
+        gate_markup = f"""<section class="summary"><h2>Profile bootstrap</h2>
+<p>阶段：<b>{html.escape(trace.phase)}</b> · Profile：<b>{html.escape(str(profile.get("status") or "none"))}</b>
+· 临时结果：<b>{"是" if trace.provisional else "否"}</b></p>
+<p>目标：<code>{html.escape(str(target.get("bundle_name") or trace.target_app_id))}</code>
+· 探索页面：{len(discovery.get("pages", []))} · 验证轮次：{len(verification.get("rounds", []))}
+· Profile Hypium 回放：{len(trace.profile_validation_replays)}</p></section>"""
         return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width">
@@ -124,6 +136,7 @@ th, td { border-bottom: 1px solid #324865; padding: 10px; text-align: left; }
 <div class="metric">模型<br><b>{html.escape(trace.model_used)}</b></div>
 <div class="metric">页面<br><b>{len(trace.graph.nodes)}</b></div>
 <div class="metric">动作<br><b>{len(trace.actions)}</b></div>
-<div class="metric">断言<br><b>{len(trace.assertions)}</b></div></div></section>
-{coverage}{replays}{failures}{cards}
+<div class="metric">断言<br><b>{len(trace.assertions)}</b></div></div>
+{"<p class='bad'>" + error + "</p>" if error else ""}</section>
+{gate_markup}{coverage}{replays}{failures}{cards}
 </main></body></html>"""

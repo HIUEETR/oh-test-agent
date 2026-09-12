@@ -136,6 +136,11 @@ stopped_by_user
 - 计划 finish 步骤不能被模型换成其他工具；
 - 其他安全的非 finish 自适应仍被保留，例如把返回动作改为点击可见的应用内返回按钮。
 
+### 模型实例与上下文
+
+`AGENT_MODEL` 用于任务规划；`AGENT_VISION_MODEL` 用于截图理解和逐步工具决策。它们通过编排器持久化的 `PlanResult`、`ScreenSnapshot`、页面元素和当前 `PlannedStep` 交换结构化数据，没有模型之间的直接会话通道。将 `AGENT_VISION_MODEL` 留空会让视觉阶段回退到 `AGENT_MODEL`，因此可以统一为一个支持图像输入和结构化输出的多模态模型。
+
+统一模型只减少模型切换和提示前缀差异，不等于共享一个连续对话：当前每次 `plan`、`analyze`、`decide` 都新建 Pydantic AI `Agent` 并发起独立请求，仓库没有 provider prompt-cache 控制、命中统计或共享消息历史。实际缓存命中取决于兼容服务是否支持前缀缓存，以及请求前缀、图片和页面元素是否稳定；仅把两个配置名设成相同模型，命中率不一定明显提高。
 ## 7. 设备边界
 
 `HarmonyDeviceAdapter` 暴露：
@@ -290,3 +295,15 @@ SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关�
 - 页面语义聚类仍可优化以减少动态页面过度分裂。
 - OCR/OmniParser 是可插拔增强项，不是主链路硬依赖。
 - API 没有生产级鉴权、队列或多租户隔离，仅用于本机开发验收。
+
+
+## 自动目标发现与 Profile 生命周期
+
+`targets/catalog.py` 封装 `bm dump -a/-n/-l`，`targets/resolver.py` 执行 bundle 精确匹配、应用名唯一匹配和多候选停止。`discovery/explorer.py` 在确定性安全策略和 20/8/900 边界内构建页面图；`discovery/stability.py` 从三轮独立启动证据筛选稳定定位器和应用级断言；`profiles/registry.py` 通过临时文件、Schema 校验和原子替换维护 draft、candidate、verified、history 和 locked 状态。
+
+每个 `RunTrace` 冻结 `target_query`、`resolved_target`、`profile_snapshot`、探索策略和验证结果。Hypium 生成器只读取该快照，生成脚本必须含可观测的应用 UI 断言。通过三次 Driver 回放后 Registry 才将 candidate 原子晋级为 verified。CLI、API 和 Web 使用相同的 resolve、discover、verify、generate、replay、promote、test 状态机。
+
+
+### Profile 发现状态机
+
+顶层 Run 使用 `bootstrap` 与 `task` 两个阶段。`bootstrap` 完成目标消歧、启动交叉校验、有界探索、三轮设备验证、candidate 生成、三次 Hypium Driver 回放和原子晋级；随后将冻结的 verified Profile 交给 `task` 阶段。多候选 Run 保持 `waiting_target_selection`，由 API/Web 继续；受限临时测试标记 `provisional`，禁止生成或执行正式回归用例。停止请求会唤醒候选等待，并在探索、验证和回放边界终止。

@@ -38,6 +38,46 @@ export type Snapshot = ArtifactImage & {
   }>;
 };
 
+export type TargetCandidate = {
+  candidate_id?: string;
+  target_app_id?: string;
+  lifecycle?: string;
+  display_name?: string;
+  app_name?: string;
+  bundle_name: string;
+  main_ability?: string;
+  version_name?: string;
+  version_code?: string | number;
+};
+
+export type ProfileSummary = {
+  profile_id: string;
+  target_app_id?: string;
+  lifecycle?: string;
+  display_name?: string;
+  bundle_name?: string;
+  main_ability?: string;
+  version_name?: string;
+  version_code?: string | number;
+  status: "draft" | "candidate" | "verified" | "invalid" | string;
+  locked: boolean;
+  quick_verification?: { passed?: boolean; checked_at?: string; reason?: string };
+  history?: Array<{ backup_name: string; created_at?: string }>;
+};
+
+export type DiscoveryPolicy = {
+  enabled: boolean;
+  allow_login: boolean;
+  allow_permission: boolean;
+  allow_submit: boolean;
+  allow_publish: boolean;
+  allow_download: boolean;
+  max_pages: number;
+  max_actions_per_page: number;
+  max_duration_seconds: number;
+  temporary_test: boolean;
+};
+
 export type ReplayError = {
   kind: string;
   message: string;
@@ -54,6 +94,7 @@ export type ReplayResult = {
   report_path?: string | null;
   evidence_paths: string[];
   generated_result_path?: string | null;
+  generated_result?: Record<string, unknown> | null;
   command: {
     command: string;
     args: string[];
@@ -65,8 +106,28 @@ export type ReplayResult = {
   };
 };
 
+export type DiscoveryStatus = {
+  phase?: "bootstrap" | "task";
+  provisional?: boolean;
+  profile_status?: string;
+  profile_status_at_start?: string;
+  profile_snapshot?: ProfileSummary;
+  resolved_target?: TargetCandidate;
+  target_candidates?: TargetCandidate[];
+  pages_discovered?: number;
+  actions_executed?: number;
+  remaining_seconds?: number;
+  blocked_paths?: Array<string | { reason?: string; label?: string; risk_reason?: string; target_text?: string }>;
+  locator_candidates?: unknown[];
+  assertion_candidates?: unknown[];
+  validation_rounds?: Array<{ round_number: number; passed: boolean; failures?: string[] }>;
+  replays?: ReplayResult[];
+  gates?: Record<string, boolean | number | string>;
+};
+
 export type RunTrace = {
   run_id: string;
+  target_app_id: string;
   task: string;
   state: string;
   mode: string;
@@ -74,6 +135,16 @@ export type RunTrace = {
   model_mock: boolean;
   revision?: string | number;
   updated_at?: string;
+  phase?: "bootstrap" | "task";
+  provisional?: boolean;
+  profile_status_at_start?: string;
+  profile_snapshot?: ProfileSummary;
+  resolved_target?: TargetCandidate;
+  target_candidates?: TargetCandidate[];
+  discovery_result?: Record<string, unknown>;
+  verification_result?: Record<string, unknown>;
+  profile_validation_replays?: ReplayResult[];
+  discovery?: DiscoveryStatus;
   error?: string;
   plan: Array<{ step_id: string; instruction: string; tool: string; target?: string }>;
   snapshots: Snapshot[];
@@ -103,7 +174,14 @@ export type RunTrace = {
       target_description: string;
     }>;
   };
-  generated?: { warnings: string[]; generated_at?: string; purpose?: string; diagnostic?: boolean };
+  generated?: {
+    warnings: string[];
+    generated_at?: string;
+    purpose?: string;
+    diagnostic?: boolean;
+    replay_eligible?: boolean;
+    incomplete_reasons?: string[];
+  };
   replays: ReplayResult[];
   agent_outcome?: "completed" | "failed" | "stopped" | "unknown";
   agent_error?: string;
@@ -131,7 +209,9 @@ export type ScriptResult = {
 };
 
 export type ExecuteResult = {
+  run_id?: string;
   passed?: boolean;
   status?: string;
+  attempts?: number;
   replays?: ReplayResult[];
 };

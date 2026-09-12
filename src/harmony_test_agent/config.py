@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     harmony_device: str = "127.0.0.1:5555"
     runtime_dir: Path = Field(default=Path("artifacts/runs"))
     database_path: Path = Field(default=Path("artifacts/agent.db"))
-    target_profile_path: Path = Field(default=Path("profiles/zhihu-plus.json"))
+    target_profile_path: Path | None = Field(default=Path("profiles/zhihu-plus.json"))
+    profiles_dir: Path = Field(default=Path("profiles"))
     runtime_home: Path = Field(default=Path(".runtime-user"))
     agent_max_steps: int = Field(default=20, ge=1, le=100)
     agent_action_timeout: float = Field(default=30, gt=0, le=300)
@@ -66,9 +67,15 @@ class Settings(BaseSettings):
 
     @computed_field
     @property
-    def resolved_target_profile_path(self) -> Path:
-        """返回目标应用配置文件的绝对路径。"""
-        return self._resolve(self.target_profile_path)
+    def resolved_target_profile_path(self) -> Path | None:
+        """返回旧版显式 Profile 覆盖路径；未配置时不构成运行硬依赖。"""
+        return self._resolve(self.target_profile_path) if self.target_profile_path else None
+
+    @computed_field
+    @property
+    def resolved_profiles_dir(self) -> Path:
+        """返回 Profile Registry 根目录。"""
+        return self._resolve(self.profiles_dir)
 
     @computed_field
     @property

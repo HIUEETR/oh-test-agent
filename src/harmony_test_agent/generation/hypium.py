@@ -34,14 +34,21 @@ class HypiumGenerator:
     def __init__(self, artifacts: ArtifactStore):
         self.artifacts = artifacts
 
-    def generate(self, trace: RunTrace, profile: TargetAppProfile) -> GeneratedArtifact:
-        """生成回放文件；只有完整成功轨迹会获得 acceptance 和回放资格。"""
+    def generate(self, trace: RunTrace, profile: TargetAppProfile | None = None) -> GeneratedArtifact:
+        """从冻结 Profile 生成脚本；旧 Trace 只允许显式提供一次兼容快照。"""
+        frozen = trace.profile_snapshot
+        if frozen is None and profile is not None:
+            trace.profile_snapshot = profile.model_copy(deep=True)
+            frozen = trace.profile_snapshot
+        if frozen is None:
+            raise ValueError("RunTrace does not contain a frozen profile_snapshot")
+        profile = frozen
         output_dir = self.artifacts.run_dir(trace.run_id) / "generated"
         safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", trace.run_id)
         python_path = output_dir / f"test_{safe_id}.py"
         config_path = output_dir / f"test_{safe_id}.json"
         metadata_path = output_dir / "generation_metadata.json"
-        coverage = self._render_actions(trace)
+        coverage = self._render_actions(trace, profile)
         outcome = self._agent_outcome(trace)
         incomplete_reasons = self._incomplete_reasons(trace, outcome, coverage)
         replay_eligible = not incomplete_reasons
@@ -71,6 +78,8 @@ class HypiumGenerator:
             "purpose": purpose,
             "replay_eligible": replay_eligible,
             "warnings": coverage.warnings,
+            "application_assertion_count": coverage.explicit_assertions,
+            "validated_resolutions": profile.device_compatibility.validated_resolutions,
         }
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         metadata = {
@@ -88,6 +97,8 @@ class HypiumGenerator:
             "omitted_actions": coverage.omitted_actions,
             "incomplete_reasons": incomplete_reasons,
             "warnings": coverage.warnings,
+            "application_assertion_count": coverage.explicit_assertions,
+            "coordinate_constraints": profile.device_compatibility.model_dump(mode="json"),
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return GeneratedArtifact(
@@ -105,7 +116,7 @@ class HypiumGenerator:
             warnings=coverage.warnings,
         )
 
-    def _render_actions(self, trace: RunTrace) -> GenerationCoverage:
+    def _render_actions(self, trace: RunTrace, profile: TargetAppProfile) -> GenerationCoverage:
         coverage = GenerationCoverage()
         for action in trace.actions:
             if not action.success:
@@ -128,7 +139,7 @@ class HypiumGenerator:
                     )
                     coverage.coordinate_fallbacks += 1
                 else:
-                    selector = self._selector(action.locator, action.params.get("target"), coverage.warnings)
+                    selector = self._selector(action.locator, action.params.get("target"), coverage.warnings, profile)
                     coverage.lines.append(f"        driver.touch({selector})")
                 coverage.generated_actions += 1
             elif tool == ToolName.CLICK_COORDINATE:
@@ -139,7 +150,9 @@ class HypiumGenerator:
                 coverage.coordinate_fallbacks += 1
                 coverage.generated_actions += 1
             elif tool == ToolName.INPUT_TEXT:
-                selector = self._selector(action.locator, action.params.get("target") or "输入框", coverage.warnings)
+                selector = self._selector(
+                    action.locator, action.params.get("target") or "输入框", coverage.warnings, profile
+                )
                 coverage.lines.append(f"        driver.input_text({selector}, {action.params.get('text', '')!r})")
                 coverage.generated_actions += 1
             elif tool == ToolName.SWIPE:
@@ -155,12 +168,12 @@ class HypiumGenerator:
                 target = action.params.get("target") or action.params.get("text")
                 coverage.lines.append(
                     "        driver.check_component_exist("
-                    f"{self._selector(action.locator, target, coverage.warnings)}, expect_exist=True)"
+                    f"{self._selector(action.locator, target, coverage.warnings, profile)}, expect_exist=True)"
                 )
                 coverage.generated_assertions += 1
                 coverage.explicit_assertions += 1
             elif tool == ToolName.ASSERT_NOT_VISIBLE:
-                selector = self._selector(action.locator, action.params.get("target"), coverage.warnings)
+                selector = self._selector(action.locator, action.params.get("target"), coverage.warnings, profile)
                 coverage.lines.append(f"        driver.check_component_exist({selector}, expect_exist=False)")
                 coverage.generated_assertions += 1
                 coverage.explicit_assertions += 1
@@ -194,6 +207,8 @@ class HypiumGenerator:
     @staticmethod
     def _incomplete_reasons(trace: RunTrace, outcome: str, coverage: GenerationCoverage) -> list[str]:
         reasons: list[str] = []
+        if trace.provisional:
+            reasons.append("provisional trace cannot qualify for acceptance replay")
         if outcome != "completed":
             reasons.append(f"source agent outcome is {outcome}")
         if trace.agent_error:
@@ -209,6 +224,8 @@ class HypiumGenerator:
         ]
         if unsupported:
             reasons.append("source trace contains unsupported replay actions")
+        if any(item.startswith("unvalidated dynamic ") for item in coverage.warnings):
+            reasons.append("source trace contains a dynamic locator without stable unique-prefix evidence")
         return list(dict.fromkeys(reasons))
 
     @staticmethod
@@ -248,15 +265,37 @@ class HypiumGenerator:
         return element.bbox.center if element and element.bbox else None
 
     @staticmethod
-    def _selector(locator, target: str | None, warnings: list[str]) -> str:
+    def _selector(
+        locator,
+        target: str | None,
+        warnings: list[str],
+        profile: TargetAppProfile,
+    ) -> str:
         if locator:
             if locator.kind in {LocatorKind.KEY, LocatorKind.ID}:
                 method = "key" if locator.kind == LocatorKind.KEY else "id"
                 dynamic = re.fullmatch(r"(.+_)\d{8,}", locator.value)
                 if dynamic:
                     prefix = dynamic.group(1)
-                    warnings.append(f"dynamic {method} {locator.value!r} generalized to prefix {prefix!r}")
-                    return f"BY.{method}({prefix!r}, MatchPattern.STARTS_WITH)"
+                    validated = next(
+                        (
+                            item
+                            for item in profile.stable_locator_inventory
+                            if getattr(item, method) == locator.value
+                            and item.dynamic_pattern == prefix
+                            and item.observed_rounds >= 3
+                            and item.unique_match_rounds >= 3
+                        ),
+                        None,
+                    )
+                    if validated is not None:
+                        warnings.append(
+                            f"validated dynamic {method} {locator.value!r} generalized to unique prefix {prefix!r}"
+                        )
+                        return f"BY.{method}({prefix!r}, MatchPattern.STARTS_WITH)"
+                    warnings.append(
+                        f"unvalidated dynamic {method} {locator.value!r} retained as an exact diagnostic selector"
+                    )
                 return f"BY.{method}({locator.value!r})"
             if locator.kind == LocatorKind.TEXT:
                 return f"BY.text({locator.value!r})"

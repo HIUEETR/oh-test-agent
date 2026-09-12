@@ -32,6 +32,9 @@ web/playwright-report/
 web/test-results/
 
 # Runtime artifacts. Keep only the directory contract in Git.
+profiles/draft/
+profiles/candidate/
+profiles/history/
 artifacts/**
 !artifacts/README.md
 reports/

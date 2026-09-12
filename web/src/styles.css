@@ -209,3 +209,58 @@ button:not(:disabled):hover { transform: translateY(-1px); }
 .report-toolbar { gap: 9px; }
 .report-card .empty-state button { margin-top: 8px; }
 @media (max-width: 760px) { .script-heading { align-items: stretch; flex-direction: column; } .action-strip { flex-wrap: wrap; justify-content: flex-start; } .attempt-grid { grid-template-columns: 1fr; } .api-unavailable { grid-template-columns: 1fr; } .api-unavailable button { grid-column: 1; grid-row: auto; width: fit-content; } }
+
+/* Target discovery, safety policy, promotion gates and Profile registry. */
+input { width: 100%; color: var(--text); background: rgba(5, 14, 25, 0.66); border: 1px solid #29415f; border-radius: 11px; padding: 11px 12px; transition: border-color 180ms, box-shadow 180ms; }
+input:hover, input:focus { border-color: #3d5e81; }
+input[type="checkbox"] { width: 16px; height: 16px; padding: 0; accent-color: var(--green); }
+input[type="number"] { margin-top: 6px; }
+.target-kind { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 4px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(5, 14, 25, .45); }
+.target-kind button { min-height: 34px; color: var(--muted); background: transparent; }
+.target-kind button.active { color: #dffdf3; background: rgba(53, 214, 164, .14); box-shadow: inset 0 0 0 1px rgba(53, 214, 164, .28); }
+.input-action { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.input-action button { min-height: 42px; }
+.profile-status { display: inline-flex; align-items: center; min-height: 24px; padding: 3px 8px; border: 1px solid #36516e; border-radius: 999px; color: #b9cde0; font-size: 10px; line-height: 1; }
+.status-verified { color: var(--green); border-color: rgba(53, 214, 164, .42); background: rgba(53, 214, 164, .1); }
+.status-candidate { color: var(--amber); border-color: rgba(245, 186, 98, .42); background: rgba(245, 186, 98, .1); }
+.status-invalid { color: var(--red); border-color: rgba(255, 113, 134, .42); }
+.policy-editor { margin-top: 15px; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(5, 14, 25, .38); }
+.policy-editor summary { cursor: pointer; color: #cbdbea; font-size: 12px; font-weight: 650; }
+.switch-row, .check-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; color: #b5c7d8; font-weight: 500; }
+.policy-note { margin-top: 10px; padding: 9px; border-left: 2px solid var(--amber); color: #9fb1c4; background: rgba(245, 186, 98, .06); font-size: 10px; line-height: 1.55; }
+.permission-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 8px; }
+.limit-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+.limit-grid label { margin-top: 10px; font-size: 10px; }
+.resolved-target { margin: 12px 0 0; color: #dbe9f5; font-size: 12px; }
+.resolved-target small { display: block; margin-top: 4px; overflow: hidden; color: var(--muted); font: 9px "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; }
+.selection-banner { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(260px, 1.4fr) auto; gap: 12px; align-items: center; margin-bottom: 12px; padding: 13px 15px; border: 1px solid rgba(245, 186, 98, .35); border-radius: 14px; background: rgba(245, 186, 98, .09); }
+.selection-banner strong, .selection-banner span { display: block; }
+.selection-banner span { margin-top: 3px; color: #b9a987; font-size: 11px; }
+.compact { flex: initial; }
+.discovery-card { grid-column: 1 / -1; min-height: 160px; padding: 15px; background: linear-gradient(145deg, rgba(18, 36, 58, .94), rgba(12, 26, 44, .94)); border: 1px solid var(--line-soft); border-radius: 18px; }
+.gate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-top: 13px; }
+.gate-grid > div { padding: 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(5, 14, 25, .35); }
+.gate-grid strong, .gate-grid small { display: block; }
+.gate-grid strong { color: var(--green); font: 18px "Cascadia Code", Consolas, monospace; }
+.gate-grid small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.gate-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.gate-list span { padding: 4px 7px; border: 1px solid #3b4e62; border-radius: 99px; color: #8295a7; font-size: 9px; }
+.gate-list span.passed { color: var(--green); border-color: rgba(53, 214, 164, .35); }
+.blocked-list { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 10px; color: var(--red); font-size: 10px; }
+.blocked-list span { padding: 4px 7px; border-radius: 5px; background: rgba(255, 113, 134, .08); }
+.profile-layout { min-height: calc(100vh - 142px); padding: 18px; }
+.profile-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+.profile-header h2 { margin: 5px 0 0; font-size: 18px; }
+.profile-header > span { color: var(--muted); font: 10px "Cascadia Code", Consolas, monospace; }
+.profile-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+.profile-card { padding: 16px; border: 1px solid var(--line-soft); border-radius: 15px; background: linear-gradient(145deg, rgba(18, 36, 58, .94), rgba(12, 26, 44, .94)); }
+.profile-card > div:first-child { display: grid; gap: 5px; margin-bottom: 10px; }
+.profile-card code { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; }
+.profile-card dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 14px 0; }
+.profile-card dl div { min-width: 0; padding: 8px; border-radius: 8px; background: rgba(5, 14, 25, .36); }
+.profile-card dt { color: var(--muted); font-size: 9px; }
+.profile-card dd { overflow: hidden; margin: 4px 0 0; color: #cedcea; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.profile-actions { display: flex; gap: 7px; }
+.profile-actions button { flex: 1; min-height: 34px; font-size: 11px; }
+@media (max-width: 980px) { .selection-banner { grid-template-columns: 1fr; } .profile-layout { min-height: 600px; } }
+@media (max-width: 640px) { .input-action, .limit-grid, .gate-grid { grid-template-columns: 1fr; } .permission-grid { grid-template-columns: 1fr; } .profile-card dl { grid-template-columns: 1fr; } }

@@ -1,24 +1,40 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  Activity, Bot, Braces, CircleStop, ExternalLink, FileCode2, GitBranch,
-  MonitorSmartphone, Play, RefreshCw, RotateCcw, ServerCog, ShieldCheck, TerminalSquare,
+  Activity, Bot, Braces, CircleStop, ExternalLink, FileCode2, GitBranch, Lock,
+  MonitorSmartphone, Play, RefreshCw, RotateCcw, Search, ServerCog, ShieldCheck, TerminalSquare, Unlock,
 } from "lucide-react";
 import PageGraphView from "./components/PageGraphView";
-import type { ExecuteResult, Health, ReplayResult, RunEvent, RunTrace, ScriptResult } from "./types";
+import type {
+  DiscoveryPolicy, DiscoveryStatus, ExecuteResult, Health, ProfileSummary, ReplayResult,
+  RunEvent, RunTrace, ScriptResult, TargetCandidate,
+} from "./types";
 
 const configuredApi = String(import.meta.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
 const API_DISPLAY = configuredApi || `${window.location.origin}/api`;
 const terminalStates = new Set([
   "completed", "failed_device", "failed_model", "failed_element", "failed_action",
-  "failed_assertion", "failed_script", "stopped_by_user",
+  "failed_assertion", "failed_script", "failed_target_resolution", "failed_target_probe",
+  "failed_discovery", "failed_profile_verification", "failed_profile_promotion", "stopped_by_user",
 ]);
 const eventTypes = [
-  "run_started", "preflight_passed", "screen_captured", "elements_detected", "plan_created",
+  "run_started", "target_candidates_found", "target_resolved", "target_started", "profile_found",
+  "profile_revalidation_started", "profile_revalidation_finished", "discovery_started", "discovery_progress",
+  "discovery_finished", "discovery_path_blocked", "locator_candidate_observed", "profile_draft_saved",
+  "profile_verification_round_finished", "hypium_replay_finished", "profile_promoted", "original_task_started",
+  "preflight_passed", "screen_captured", "elements_detected", "plan_created",
   "action_started", "action_finished", "assertion_passed", "assertion_failed", "page_discovered",
   "edge_created", "script_generated", "execution_started", "execution_finished", "run_failed", "run_finished",
 ];
-type Tab = "live" | "graph" | "script" | "report";
+type Tab = "live" | "graph" | "script" | "profiles" | "report";
+type TargetKind = "app_name" | "bundle_name";
 type Operation = "idle" | "generating" | "executing";
+type ProfileAction = "verify" | "lock" | "rollback";
+
+const defaultPolicy: DiscoveryPolicy = {
+  enabled: true, allow_login: false, allow_permission: false, allow_submit: false,
+  allow_publish: false, allow_download: false, max_pages: 20,
+  max_actions_per_page: 8, max_duration_seconds: 900, temporary_test: false,
+};
 
 function apiUrl(path: string) {
   const normalized = path.startsWith("/") ? path : `/${path}`;
@@ -38,15 +54,22 @@ export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [healthUnavailable, setHealthUnavailable] = useState(false);
   const [healthLoading, setHealthLoading] = useState(false);
-  const [task, setTask] = useState("打开知乎++，进入搜索，输入 OpenHarmony，返回首页，打开一条内容详情，确认页面存在可见内容后返回首页。");
+  const [targetKind, setTargetKind] = useState<TargetKind>("app_name");
+  const [targetValue, setTargetValue] = useState("");
+  const [task, setTask] = useState("");
+  const [policy, setPolicy] = useState(defaultPolicy);
   const [mode, setMode] = useState("regression");
   const [runId, setRunId] = useState(() => new URLSearchParams(window.location.search).get("run_id") ?? "");
   const [trace, setTrace] = useState<RunTrace | null>(null);
+  const [discovery, setDiscovery] = useState<DiscoveryStatus | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [script, setScript] = useState<ScriptResult | null>(null);
+  const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
+  const [candidates, setCandidates] = useState<TargetCandidate[]>([]);
+  const [selectedCandidate, setSelectedCandidate] = useState("");
   const [tab, setTab] = useState<Tab>(() => {
     const requested = new URLSearchParams(window.location.search).get("tab");
-    return requested && ["live", "graph", "script", "report"].includes(requested) ? requested as Tab : "live";
+    return requested && ["live", "graph", "script", "profiles", "report"].includes(requested) ? requested as Tab : "live";
   });
   const [runBusy, setRunBusy] = useState(false);
   const [operation, setOperation] = useState<Operation>("idle");
@@ -79,7 +102,17 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => { void loadHealth(); }, [loadHealth]);
+  const loadProfiles = useCallback(async (quiet = false) => {
+    try {
+      const response = await fetch(apiUrl("/api/profiles"));
+      if (!response.ok) throw new Error(await response.text());
+      setProfiles(await response.json() as ProfileSummary[]);
+    } catch (cause) {
+      if (!quiet) setError(apiError("读取 Profile 失败", cause));
+    }
+  }, []);
+
+  useEffect(() => { void loadHealth(); void loadProfiles(true); }, [loadHealth, loadProfiles]);
 
   useEffect(() => {
     if (!runId) return;
@@ -88,6 +121,10 @@ export default function App() {
       try {
         const event = JSON.parse(String(message.data)) as RunEvent;
         setEvents((current) => current.some((item) => item.event_id === event.event_id) ? current : [...current, event]);
+        if (event.type === "target_candidates_found") {
+          const next = event.payload.candidates;
+          if (Array.isArray(next)) setCandidates(next as TargetCandidate[]);
+        }
       } catch (cause) {
         setError(apiError("无法解析运行事件", cause));
       }
@@ -104,6 +141,7 @@ export default function App() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const next = await response.json() as RunTrace;
       if (next.snapshots) setTrace(next);
+      if (next.target_candidates?.length) setCandidates(next.target_candidates);
       return next;
     } catch (cause) {
       if (!quiet) setError(apiError("无法刷新运行状态", cause));
@@ -113,13 +151,28 @@ export default function App() {
     }
   }, [runId]);
 
+  const refreshDiscovery = useCallback(async (id = runId, quiet = false) => {
+    if (!id) return null;
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(id)}/discovery`));
+      if (!response.ok) throw new Error(await response.text());
+      const next = await response.json() as DiscoveryStatus;
+      setDiscovery(next);
+      if (next.target_candidates?.length) setCandidates(next.target_candidates);
+      return next;
+    } catch (cause) {
+      if (!quiet) setError(apiError("无法刷新目标发现状态", cause));
+      return null;
+    }
+  }, [runId]);
+
   useEffect(() => {
     if (!runId) return;
     let cancelled = false;
     let timer = 0;
     const poll = async () => {
       try {
-        const next = await refreshTrace(runId, true);
+        const [next] = await Promise.all([refreshTrace(runId, true), refreshDiscovery(runId, true)]);
         if (!cancelled && next && terminalStates.has(next.state)) setRunBusy(false);
         if (!cancelled && (!next || !terminalStates.has(next.state) || next.replay_status === "pending" || operation === "executing")) {
           timer = window.setTimeout(poll, next ? 900 : 550);
@@ -132,7 +185,7 @@ export default function App() {
     };
     void poll();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [runId, operation, refreshTrace]);
+  }, [runId, operation, refreshDiscovery, refreshTrace]);
 
   useEffect(() => {
     if (operation !== "executing") return;
@@ -140,24 +193,64 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [operation]);
 
+  const resolveTarget = async () => {
+    if (!targetValue.trim() || locks.current.has("resolve")) return;
+    locks.current.add("resolve"); setError("");
+    try {
+      const response = await fetch(apiUrl("/api/targets/resolve"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: { [targetKind]: targetValue.trim() } }),
+      });
+      const result = await response.json() as { target?: TargetCandidate; candidates?: TargetCandidate[]; detail?: unknown };
+      if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : JSON.stringify(result.detail));
+      setCandidates(result.candidates ?? []); setSelectedCandidate("");
+      if (result.target?.bundle_name && targetKind === "bundle_name") setTargetValue(result.target.bundle_name);
+    } catch (cause) {
+      setError(apiError("解析目标失败", cause));
+    } finally {
+      locks.current.delete("resolve");
+    }
+  };
+
   const startRun = async () => {
-    if (locks.current.has("start")) return;
+    if (!targetValue.trim() || locks.current.has("start")) return;
     locks.current.add("start");
-    setRunBusy(true); setError(""); setEvents([]); setTrace(null); setScript(null); setTab("live");
+    setRunBusy(true); setError(""); setEvents([]); setTrace(null); setDiscovery(null);
+    setScript(null); setCandidates([]); setSelectedCandidate(""); setTab("live");
     try {
       const response = await fetch(apiUrl("/api/runs"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_app_id: "zhihu-plus", task, mode, max_steps: 20, auto_generate: true }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target: { [targetKind]: targetValue.trim() }, task: task.trim() || undefined,
+          mode, max_steps: 20, auto_generate: true, discovery: policy,
+        }),
       });
       if (!response.ok) throw new Error(await response.text());
       const result = await response.json() as { run_id: string };
       setRunId(result.run_id);
     } catch (cause) {
-      setError(apiError("启动 Agent 失败", cause));
-      setRunBusy(false);
+      setError(apiError("启动 Agent 失败", cause)); setRunBusy(false);
     } finally {
       locks.current.delete("start");
+    }
+  };
+
+  const submitCandidate = async () => {
+    if (!runId || !selectedCandidate || locks.current.has("candidate")) return;
+    const candidate = candidates.find((item) => (item.candidate_id ?? item.bundle_name) === selectedCandidate);
+    if (!candidate) return;
+    locks.current.add("candidate"); setError("");
+    try {
+      const response = await fetch(apiUrl(`/api/runs/${encodeURIComponent(runId)}/target-selection`), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate_id: candidate.candidate_id, bundle_name: candidate.bundle_name }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setCandidates([]); setSelectedCandidate("");
+    } catch (cause) {
+      setError(apiError("确认目标失败", cause));
+    } finally {
+      locks.current.delete("candidate");
     }
   };
 
@@ -232,7 +325,33 @@ export default function App() {
     }
   };
 
-  useEffect(() => { if (tab === "script") void loadScript(true); }, [tab, runId, loadScript]);
+  const updateProfile = async (profile: ProfileSummary, action: ProfileAction) => {
+    const key = `profile-${profile.profile_id}-${action}`;
+    if (locks.current.has(key)) return;
+    locks.current.add(key); setError("");
+    const profileId = encodeURIComponent(profile.target_app_id ?? profile.profile_id);
+    const body = action === "lock" ? { locked: !profile.locked }
+      : action === "rollback" ? { backup_name: profile.history?.at(-1)?.backup_name }
+        : { status: profile.status };
+    try {
+      const response = await fetch(apiUrl(`/api/profiles/${profileId}/${action}`), {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json() as { run_id?: string };
+      if (action === "verify" && result.run_id) {
+        setRunId(result.run_id); setTab("live"); setRunBusy(true);
+        setEvents([]); setTrace(null); setDiscovery(null);
+      }
+      await loadProfiles(true);
+    } catch (cause) {
+      setError(apiError("更新 Profile 失败", cause));
+    } finally {
+      locks.current.delete(key);
+    }
+  };
+
+  useEffect(() => { if (tab === "script") void loadScript(true); if (tab === "profiles") void loadProfiles(true); }, [tab, runId, loadProfiles, loadScript]);
 
   const traceRevision = trace?.revision ?? trace?.updated_at ?? `${trace?.state ?? "none"}-${trace?.replays.length ?? 0}-${trace?.generated ? 1 : 0}`;
   const probeReport = useCallback(async () => {
@@ -257,11 +376,14 @@ export default function App() {
   const latestSnapshot = trace?.snapshots.at(-1);
   const graphArtifactUrl = useCallback((path: string) => artifactUrl(runId, path), [runId]);
   const state = trace?.state ?? (runId ? "created" : "idle");
+  const resolved = discovery?.resolved_target ?? trace?.resolved_target;
+  const profileStatus = discovery?.profile_status ?? trace?.profile_snapshot?.status ?? trace?.profile_status_at_start ?? "未创建";
+  const blockedPaths = discovery?.blocked_paths ?? [];
   const scriptDiagnostic = script?.diagnostic ?? (script?.purpose ? script.purpose === "diagnostic" : !["regression", "stability"].includes(trace?.mode ?? mode));
-  const replayAllowed = script?.acceptance_replay_enabled ?? !scriptDiagnostic;
+  const replayAllowed = (script?.acceptance_replay_enabled ?? !scriptDiagnostic) && !trace?.provisional;
   const scriptStatus = operation === "generating" ? "生成中" : script ? (scriptDiagnostic ? "诊断脚本" : "已生成") : trace?.generated ? "正在读取" : "待自动生成";
   const operationBusy = operation !== "idle";
-  const completedAttempts = trace?.replay_completed ?? trace?.replays.filter((item) => replayStatus(item) === "passed" || replayStatus(item) === "failed").length ?? 0;
+  const completedAttempts = trace?.replay_completed ?? trace?.replays.filter((item) => ["passed", "failed", "timed_out", "ineligible", "invalid_result"].includes(replayStatus(item))).length ?? 0;
   const progress = operation === "executing" ? Math.min(95, Math.max(8, (completedAttempts / attemptCount) * 100)) : trace?.replays.length ? 100 : 0;
   const reportUrl = apiUrl(`/api/runs/${encodeURIComponent(runId)}/report?revision=${encodeURIComponent(`${traceRevision}-${reportRevision}`)}`);
 
@@ -279,18 +401,22 @@ export default function App() {
       <main className="workspace">
         <aside className="control-panel">
           <section className="panel intro-panel">
-            <div className="section-title"><TerminalSquare size={18} /><span>任务控制</span></div>
-            <label htmlFor="task">自然语言测试目标</label>
-            <textarea id="task" value={task} onChange={(event) => setTask(event.target.value)} rows={7} />
-            <div className="field-row">
-              <div><label htmlFor="mode">运行模式</label><select id="mode" value={mode} onChange={(event) => setMode(event.target.value)}>
-                <option value="regression">回归测试</option><option value="exploration">探索诊断</option>
-                <option value="stability">稳定性测试</option><option value="reproduction">问题诊断</option>
-              </select></div>
-              <div><label>目标应用</label><div className="static-field">知乎++</div></div>
+            <div className="section-title"><TerminalSquare size={18} /><span>目标与任务</span></div>
+            <div className="target-kind" role="group" aria-label="目标输入类型">
+              <button className={targetKind === "app_name" ? "active" : ""} onClick={() => setTargetKind("app_name")}>应用名称</button>
+              <button className={targetKind === "bundle_name" ? "active" : ""} onClick={() => setTargetKind("bundle_name")}>bundleName</button>
             </div>
+            <label htmlFor="target">{targetKind === "app_name" ? "已安装应用名称" : "精确 bundleName"}</label>
+            <div className="input-action"><input id="target" value={targetValue} onChange={(event) => setTargetValue(event.target.value)} placeholder={targetKind === "app_name" ? "例如：备忘录" : "com.example.app"} /><button className="secondary" onClick={resolveTarget} disabled={runBusy || operationBusy || !targetValue.trim()}><Search size={15} />解析</button></div>
+            <label htmlFor="task">自然语言测试目标（可选）</label>
+            <textarea id="task" value={task} onChange={(event) => setTask(event.target.value)} rows={4} placeholder="留空时执行启动、探索、返回和重启恢复冒烟测试" />
+            <div className="field-row">
+              <div><label htmlFor="mode">运行模式</label><select id="mode" value={mode} onChange={(event) => setMode(event.target.value)}><option value="regression">回归测试</option><option value="exploration">探索诊断</option><option value="stability">稳定性测试</option><option value="reproduction">问题诊断</option></select></div>
+              <div><label>当前 Profile</label><div className="static-field"><StatusBadge value={profileStatus} /></div></div>
+            </div>
+            <PolicyEditor policy={policy} onChange={setPolicy} />
             <div className="button-row">
-              <button className="primary" onClick={startRun} disabled={runBusy || operationBusy || !task.trim()}><Play size={17} />启动 Agent</button>
+              <button className="primary" onClick={startRun} disabled={runBusy || operationBusy || !targetValue.trim()}><Play size={17} />启动 Agent</button>
               <button className="danger" onClick={stopRun} disabled={!runBusy || !runId}><CircleStop size={17} />停止</button>
             </div>
           </section>
@@ -322,6 +448,7 @@ export default function App() {
             <button className="secondary" onClick={loadHealth} disabled={healthLoading}><RotateCcw size={15} />重试连接</button>
           </div>}
           {error && <div className="error-banner" role="alert">{error}</div>}
+          {candidates.length > 1 && <section className="selection-banner"><div><strong>发现多个同名应用</strong><span>请选择目标，系统不会自动猜测。</span></div><select value={selectedCandidate} onChange={(event) => setSelectedCandidate(event.target.value)}><option value="">选择应用</option>{candidates.map((candidate) => <option key={candidate.candidate_id ?? candidate.bundle_name} value={candidate.candidate_id ?? candidate.bundle_name}>{candidate.display_name ?? candidate.app_name ?? "未知应用"} · {candidate.bundle_name}</option>)}</select><button className="primary compact" onClick={submitCandidate} disabled={!selectedCandidate}>确认目标</button></section>}
 
           {tab === "live" && <div className="live-grid">
             <section className="viewport-card">
@@ -353,15 +480,17 @@ export default function App() {
               <div className="action-strip">
                 <button className="secondary" onClick={generate} disabled={!runId || operationBusy}><FileCode2 size={16} />{script ? "重新生成" : "生成脚本"}</button>
                 <label className="attempt-select" htmlFor="attempts">回放次数<select id="attempts" value={attemptCount} onChange={(event) => setAttemptCount(Number(event.target.value) as 1 | 3)} disabled={operationBusy}><option value={1}>1 次</option><option value={3}>3 次</option></select></label>
-                <button className="primary" onClick={execute} disabled={!script || operationBusy || !replayAllowed} title={!replayAllowed ? "诊断脚本不能用于验收回放" : undefined}><Play size={16} />验收回放 {attemptCount} 次</button>
+                <button className="primary" onClick={execute} disabled={!script || operationBusy || !replayAllowed} title={!replayAllowed ? "诊断或临时 Profile 脚本不能用于验收回放" : undefined}><Play size={16} />验收回放 {attemptCount} 次</button>
               </div>
             </div>
             <p className="generation-note">Agent 运行成功后会自动生成脚本；也可以在此手动生成或重新生成。诊断脚本仅供排查，验收回放已禁用。</p>
-            {!replayAllowed && <div className="warning-list" role="alert">当前为诊断脚本，不能作为 Hypium 验收回放证据。</div>}
+            {!replayAllowed && <div className="warning-list" role="alert">当前脚本或 Profile 不具备正式 Hypium 验收回放资格。</div>}
             {script?.warnings.length ? <div className="warning-list" role="alert">{script.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div> : null}
             {(operation === "executing" || Boolean(trace?.replays.length)) && <ReplayProgress replays={trace?.replays ?? []} attempts={attemptCount} running={operation === "executing"} progress={progress} elapsedMs={executionStartedAt ? clock - executionStartedAt : 0} runId={runId} />}
             <pre className="code-view"><code>{script?.python ?? "运行 Agent 后将在这里展示自动生成的 Hypium Python 用例。"}</code></pre>
           </section>}
+
+          {tab === "profiles" && <ProfileManager profiles={profiles} onAction={updateProfile} />}
 
           {tab === "report" && <section className="report-layout">
             {runId ? <>
@@ -378,6 +507,20 @@ export default function App() {
   );
 }
 
+function PolicyEditor({ policy, onChange }: { policy: DiscoveryPolicy; onChange: (value: DiscoveryPolicy) => void }) {
+  const patch = (value: Partial<DiscoveryPolicy>) => onChange({ ...policy, ...value });
+  return <details className="policy-editor"><summary>探索策略与安全边界</summary><label className="switch-row"><input type="checkbox" checked={policy.enabled} onChange={(event) => patch({ enabled: event.target.checked })} /><span>Profile 缺失时自动发现</span></label><div className="limit-grid"><label>页面上限<input type="number" min={1} value={policy.max_pages} onChange={(event) => patch({ max_pages: Number(event.target.value) })} /></label><label>每页动作<input type="number" min={1} value={policy.max_actions_per_page} onChange={(event) => patch({ max_actions_per_page: Number(event.target.value) })} /></label><label>秒数上限<input type="number" min={30} value={policy.max_duration_seconds} onChange={(event) => patch({ max_duration_seconds: Number(event.target.value) })} /></label></div></details>;
+}
+
+function DiscoveryPanel({ discovery, blockedPaths }: { discovery: DiscoveryStatus | null; blockedPaths: DiscoveryStatus["blocked_paths"] }) {
+  return <section className="discovery-card"><div className="card-heading"><span>探索与晋级门禁</span><small>{discovery?.phase ?? "waiting"}</small></div><div className="gate-grid"><Metric label="定位器" value={discovery?.locator_candidates?.length ?? 0} /><Metric label="断言点" value={discovery?.assertion_candidates?.length ?? 0} /><Metric label="验证轮次" value={discovery?.validation_rounds?.filter((item) => item.passed).length ?? 0} /><Metric label="回放通过" value={discovery?.replays?.filter((item) => item.passed).length ?? 0} /></div>{blockedPaths?.length ? <div className="blocked-list"><strong>已阻塞路径</strong>{blockedPaths.map((item, index) => <span key={index}>{typeof item === "string" ? item : item.label ?? item.reason ?? item.risk_reason ?? item.target_text ?? "blocked"}</span>)}</div> : null}</section>;
+}
+
+function ProfileManager({ profiles, onAction }: { profiles: ProfileSummary[]; onAction: (profile: ProfileSummary, action: ProfileAction) => void }) {
+  return <section className="profile-layout"><div className="profile-header"><div><p className="eyebrow">PROFILE REGISTRY</p><h2>应用测试资产</h2></div><span>{profiles.length} profiles</span></div><div className="profile-list">{profiles.map((profile) => <article className="profile-card" key={profile.profile_id}><div><strong>{profile.display_name ?? profile.target_app_id ?? profile.profile_id}</strong><code>{profile.bundle_name ?? profile.profile_id}</code></div><StatusBadge value={profile.status} /><div className="profile-actions"><button className="secondary" onClick={() => onAction(profile, "verify")}><RefreshCw size={14} />快速复验</button><button className="secondary" onClick={() => onAction(profile, "lock")} disabled={profile.status !== "verified"}>{profile.locked ? <Unlock size={14} /> : <Lock size={14} />}{profile.locked ? "解锁" : "锁定"}</button><button className="secondary" onClick={() => onAction(profile, "rollback")} disabled={profile.status !== "verified" || profile.locked || !profile.history?.length}><RefreshCw size={14} />回退</button></div></article>)}{profiles.length === 0 && <EmptyState title="暂无 Profile" />}</div></section>;
+}
+
+function StatusBadge({ value }: { value: string }) { return <span className={`profile-status status-${value}`}>{value}</span>; }
 function ReplayProgress({ replays, attempts, running, progress, elapsedMs, runId }: { replays: ReplayResult[]; attempts: 1 | 3; running: boolean; progress: number; elapsedMs: number; runId: string }) {
   return <section className="replay-progress" aria-live="polite" aria-busy={running}>
     <div className="progress-heading"><strong>异步回放进度</strong><span>{running ? `执行中 · ${formatDuration(elapsedMs)}` : `${replays.filter((item) => item.passed).length}/${replays.length || attempts} 通过`}</span></div>

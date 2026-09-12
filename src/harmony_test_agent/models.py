@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -28,6 +28,13 @@ class RunState(StrEnum):
     """描述测试运行从创建到完成或失败的生命周期状态。"""
 
     CREATED = "created"
+    RESOLVING_TARGET = "resolving_target"
+    WAITING_TARGET_SELECTION = "waiting_target_selection"
+    PROBING_TARGET = "probing_target"
+    PROFILE_REVALIDATING = "profile_revalidating"
+    DISCOVERING = "discovering"
+    PROFILE_DRAFTING = "profile_drafting"
+    PROFILE_VERIFYING = "profile_verifying"
     PREFLIGHT = "preflight"
     PLANNING = "planning"
     EXECUTING = "executing"
@@ -35,6 +42,7 @@ class RunState(StrEnum):
     GRAPH_UPDATING = "graph_updating"
     SCRIPT_GENERATING = "script_generating"
     SCRIPT_EXECUTING = "script_executing"
+    PROFILE_PROMOTING = "profile_promoting"
     COMPLETED = "completed"
     FAILED_DEVICE = "failed_device"
     FAILED_MODEL = "failed_model"
@@ -42,6 +50,11 @@ class RunState(StrEnum):
     FAILED_ACTION = "failed_action"
     FAILED_ASSERTION = "failed_assertion"
     FAILED_SCRIPT = "failed_script"
+    FAILED_TARGET_RESOLUTION = "failed_target_resolution"
+    FAILED_TARGET_PROBE = "failed_target_probe"
+    FAILED_DISCOVERY = "failed_discovery"
+    FAILED_PROFILE_VERIFICATION = "failed_profile_verification"
+    FAILED_PROFILE_PROMOTION = "failed_profile_promotion"
     STOPPED_BY_USER = "stopped_by_user"
 
 
@@ -53,6 +66,11 @@ TERMINAL_STATES = {
     RunState.FAILED_ACTION,
     RunState.FAILED_ASSERTION,
     RunState.FAILED_SCRIPT,
+    RunState.FAILED_TARGET_RESOLUTION,
+    RunState.FAILED_TARGET_PROBE,
+    RunState.FAILED_DISCOVERY,
+    RunState.FAILED_PROFILE_VERIFICATION,
+    RunState.FAILED_PROFILE_PROMOTION,
     RunState.STOPPED_BY_USER,
 }
 
@@ -61,6 +79,22 @@ class EventType(StrEnum):
     """列出可持久化并推送给客户端的运行事件类型。"""
 
     RUN_STARTED = "run_started"
+    TARGET_CANDIDATES_FOUND = "target_candidates_found"
+    TARGET_RESOLVED = "target_resolved"
+    TARGET_STARTED = "target_started"
+    PROFILE_FOUND = "profile_found"
+    PROFILE_REVALIDATION_STARTED = "profile_revalidation_started"
+    PROFILE_REVALIDATION_FINISHED = "profile_revalidation_finished"
+    DISCOVERY_STARTED = "discovery_started"
+    DISCOVERY_PROGRESS = "discovery_progress"
+    DISCOVERY_FINISHED = "discovery_finished"
+    DISCOVERY_PATH_BLOCKED = "discovery_path_blocked"
+    LOCATOR_CANDIDATE_OBSERVED = "locator_candidate_observed"
+    PROFILE_DRAFT_SAVED = "profile_draft_saved"
+    PROFILE_VERIFICATION_ROUND_FINISHED = "profile_verification_round_finished"
+    HYPIUM_REPLAY_FINISHED = "hypium_replay_finished"
+    PROFILE_PROMOTED = "profile_promoted"
+    ORIGINAL_TASK_STARTED = "original_task_started"
     PREFLIGHT_PASSED = "preflight_passed"
     SCREEN_CAPTURED = "screen_captured"
     ELEMENTS_DETECTED = "elements_detected"
@@ -187,33 +221,194 @@ class ScreenSnapshot(BaseModel):
     summary: str = ""
 
 
+class TargetQuery(BaseModel):
+    """Identifies an installed target by human-readable label and/or exact bundle name."""
+
+    app_name: str | None = None
+    bundle_name: str | None = None
+
+    @model_validator(mode="after")
+    def require_identifier(self) -> TargetQuery:
+        self.app_name = self.app_name.strip() if self.app_name else None
+        self.bundle_name = self.bundle_name.strip() if self.bundle_name else None
+        if not self.app_name and not self.bundle_name:
+            raise ValueError("app_name or bundle_name is required")
+        return self
+
+
+class ExplorationPolicy(BaseModel):
+    """Deterministic discovery limits and explicit opt-ins for sensitive actions."""
+
+    enabled: bool = True
+    max_pages: int = Field(default=20, ge=1, le=20)
+    max_actions_per_page: int = Field(default=8, ge=1, le=8)
+    max_duration_seconds: int = Field(default=900, ge=1, le=900)
+    fixed_input_text: str = Field(default="OpenHarmony", min_length=1, max_length=200)
+    allow_login: bool = False
+    allow_permission: bool = False
+    allow_submit: bool = False
+    allow_publish: bool = False
+    allow_download: bool = False
+
+    default_allowed_actions: ClassVar[frozenset[str]] = frozenset(
+        {"navigate", "swipe", "back", "input_fixed_text", "read_only_assertion"}
+    )
+    explicit_actions: ClassVar[frozenset[str]] = frozenset({"login", "permission", "submit", "publish", "download"})
+    always_forbidden_actions: ClassVar[frozenset[str]] = frozenset({"payment", "delete", "uninstall", "clear_data"})
+
+    def allows(self, action: str) -> bool:
+        """Return the deterministic policy decision for a normalized action category."""
+        normalized = action.strip().lower()
+        if normalized in self.always_forbidden_actions:
+            return False
+        if normalized in self.default_allowed_actions:
+            return True
+        attribute = f"allow_{normalized}"
+        return bool(getattr(self, attribute, False)) if normalized in self.explicit_actions else False
+
+
+class ProfileStatus(StrEnum):
+    """Profile lifecycle states persisted by the registry."""
+
+    DRAFT = "draft"
+    CANDIDATE = "candidate"
+    VERIFIED = "verified"
+    SUPERSEDED = "superseded"
+    INVALID = "invalid"
+
+
+class ConfidenceLevel(StrEnum):
+    """Cross-restart confidence assigned to a reusable locator or assertion."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class AppVersion(BaseModel):
+    version_name: str | None = None
+    version_code: int | None = Field(default=None, ge=0)
+    signature_sha256: str | None = None
+
+
+class DeviceCompatibility(BaseModel):
+    validated_device_types: list[str] = Field(default_factory=list)
+    validated_resolutions: list[tuple[int, int]] = Field(default_factory=list)
+
+
+class ProfileProvenance(BaseModel):
+    discovery_run_id: str | None = None
+    discovered_at: datetime = Field(default_factory=utc_now)
+    verified_at: datetime | None = None
+    hypium_replay_run_ids: list[str] = Field(default_factory=list)
+    generator_version: str = "profile-discovery-v1"
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class StableLocator(BaseModel):
-    """描述目标应用配置中可跨运行复用的稳定定位信息。"""
+    """A reusable locator with cross-restart stability evidence."""
 
     model_config = ConfigDict(extra="allow")
     name: str
+    page_signature: str = ""
     key: str = ""
     id: str = ""
     text: str = ""
     type: str = ""
-    locator_priority: int = 1
+    locator_priority: int = Field(default=1, ge=1)
+    confidence: ConfidenceLevel = ConfidenceLevel.HIGH
+    observed_rounds: int = Field(default=0, ge=0)
+    unique_match_rounds: int = Field(default=0, ge=0)
+    observed_resolutions: list[tuple[int, int]] = Field(default_factory=list)
+    source: str = "ui_hierarchy"
+    first_observed_at: datetime | None = None
+    last_observed_at: datetime | None = None
+    dynamic_pattern: str | None = None
+    evidence_snapshot_ids: list[str] = Field(default_factory=list)
+    coordinate: tuple[int, int] | None = None
+    resolution_bound: tuple[int, int] | None = None
+    warning: str | None = None
+
+
+class AssertionDefinition(BaseModel):
+    """An application-level UI assertion and the observations that support it."""
+
+    name: str
+    kind: str
+    target: str
+    expected: Any = None
+    page_signature: str = ""
+    confidence: ConfidenceLevel = ConfidenceLevel.MEDIUM
+    observed_rounds: int = Field(default=0, ge=0)
+    evidence_snapshot_ids: list[str] = Field(default_factory=list)
 
 
 class TargetAppProfile(BaseModel):
-    """保存目标应用启动信息、安全约束和稳定定位清单。"""
+    """Versioned target identity, launch policy, locators, assertions, and audit evidence."""
 
     model_config = ConfigDict(extra="allow")
+    schema_version: Literal[1, 2] = 2
+    status: ProfileStatus = ProfileStatus.DRAFT
+    locked: bool = False
     target_app_id: str
     display_name: str
     bundle_name: str
     main_ability: str = "EntryAbility"
+    module_name: str | None = None
+    app_version: AppVersion = Field(default_factory=AppVersion)
+    device_compatibility: DeviceCompatibility = Field(default_factory=DeviceCompatibility)
     device_selector: dict[str, Any] = Field(default_factory=dict)
     launch_strategy: dict[str, Any] = Field(default_factory=dict)
     reset_strategy: dict[str, Any] = Field(default_factory=dict)
     test_data_strategy: dict[str, Any] = Field(default_factory=dict)
     permission_and_popup_strategy: dict[str, Any] = Field(default_factory=dict)
     stable_locator_inventory: list[StableLocator] = Field(default_factory=list)
+    assertion_inventory: list[AssertionDefinition] = Field(default_factory=list)
+    core_flows: list[dict[str, Any]] = Field(default_factory=list)
     known_limitations: list[str] = Field(default_factory=list)
+    provenance: ProfileProvenance = Field(default_factory=ProfileProvenance)
+
+    @model_validator(mode="after")
+    def validate_profile_invariants(self) -> TargetAppProfile:
+        if self.reset_strategy.get("clear_app_data") is True:
+            raise ValueError("Profile reset_strategy cannot clear application data")
+        forbidden = {"payment", "delete", "uninstall", "clear_data"}
+        for action in forbidden:
+            if self.permission_and_popup_strategy.get(action) not in {None, "always_blocked"}:
+                raise ValueError(f"Profile cannot allow permanently forbidden action: {action}")
+        for locator in self.stable_locator_inventory:
+            if locator.coordinate is not None and (locator.resolution_bound is None or not locator.warning):
+                raise ValueError("coordinate locators require a resolution bound and warning")
+        if self.status == ProfileStatus.VERIFIED:
+            if self.provenance.verified_at is None:
+                raise ValueError("verified Profile requires provenance.verified_at")
+            replay_ids = self.provenance.hypium_replay_run_ids
+            if len(replay_ids) != 3 or len(set(replay_ids)) != 3:
+                raise ValueError("verified Profile requires three unique Hypium replay run IDs")
+            if not self.provenance.evidence.get("verification_passed"):
+                raise ValueError("verified Profile requires passed device verification evidence")
+            if len({item.page_signature for item in self.stable_locator_inventory}) < 3:
+                raise ValueError("verified Profile requires locators on three pages")
+            if len(self.assertion_inventory) < 2:
+                raise ValueError("verified Profile requires two application assertions")
+        return self
+
+
+class ResolvedTarget(BaseModel):
+    """Immutable application identity produced by deterministic target resolution."""
+
+    model_config = ConfigDict(frozen=True)
+    target_app_id: str
+    display_name: str
+    bundle_name: str
+    main_ability: str
+    module_name: str | None = None
+    version_name: str | None = None
+    version_code: int | None = Field(default=None, ge=0)
+    signature_sha256: str | None = None
+    device_id: str
+    source: Literal["verified_profile", "installed_app", "explicit_override"]
+    profile_snapshot: TargetAppProfile | None = None
 
 
 class PlannedStep(BaseModel):
@@ -417,7 +612,7 @@ class RunEvent(BaseModel):
 
 
 class RunTrace(BaseModel):
-    """聚合一次测试运行的计划、快照、动作、断言、产物和最终状态。"""
+    """Self-contained record of a run, including frozen target and Profile inputs."""
 
     run_id: str
     target_app_id: str
@@ -429,6 +624,18 @@ class RunTrace(BaseModel):
     ended_at: datetime | None = None
     model_used: str = "mock"
     model_mock: bool = True
+    phase: Literal["bootstrap", "task"] = "bootstrap"
+    provisional: bool = False
+    target_query: TargetQuery | None = None
+    resolved_target: ResolvedTarget | None = None
+    profile_status_at_start: ProfileStatus | None = None
+    profile_snapshot: TargetAppProfile | None = None
+    exploration_policy: ExplorationPolicy = Field(default_factory=ExplorationPolicy)
+    discovery_result: dict[str, Any] | None = None
+    verification_result: dict[str, Any] | None = None
+    target_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    profile_validation_generated: GeneratedArtifact | None = None
+    profile_validation_replays: list[ReplayResult] = Field(default_factory=list)
     plan: list[PlannedStep] = Field(default_factory=list)
     snapshots: list[ScreenSnapshot] = Field(default_factory=list)
     actions: list[ActionResult] = Field(default_factory=list)
@@ -447,7 +654,16 @@ class RunTrace(BaseModel):
 
     @model_validator(mode="after")
     def populate_compatibility_summary(self) -> RunTrace:
-        """从旧 Trace 的 state/error/replays 补全新汇总字段。"""
+        """同步冻结 Profile，并从旧 Trace 补全 Agent 与独立回放汇总。"""
+        if (
+            self.profile_snapshot is None
+            and self.resolved_target is not None
+            and self.resolved_target.profile_snapshot is not None
+        ):
+            self.profile_snapshot = self.resolved_target.profile_snapshot.model_copy(deep=True)
+        if self.profile_status_at_start is None and self.profile_snapshot is not None:
+            self.profile_status_at_start = self.profile_snapshot.status
+
         legacy_replay_failure = (
             self.state == RunState.FAILED_SCRIPT
             and bool(self.actions)
@@ -498,12 +714,29 @@ class VisionObservation(BaseModel):
 
 
 class RunRequest(BaseModel):
-    """定义创建测试运行时可由调用方指定的参数。"""
+    """Creates a run from a target query while retaining the legacy target_app_id entry point."""
 
-    target_app_id: str = "zhihu-plus"
-    task: str
+    target: TargetQuery | None = None
+    target_app_id: str | None = None
+    task: str = "启动应用，探索可达页面，验证返回和重启恢复"
     mode: RunMode = RunMode.REGRESSION
     device_id: str | None = None
     max_steps: int = Field(default=20, ge=1, le=100)
     auto_generate: bool = True
     auto_execute: bool = False
+    exploration_policy: ExplorationPolicy = Field(default_factory=ExplorationPolicy)
+    temporary_test: bool = False
+    bootstrap_only: bool = False
+
+    @model_validator(mode="after")
+    def normalize_target_contract(self) -> RunRequest:
+        if self.target is None and self.target_app_id:
+            # Legacy app IDs are resolved by the compatibility adapter/registry.
+            self.target = TargetQuery(app_name=self.target_app_id)
+        if self.target is None:
+            # Keep the historical default during the documented migration period.
+            self.target_app_id = self.target_app_id or "zhihu-plus"
+            self.target = TargetQuery(app_name=self.target_app_id)
+        elif not self.target_app_id:
+            self.target_app_id = self.target.bundle_name or self.target.app_name
+        return self

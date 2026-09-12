@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..models import CommandResult, ScreenSnapshot, TargetAppProfile
+
+if TYPE_CHECKING:
+    from ..targets.catalog import ForegroundApp, InstalledApp
 
 
 class DeviceError(RuntimeError):
@@ -46,6 +50,36 @@ class DeviceAdapter(ABC):
     def open_app(self, profile: TargetAppProfile, reset: bool = False) -> CommandResult:
         """按应用档案启动目标 Ability，可选执行档案允许的重置流程。"""
         ...
+
+    def list_installed_apps(self) -> list[InstalledApp]:
+        """列出设备中可解析的应用；旧适配器默认返回空目录。"""
+        return []
+
+    def inspect_app(self, bundle_name: str) -> InstalledApp:
+        """读取一个应用的确定性元数据；不支持目录能力的适配器明确失败。"""
+        raise DeviceError(f"device adapter cannot inspect application: {bundle_name}")
+
+    def find_installed_apps(self, label: str) -> list[InstalledApp]:
+        """按应用显示名筛选目录，默认基于完整目录进行规范化匹配。"""
+        needle = " ".join(label.split()).casefold()
+        return [app for app in self.list_installed_apps() if " ".join(app.display_name.split()).casefold() == needle]
+
+    def current_foreground_app(self) -> ForegroundApp | None:
+        """返回当前前台应用；旧适配器可返回未知。"""
+        return None
+
+    def start_app(
+        self,
+        bundle_name: str,
+        ability_name: str,
+        module_name: str | None = None,
+    ) -> CommandResult:
+        """通过已解析的应用身份启动 Ability。"""
+        raise DeviceError(f"device adapter cannot start application: {bundle_name}/{ability_name}")
+
+    def stop_app(self, bundle_name: str) -> CommandResult:
+        """强制停止目标应用，但不清除应用数据。"""
+        raise DeviceError(f"device adapter cannot stop application: {bundle_name}")
 
     @abstractmethod
     def click(self, x: int, y: int) -> CommandResult:
