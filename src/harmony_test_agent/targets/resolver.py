@@ -7,7 +7,7 @@ from typing import Literal
 
 from ..devices.base import DeviceAdapter, DeviceError
 from ..models import ResolvedTarget, TargetQuery
-from .catalog import InstalledApp
+from .catalog import InstalledApp, normalize_display_label
 
 
 class TargetResolutionError(RuntimeError):
@@ -44,7 +44,9 @@ class TargetResolver:
             if len(matches) != 1:
                 raise TargetAmbiguousError(matches)
             selected = matches[0]
-            if query.app_name and _name(query.app_name) != _name(selected.display_name):
+            if query.app_name and normalize_display_label(query.app_name) != normalize_display_label(
+                selected.display_name
+            ):
                 raise TargetNotFoundError(
                     f"bundle {query.bundle_name} has label {selected.display_name!r}, not {query.app_name!r}"
                 )
@@ -75,22 +77,23 @@ class TargetResolver:
 
     @staticmethod
     def _resolve_name(apps: list[InstalledApp], label: str) -> InstalledApp:
-        needle = _name(label)
-        exact = [app for app in apps if _name(app.display_name) == needle]
+        needle = normalize_display_label(label)
+        exact = [app for app in apps if normalize_display_label(app.display_name) == needle]
         if len(exact) == 1:
             return exact[0]
         if len(exact) > 1:
             raise TargetAmbiguousError(exact)
-        candidates = [app for app in apps if needle in _name(app.display_name) or _name(app.display_name) in needle]
+        candidates = [
+            app
+            for app in apps
+            if needle in normalize_display_label(app.display_name)
+            or normalize_display_label(app.display_name) in needle
+        ]
         if len(candidates) == 1:
             return candidates[0]
         if candidates:
             raise TargetAmbiguousError(candidates)
         raise TargetNotFoundError(f"installed application not found: {label}")
-
-
-def _name(value: str) -> str:
-    return " ".join(value.split()).casefold()
 
 
 def _app_id(bundle_name: str) -> str:
