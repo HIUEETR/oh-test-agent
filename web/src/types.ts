@@ -109,6 +109,7 @@ export type ReplayResult = {
 export type DiscoveryStatus = {
   phase?: "bootstrap" | "task";
   provisional?: boolean;
+  live_mode?: boolean;
   profile_status?: string;
   profile_status_at_start?: string;
   profile_snapshot?: ProfileSummary;
@@ -137,6 +138,7 @@ export type RunTrace = {
   updated_at?: string;
   phase?: "bootstrap" | "task";
   provisional?: boolean;
+  live_mode?: boolean;
   profile_status_at_start?: string;
   profile_snapshot?: ProfileSummary;
   resolved_target?: TargetCandidate;

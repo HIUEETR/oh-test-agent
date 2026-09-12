@@ -522,6 +522,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "validation_rounds": verification.get("rounds", []),
             "replays": data.get("profile_validation_replays", []),
             "provisional": data.get("provisional", False),
+            "live_mode": data.get("live_mode", False),
         }
 
     @app.post("/api/runs/{run_id}/stop")
@@ -597,10 +598,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         trace = _trace_or_404(manager, run_id)
         if not trace.generated:
             raise HTTPException(status_code=409, detail="generate the Hypium script first")
-        if trace.provisional:
+        if trace.provisional or trace.live_mode:
             raise HTTPException(
                 status_code=409,
-                detail="provisional runs cannot execute formal Hypium regression cases",
+                detail="provisional or live-mode runs cannot execute formal Hypium regression cases",
             )
         if manager.replay_running(run_id):
             raise HTTPException(status_code=409, detail="Hypium replay is already running")

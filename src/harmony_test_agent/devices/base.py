@@ -6,9 +6,11 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..models import CommandResult, ScreenSnapshot, TargetAppProfile
+from ..models import CommandResult, ScreenSnapshot
 
 if TYPE_CHECKING:
+    from ..models import TargetAppProfile
+    from ..runtime.tools import LaunchSpec
     from ..targets.catalog import ForegroundApp, InstalledApp
 
 
@@ -47,8 +49,8 @@ class DeviceAdapter(ABC):
         ...
 
     @abstractmethod
-    def open_app(self, profile: TargetAppProfile, reset: bool = False) -> CommandResult:
-        """按应用档案启动目标 Ability，可选执行档案允许的重置流程。"""
+    def open_app(self, profile: TargetAppProfile | LaunchSpec, reset: bool = False) -> CommandResult:
+        """按应用档案或启动规格启动目标 Ability，可选执行重置流程。"""
         ...
 
     def list_installed_apps(self) -> list[InstalledApp]:

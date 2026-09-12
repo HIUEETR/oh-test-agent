@@ -11,6 +11,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PIL import Image
 
@@ -24,6 +25,9 @@ from ..targets.catalog import (
     parse_installed_app,
 )
 from .base import DeviceAdapter, DeviceError
+
+if TYPE_CHECKING:
+    from ..runtime.tools import LaunchSpec
 
 
 class HarmonyDeviceAdapter(DeviceAdapter):
@@ -250,7 +254,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         """Force-stop an application without deleting its state."""
         return self._run("shell", "aa", "force-stop", bundle_name)
 
-    def open_app(self, profile: TargetAppProfile, reset: bool = False) -> CommandResult:
+    def open_app(self, profile: TargetAppProfile | LaunchSpec, reset: bool = False) -> CommandResult:
         """按目标应用配置启动 Ability，并在要求时先执行受支持的重置策略。"""
         if reset:
             stopped = self.stop_app(profile.bundle_name)

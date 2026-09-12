@@ -1,17 +1,12 @@
 from pathlib import Path
 
-from harmony_test_agent.models import ScreenSnapshot, TargetAppProfile, ToolDecision, ToolName, UIElement
-from harmony_test_agent.runtime import SafetyPolicy, ToolExecutor
+from harmony_test_agent.models import ScreenSnapshot, ToolDecision, ToolName, UIElement
+from harmony_test_agent.runtime import LaunchSpec, SafetyPolicy, ToolExecutor
 
 
 def make_executor() -> ToolExecutor:
-    profile = TargetAppProfile(
-        target_app_id="test",
-        display_name="Test",
-        bundle_name="com.example.test",
-        main_ability="EntryAbility",
-    )
-    return ToolExecutor(device=None, profile=profile, safety=SafetyPolicy())  # type: ignore[arg-type]
+    launch = LaunchSpec(bundle_name="com.example.test", main_ability="EntryAbility")
+    return ToolExecutor(device=None, launch=launch, safety=SafetyPolicy())  # type: ignore[arg-type]
 
 
 def make_snapshot(tmp_path: Path, *, summary: str = "", elements: list[UIElement] | None = None) -> ScreenSnapshot:

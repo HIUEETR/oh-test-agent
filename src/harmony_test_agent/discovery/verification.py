@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from ..devices import DeviceAdapter
+from ..devices import DeviceAdapter, DeviceError
 from ..models import CommandResult, ScreenSnapshot
 from ..targets import ForegroundApp, ResolvedTarget
 from .explorer import BoundedExplorer, DiscoveryPage, DiscoveryResult, ExplorationAction
@@ -33,6 +33,7 @@ class VerificationRound(BaseModel):
     recovery_passed: bool = False
     failures: list[str] = Field(default_factory=list)
     visited_page_signatures: list[str] = Field(default_factory=list)
+    visited_page_identities: list[str] = Field(default_factory=list)
     action_commands: list[CommandResult] = Field(default_factory=list)
     snapshot_ids: list[str] = Field(default_factory=list)
     snapshots: list[ScreenSnapshot] = Field(default_factory=list)
@@ -61,6 +62,7 @@ class ProfileVerifier:
         run_id: str,
         analyzer: StabilityAnalyzer | None = None,
         should_stop: Callable[[], bool] | None = None,
+        min_interaction_kinds: int = 2,
     ) -> None:
         self.device = device
         self.target = target
@@ -68,6 +70,7 @@ class ProfileVerifier:
         self.run_id = run_id
         self.analyzer = analyzer or StabilityAnalyzer()
         self.should_stop = should_stop or (lambda: False)
+        self.min_interaction_kinds = max(min_interaction_kinds, 1)
         self._replay_resolver = BoundedExplorer(
             device,
             target,
@@ -84,7 +87,7 @@ class ProfileVerifier:
         all_locators: list[LocatorObservation] = []
         all_assertions: list[AssertionObservation] = []
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        core_pages = self._core_pages(discovery)
+        core_pages = self._core_pages(discovery, self.min_interaction_kinds)
         if len(core_pages) < 3:
             result.failures.append("no replayable discovery path covers 3 pages")
             self._save(result)
@@ -112,7 +115,7 @@ class ProfileVerifier:
             if foreground is None:
                 result.rounds.append(current)
                 continue
-            snapshot = self.device.screenshot(self.output_dir, self.run_id, f"profile-verification-{round_number}-00")
+            snapshot = self._replay_resolver._capture_settled(f"profile-verification-{round_number}-00")
             current.resolution = (snapshot.width, snapshot.height)
             current.snapshot_id = snapshot.snapshot_id
             current.snapshot_ids.append(snapshot.snapshot_id)
@@ -120,34 +123,50 @@ class ProfileVerifier:
 
             for page_index, page in enumerate(core_pages):
                 if page_index:
-                    action = self._replay_resolver.resolve_replay_action(page.path_actions[-1], snapshot)
-                    command = self._execute(action, snapshot)
-                    current.action_commands.append(command)
-                    if not command.ok:
-                        current.failures.append(f"core-flow action failed: {action.action_id}")
+                    previous = core_pages[page_index - 1]
+                    pending = page.path_actions[len(previous.path_actions) :]
+                    flow_failed = False
+                    for step_index, step in enumerate(pending):
+                        try:
+                            action = self._replay_resolver.resolve_replay_action(step, snapshot)
+                        except DeviceError as exc:
+                            current.failures.append(f"core-flow locator failed: {exc}")
+                            flow_failed = True
+                            break
+                        command = self._execute(action, snapshot)
+                        current.action_commands.append(command)
+                        if not command.ok:
+                            current.failures.append(f"core-flow action failed: {action.action_id}")
+                            flow_failed = True
+                            break
+                        self.device.wait(0.5)
+                        snapshot = self.device.screenshot(
+                            self.output_dir,
+                            self.run_id,
+                            f"profile-verification-{round_number}-{page_index:02d}-{step_index:02d}",
+                        )
+                        current.snapshot_ids.append(snapshot.snapshot_id)
+                        current.snapshots.append(snapshot)
+                        foreground = self._target_foreground(current)
+                        if foreground is None:
+                            flow_failed = True
+                            break
+                    if flow_failed:
                         break
-                    self.device.wait(0.5)
-                    snapshot = self.device.screenshot(
-                        self.output_dir,
-                        self.run_id,
-                        f"profile-verification-{round_number}-{page_index:02d}",
-                    )
-                    current.snapshot_ids.append(snapshot.snapshot_id)
-                    current.snapshots.append(snapshot)
-                    foreground = self._target_foreground(current)
-                    if foreground is None:
-                        break
-                signature = BoundedExplorer._snapshot_signature(snapshot, foreground)
-                if signature != page.signature:
-                    current.failures.append(f"page signature mismatch: {page.page_id}")
+                identity = BoundedExplorer._structural_identity(snapshot, foreground)
+                if page.structural_identity and identity != page.structural_identity:
+                    current.failures.append(f"page identity mismatch: {page.page_id}")
                     break
+                signature = BoundedExplorer._snapshot_signature(snapshot, foreground)
                 current.visited_page_signatures.append(signature)
+                current.visited_page_identities.append(identity)
                 current.page_signature = signature
-                locator_observations = self.analyzer.locator_observations(snapshot, round_number, signature)
+                # 稳定性证据按逻辑页身份分组累计：整树签名每轮随内容抖动变化，无法跨轮聚合。
+                locator_observations = self.analyzer.locator_observations(snapshot, round_number, identity)
                 assertion_observations = (
-                    assertion_probe(snapshot, round_number, signature)
+                    assertion_probe(snapshot, round_number, identity)
                     if assertion_probe
-                    else self._default_assertions(snapshot, round_number, signature)
+                    else self._default_assertions(snapshot, round_number, identity)
                 )
                 current.locator_observations.extend(locator_observations)
                 current.assertion_observations.extend(assertion_observations)
@@ -165,12 +184,10 @@ class ProfileVerifier:
                 if stopped_again and stopped_again.ok
                 else None
             )
-            self.device.wait(0.5)
             recovered = self.device.current_foreground_app() if restarted and restarted.ok else None
+            # 冷启动后截图走 settle 轮询：真实应用的开屏/异步加载需要等待窗口稳定。
             recovery_snapshot = (
-                self.device.screenshot(
-                    self.output_dir,
-                    self.run_id,
+                self._replay_resolver._capture_settled(
                     f"profile-verification-{round_number}-recovery",
                 )
                 if recovered
@@ -181,15 +198,21 @@ class ProfileVerifier:
                 and recovery_snapshot
                 and recovered.bundle_name == self.target.bundle_name
                 and (not recovered.ability_name or recovered.ability_name == self.target.main_ability)
-                and BoundedExplorer._snapshot_signature(recovery_snapshot, recovered) == core_pages[0].signature
+                and BoundedExplorer._structural_identity(recovery_snapshot, recovered)
+                == (
+                    core_pages[0].structural_identity
+                    or BoundedExplorer._structural_identity(recovery_snapshot, recovered)
+                )
             )
             if not current.recovery_passed:
                 current.failures.append("return and restart recovery failed")
             if len(set(current.visited_page_signatures)) < 3:
                 current.failures.append("verification round did not replay 3 distinct pages")
             executed_kinds = {action.kind for action in core_pages[-1].path_actions}
-            if len(executed_kinds) < 3:
-                current.failures.append("verification round did not replay 3 interaction types")
+            if len(executed_kinds) < self.min_interaction_kinds:
+                current.failures.append(
+                    f"verification round did not replay {self.min_interaction_kinds} interaction types"
+                )
             current.passed = not current.failures
             log_path = self.output_dir / f"round-{round_number:02d}.hilog.txt"
             self.device.collect_logs(log_path)
@@ -197,10 +220,11 @@ class ProfileVerifier:
             result.rounds.append(current)
 
         result.stability = self.analyzer.analyze(all_locators, all_assertions)
-        if len(discovery.interaction_types) < 3:
-            result.failures.append("fewer than 3 interaction types")
+        if len(discovery.interaction_types) < self.min_interaction_kinds:
+            result.failures.append(f"fewer than {self.min_interaction_kinds} interaction types")
+        # 跨轮重复页按逻辑页身份判定：整树签名会被信息流内容抖动拆散。
         repeated_pages = (
-            set.intersection(*(set(item.visited_page_signatures) for item in result.rounds))
+            set.intersection(*(set(item.visited_page_identities) for item in result.rounds))
             if len(result.rounds) == 3
             else set()
         )
@@ -217,22 +241,37 @@ class ProfileVerifier:
         return result
 
     @staticmethod
-    def _core_pages(discovery: DiscoveryResult) -> list[DiscoveryPage]:
+    def _core_pages(discovery: DiscoveryResult, min_interaction_kinds: int = 2) -> list[DiscoveryPage]:
+        """选取一条可回放、动作类型达标的更深路径，并携带路径前缀上的全部逻辑页。
+
+        输入等动作不改变逻辑页身份时，中间深度的页与前一深度合并（探索器按身份去重），
+        此时沿用同一页对象，保证核心流仍是完整的物理路径。
+        """
         candidates = sorted(
             discovery.pages,
             key=lambda item: (len(item.path_actions), item.discovered_order),
         )
-        replayable = [item for item in candidates if len({action.kind for action in item.path_actions}) >= 3]
+        replayable = [
+            item
+            for item in candidates
+            if len({action.kind for action in item.path_actions}) >= max(min_interaction_kinds, 1)
+        ]
         deepest = max(replayable, key=lambda item: len(item.path_actions), default=None)
         if deepest is None:
             return []
         pages: list[DiscoveryPage] = []
+        carried: DiscoveryPage | None = None
         for depth in range(len(deepest.path_actions) + 1):
             page = next(
                 (item for item in candidates if item.path_actions == deepest.path_actions[:depth]),
                 None,
             )
-            if page and page.signature not in {item.signature for item in pages}:
+            if page is None:
+                page = carried
+            if page is None:
+                continue
+            carried = page
+            if page.signature not in {item.signature for item in pages}:
                 pages.append(page)
         return pages[:4]
 

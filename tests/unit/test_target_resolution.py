@@ -4,6 +4,7 @@ import hashlib
 
 import pytest
 
+from harmony_test_agent.devices import DeviceError
 from harmony_test_agent.models import TargetQuery
 from harmony_test_agent.targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
 from harmony_test_agent.targets.catalog import CatalogParseError, InstalledApp, parse_bundle_list, parse_installed_app
@@ -19,12 +20,17 @@ class CatalogDevice:
     def list_installed_apps(self) -> list[InstalledApp]:
         return list(self._apps)
 
+    def find_installed_apps(self, label: str) -> list[InstalledApp]:
+        # 模拟真实适配器的 bm dump 加速器：返回宽松候选，精确归一化交给 resolver。
+        needle = " ".join(label.split()).casefold()
+        return [app for app in self._apps if needle in " ".join(app.display_name.split()).casefold()]
+
     def inspect_app(self, bundle_name: str) -> InstalledApp:
         self.inspected_bundles.append(bundle_name)
         try:
             return self._inspected[bundle_name]
         except KeyError as exc:
-            raise RuntimeError(f"bundle is unavailable: {bundle_name}") from exc
+            raise DeviceError(f"bundle is unavailable: {bundle_name}") from exc
 
 
 def installed_app(

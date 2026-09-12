@@ -47,6 +47,7 @@
 - 使用 Pydantic AI，不绑定目前无法唯一确认的 `agentharness`。
 - 使用 `uv` 管理 Python 环境，使用 `ruff` 进行代码检查。
 - 不预先绑定任何第三方应用；先通过目标应用准入门禁选定一个可安装、可重置、可离线验证的 OpenHarmony 应用。
+- 实现偏差（2026-09-12）：面向信息流类应用的探索治理改造后，Profile 准入的交互类型门槛由固定 3 类改为可配置 `min_interaction_kinds`（默认 2、上限 3），其余 5.3 准入条件不变；同时支持无 verified Profile 的实时模式执行（不产出正式回归脚本），`bootstrap_only` 的 Profile 生成流程保持原验收语义。
 
 ---
 

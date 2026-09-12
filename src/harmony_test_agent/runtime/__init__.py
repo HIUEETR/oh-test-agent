@@ -2,6 +2,6 @@
 
 from .events import RunEventEmitter
 from .safety import SafetyError, SafetyPolicy
-from .tools import ToolExecutionError, ToolExecutor
+from .tools import LaunchSpec, ToolExecutionError, ToolExecutor
 
-__all__ = ["RunEventEmitter", "SafetyError", "SafetyPolicy", "ToolExecutionError", "ToolExecutor"]
+__all__ = ["LaunchSpec", "RunEventEmitter", "SafetyError", "SafetyPolicy", "ToolExecutionError", "ToolExecutor"]

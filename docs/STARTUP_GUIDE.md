@@ -151,6 +151,8 @@ VLM_MIN_CONFIDENCE=0.55
 | `VLM_MIN_CONFIDENCE`     | VLM 视觉元素进入融合列表的最低置信度，默认 0.55。                                    |
 | `RUNTIME_HOME`           | Hypium/xdevice 的项目内隔离 Home，默认`.runtime-user`。                            |
 
+自动探索的 LLM 视觉顾问在 `AGENT_VISION_MODEL`（或回退的 `AGENT_MODEL`）可用且 `AGENT_PROVIDER` 非 mock 时默认启用，逐页约束点击范围与次数；配置缺失或调用失败时自动回退纯启发式探索，无需额外环境变量。顾问的每次探索会话与逐页建议记录在 `artifacts/runs/<run_id>/discovery/summary.json` 的 `advisor_turns`/`advisor_verdicts` 中。
+
 ### 5.2 thinking 兼容性
 
 若真实模型返回：

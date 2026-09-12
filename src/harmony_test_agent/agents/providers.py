@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from ..config import Settings
+from ..discovery.advisor import ADVISOR_PROMPT, AdvisorTurnResult, AdvisorVerdict
 from ..models import (
     PlannedStep,
     PlanResult,
@@ -17,6 +19,7 @@ from ..models import (
     ToolName,
     VisionObservation,
 )
+from ..targets import ResolvedTarget
 
 
 class PlanningContext(BaseModel):
@@ -38,6 +41,16 @@ class PlanningContext(BaseModel):
             main_ability=profile.main_ability,
             stable_locator_names=[item.name for item in profile.stable_locator_inventory],
             known_limitations=list(profile.known_limitations),
+        )
+
+    @classmethod
+    def from_resolved(cls, resolved: ResolvedTarget) -> PlanningContext:
+        """无 Profile 实时模式的规划上下文：只有解析出的应用身份。"""
+        return cls(
+            target_app_id=resolved.target_app_id,
+            display_name=resolved.display_name,
+            bundle_name=resolved.bundle_name,
+            main_ability=resolved.main_ability,
         )
 
 
@@ -164,7 +177,7 @@ class AgentProvider(ABC):
     mock: bool = False
 
     @abstractmethod
-    async def plan(self, task: str, profile: TargetAppProfile, max_steps: int) -> PlanResult:
+    async def plan(self, task: str, context: PlanningContext, max_steps: int) -> PlanResult:
         """将用户任务规划为不超过上限的原子步骤。"""
         ...
 
@@ -178,6 +191,15 @@ class AgentProvider(ABC):
         """结合计划步骤和当前快照选择一个受支持的工具动作。"""
         ...
 
+    async def advise_turn(
+        self,
+        history: list[Any],
+        screenshot: bytes,
+        payload: str,
+    ) -> AdvisorTurnResult | None:
+        """探索顾问单轮对话：把当前页追加进连续会话并返回结构化建议；默认不支持。"""
+        return None
+
 
 class MockAgentProvider(AgentProvider):
     """提供确定性离线计划和决策，用于不调用真实模型的开发流程。"""
@@ -185,10 +207,10 @@ class MockAgentProvider(AgentProvider):
     name = "mock"
     mock = True
 
-    async def plan(self, task: str, profile: TargetAppProfile, max_steps: int) -> PlanResult:
+    async def plan(self, task: str, context: PlanningContext, max_steps: int) -> PlanResult:
         """将用户任务规划为不超过上限的原子步骤。"""
         steps: list[PlannedStep] = [
-            PlannedStep(step_id="step-01", instruction=f"启动{profile.display_name}", tool=ToolName.OPEN_APP),
+            PlannedStep(step_id="step-01", instruction=f"启动{context.display_name}", tool=ToolName.OPEN_APP),
             PlannedStep(step_id="step-02", instruction="检查首页", tool=ToolName.INSPECT_SCREEN),
         ]
         lowered = task.casefold()
@@ -293,12 +315,11 @@ class OpenAICompatibleProvider(AgentProvider):
         )
         return OpenAIChatModel(model_name, provider=provider)
 
-    async def plan(self, task: str, profile: TargetAppProfile, max_steps: int) -> PlanResult:
+    async def plan(self, task: str, context: PlanningContext, max_steps: int) -> PlanResult:
         """将用户任务规划为不超过上限的原子步骤。"""
         from pydantic_ai import Agent
 
         agent = Agent(self._model(), output_type=PlanResult, system_prompt=PLANNING_PROMPT, retries=2)
-        context = PlanningContext.from_profile(profile)
         prompt = (
             f"Planning context: {context.model_dump_json()}\n"
             f"Maximum steps: {max_steps}\nUser task: {task}\n"
@@ -373,6 +394,31 @@ class OpenAICompatibleProvider(AgentProvider):
             model_settings=self._model_settings(),
         )
         return result.output
+
+    async def advise_turn(
+        self,
+        history: list[Any],
+        screenshot: bytes,
+        payload: str,
+    ) -> AdvisorTurnResult | None:
+        """探索顾问单轮对话：携带既有历史继续追问，返回累计后的完整消息历史。"""
+        from pydantic_ai import Agent, BinaryContent
+
+        agent = Agent(
+            self._model(vision=True),
+            output_type=AdvisorVerdict,
+            system_prompt=ADVISOR_PROMPT,
+            retries=2,
+        )
+        result = await agent.run(
+            [
+                payload,
+                BinaryContent(data=screenshot, media_type="image/png"),
+            ],
+            message_history=list(history) if history else None,
+            model_settings=self._model_settings(),
+        )
+        return AdvisorTurnResult(verdict=result.output, history=result.all_messages())
 
 
 def create_provider(settings: Settings) -> AgentProvider:
