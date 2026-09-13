@@ -1,6 +1,6 @@
 # OpenHarmony 多模态测试 Agent 架构
 
-更新日期：2026-09-09
+更新日期：2026-09-13
 
 ## 1. 架构目标
 
@@ -117,6 +117,8 @@ stopped_by_user
 
 每个 Action 都必须有前后 Snapshot。即使是 `finish`，框架也会采集最终截图作为结束证据。
 
+动作与截图之间有两级等待：`open_app` 动作进入**冷启动静默期**（编排器参数 `launch_settle_seconds`，默认 3 秒）——期间轮询 `current_foreground_app` 确认前台已切到目标应用，并保证总静默满预算后再截图，避免把启动 logo 页当作首页；其余动作等待固定的 `settle_seconds`（默认 0.8 秒）。截图本身由 `_capture_stable_frame` 执行：在 `exploration_policy.settle_timeout_seconds` 预算内轮询 UI 层级指纹，静止页返回首帧，持续变化页（加载动画/过渡帧）在预算耗尽后补截 `-settled` 帧；探索阶段由 `BoundedExplorer._capture_settled` 提供同语义轮询。
+
 ## 6. Planning 与真实模型兼容
 
 ### 6.1 结构化输出
@@ -199,7 +201,7 @@ finish
 `SafetyPolicy`：
 
 - 只检查可执行参数 `target` 和 `text`，不因模型解释文本误报；
-- 拒绝登录、支付、验证码、删除、卸载、清除和授权；
+- 分两层执行：任务描述（`validate_task`）只拦**永久禁用项与凭证词**（支付、删除、卸载、清除数据、密码、验证码等）；"确认/提交/发送/授权"等**门控词**只在工具决策层面（`validate_decision`）按 `allow_login/allow_submit/...` 开关拦截，避免误伤任务描述里的日常用语；
 - 坐标必须在当前 Screenshot 内；
 - 等待时间有上限；
 - 模型不能一次返回多个动作；
@@ -248,6 +250,7 @@ VLM 元素必须满足：
 - key/id → `BY.key` / `BY.id`；
 - 动态长数字 key → `MatchPattern.STARTS_WITH`；
 - text/type+text → 对应选择器；
+- swipe 方向规范化为大写 `UP/DOWN/LEFT/RIGHT`（Hypium 枚举要求），非法值回退 `UP` 并写入生成警告；
 - 没有稳定定位器但当前 Snapshot 有 bbox → 坐标中心点，并写入注释和告警；
 - 断言 → `check_component_exist`；
 - 应用重置策略 → stop/start；
@@ -277,7 +280,7 @@ FastAPI 提供健康、设备、Run 创建/停止/查询、SSE、Graph、Script�
 
 SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关闭。Web 控制台（`web/`，2026-09 完全重写；旧版冻结于 `web-legacy/`）基于 React 19 + TypeScript + Vite + zustand，按 feature 分层（launcher/live/advisor/graph/script/profiles/report/runs/pipeline），API 访问集中在 `src/api/`（fetch 封装 + EventSource 封装），业务状态集中在 `src/stores/console.ts`。
 
-控制台用 EventSource 订阅全部事件类型并按 event_id 去重，同时串行轮询 Run Trace 与 discovery 快照；`src/utils/thought-aggregator.ts` 把事件流聚合为「计划/感知/决策/断言/顾问/页面/通知」思考块，驱动实时页的思考流与顶部闭环流水线状态条。页面图使用 React Flow：任务阶段渲染 `trace.graph`，探索型运行回退渲染 `discovery.pages/transitions` 构建的页面状态图。顾问对话页展示 `/discovery` 返回的 `advisor_log` 逐轮输入/输出留痕。报告使用 iframe，脚本页可通过 API 触发 1/3 次回放；历史运行列表来自 `GET /api/runs`。
+控制台用 EventSource 订阅全部事件类型并按 event_id 去重，同时串行轮询 Run Trace 与 discovery 快照；`src/utils/thought-aggregator.ts` 把事件流聚合为「计划/感知/决策/断言/顾问/页面/通知」思考块，驱动实时页的思考流与顶部闭环流水线状态条（阶段为采集→感知→规划→探索→验证→脚本→回放→报告；"验证"阶段对应 Profile 三轮设备验证，回放阶段同时识别 bootstrap 准入的 `hypium_replay_*` 事件）。探索期每帧截图经 `on_snapshot` 回调追加进 `trace.snapshots` 并发送 `screen_captured`/`elements_detected` 事件，实时页的设备画面与当前元素表全程跟随；探索停止原因（如 `admission_metrics_reached`）在思考流中以中文可读文案呈现并注明后续阶段。页面图使用 React Flow：任务阶段渲染 `trace.graph`，探索型运行回退渲染 `discovery.pages/transitions` 构建的页面状态图。顾问对话页实时累积 `discovery_progress(stage=advisor_turn)` 事件携带的逐轮输入/输出留痕（探索进行中即可见），并与探索结束后 `/discovery` 返回的 `advisor_log` 按轮次合并去重；旧运行回退展示 `advisor_verdicts` 逐页结论。报告使用 iframe，脚本页可通过 API 触发 1/3 次回放；历史运行列表来自 `GET /api/runs`。
 
 前端测试使用 vitest + Testing Library（`cd web && npm run test`），覆盖思考流聚合、Markdown 渲染（含 XSS 防护）、深链解析、流水线推导与组件冒烟。前端不依赖运行时外部字体 CDN，便于受限网络和离线开发。
 
@@ -324,4 +327,8 @@ SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关�
 
 顶层 Run 使用 `bootstrap` 与 `task` 两个阶段。`bootstrap` 完成目标消歧、启动交叉校验、有界探索、三轮设备验证、candidate 生成、三次 Hypium Driver 回放和原子晋级；随后将冻结的 verified Profile 交给 `task` 阶段。多候选 Run 保持 `waiting_target_selection`，由 API/Web 继续；受限临时测试标记 `provisional`，禁止生成或执行正式回归用例。停止请求会唤醒候选等待，并在探索、验证和回放边界终止。
 
+验证与回放过程逐轮逐次推送事件（`profile_verification_started`、`profile_verification_round_started/finished`、`hypium_replay_started/finished`），编排器不再攒批发送，实时视图在数分钟的验证/回放期间持续有反馈。`discovery_finished` 事件的 `stop_reason` 是探索内环的早停原因（如 `admission_metrics_reached` 探索提前达标），不代表整个 Run 结束。
+
 无 verified Profile 且探索关闭、或探索/验证失败（候选保存前的阶段）时，运行降级为**实时模式**（`trace.live_mode` + `profile_status_at_start=absent`）：跳过 Profile 引导，用 `LaunchSpec` + 无定位器辅助的 `ToolExecutor` 和 `PlanningContext.from_resolved` 直接执行任务，强制关闭脚本生成/回放；候选已保存后的 Hypium 回放门控失败与晋级失败仍按原语义失败。`bootstrap_only` 运行不降级，失败即失败。
+
+启动时若命中 verified Profile，先做**快速复验**：`core_flows.pages` 与验证定位器使用同一哈希空间（结构身份 `structural_identity`）建立页面→定位器映射并逐页回放路径；旧格式 Profile（发现期整树签名）映射失败时回退入口页强定位器检查。复验失败**不再自动失效**——保留既有 verified 文件，仅在 provenance 记录 `quick_verification` 失败证据并转入完整探索重新验证，新探索晋级时原子覆盖旧文件；`registry.invalidate` 保留为控制台手动操作。

@@ -1,7 +1,7 @@
 # Web 控制台（v2 重写版）
 
 OpenHarmony 多模态测试 Agent 的现代化控制台：浅色玻璃拟态界面，实时呈现大模型的
-思考、输入与输出，覆盖「采集 → 感知 → 规划 → 探索 → 脚本 → 回放 → 报告」完整闭环。
+思考、输入与输出，覆盖「采集 → 感知 → 规划 → 探索 → 验证 → 脚本 → 回放 → 报告」完整闭环。
 旧版控制台冻结在 `../web-legacy/`，仅供追溯，不再维护。
 
 ## 技术栈
@@ -41,8 +41,12 @@ web/src/
 - **思考流（ThoughtStream）**：`utils/thought-aggregator.ts` 把 SSE 事件流聚合为
   计划 / 感知 / 决策步骤 / 断言 / 顾问 / 页面 / 通知七类思考块；`discovery_progress`
   事件按 `payload.stage` 分发（`advisor` 进思考流，`advisor_turn` 留痕进顾问对话视图）。
-- **顾问对话（AdvisorPanel）**：读取 `/api/runs/{id}/discovery` 的 `advisor_log`
-  （每轮 LLM 调用的输入 payload 与输出 verdict），旧运行回退展示 `advisor_verdicts` 逐页结论。
+  探索停止原因以中文可读文案呈现（如"已达准入指标，探索提前完成，继续 Profile 验证与回放"）。
+- **顾问对话（AdvisorPanel）**：实时累积 `advisor_turn` 事件留痕（探索进行中即可见），
+  并与 `/api/runs/{id}/discovery` 的 `advisor_log` 按轮次合并去重；
+  旧运行回退展示 `advisor_verdicts` 逐页结论。
+- **实时画面与元素表（DeviceScreen / ElementTable）**：跟随 `trace.snapshots` 最新帧；
+  探索期每帧截图由后端实时追加，全程可见。
 - **页面关系图**：任务阶段 `trace.graph` 优先；探索型运行回退用 `discovery.pages/transitions`
   构建页面状态图。
 - **SSE**：原生 EventSource 按事件名订阅（`api/types.ts` 的 `RUN_EVENT_TYPES` 镜像后端

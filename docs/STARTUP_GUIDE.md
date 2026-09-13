@@ -1,6 +1,6 @@
 # OpenHarmony 多模态测试 Agent 启动手册
 
-更新日期：2026-09-10
+更新日期：2026-09-13
 
 本文面向首次拿到仓库的开发者，覆盖从环境准备、真实模型与设备配置、预检、Agent 运行、Hypium 生成/回放，到 FastAPI/SSE/Web 控制台、测试、清理与排错的完整流程。
 
@@ -151,7 +151,9 @@ VLM_MIN_CONFIDENCE=0.55
 | `VLM_MIN_CONFIDENCE`     | VLM 视觉元素进入融合列表的最低置信度，默认 0.55。                                    |
 | `RUNTIME_HOME`           | Hypium/xdevice 的项目内隔离 Home，默认`.runtime-user`。                            |
 
-自动探索的 LLM 视觉顾问在 `AGENT_VISION_MODEL`（或回退的 `AGENT_MODEL`）可用且 `AGENT_PROVIDER` 非 mock 时默认启用，逐页约束点击范围与次数；配置缺失或调用失败时自动回退纯启发式探索，无需额外环境变量。顾问的每次探索会话与逐页建议记录在 `artifacts/runs/<run_id>/discovery/summary.json` 的 `advisor_turns`/`advisor_verdicts` 中；每次 LLM 调用的输入（页面截图 + 编号候选 payload）与输出（结构化建议）还会以 `advisor_log` 留痕，并经 `discovery_progress`（`stage=advisor_turn`）事件实时推送，Web 控制台「顾问对话」页据此回放完整对话。`advisor_verdicts` 每条附带 `candidates` 可读摘要（编号/kind/label/coordinate），把 recommended/avoid 下标映射回控件文本。
+自动探索的 LLM 视觉顾问在 `AGENT_VISION_MODEL`（或回退的 `AGENT_MODEL`）可用且 `AGENT_PROVIDER` 非 mock 时默认启用，逐页约束点击范围与次数；配置缺失或调用失败时自动回退纯启发式探索，无需额外环境变量。顾问的每次探索会话与逐页建议记录在 `artifacts/runs/<run_id>/discovery/summary.json` 的 `advisor_turns`/`advisor_verdicts` 中；每次 LLM 调用的输入（页面截图 + 编号候选 payload）与输出（结构化建议）还会以 `advisor_log` 留痕，并经 `discovery_progress`（`stage=advisor_turn`）事件实时推送，Web 控制台「顾问对话」页实时累积这些事件（探索进行中即可见），并与探索结束后的 `advisor_log` 按轮次合并展示。`advisor_verdicts` 每条附带 `candidates` 可读摘要（编号/kind/label/coordinate），把 recommended/avoid 下标映射回控件文本。
+
+探索完成（如 `停止原因 admission_metrics_reached`，即"已达准入指标，探索提前完成"）后，编排器继续执行 Profile 验证、脚本生成与准入回放：验证阶段逐轮推送 `profile_verification_round_started/finished`，回放阶段逐次推送 `hypium_replay_started/finished`，实时视图全程有反馈，不会出现"已停止却仍在运行"的观感。
 
 ### 5.2 thinking 兼容性
 
@@ -437,14 +439,15 @@ Stop-Process -Id $connection.OwningProcess
 Web 控制台（2026-09 重写，架构见 `web/README.md`）支持：
 
 - 左栏启动器：目标解析（应用名/bundleName）、自然语言任务、运行模式、探索策略编辑、启动/停止；
-- 闭环流水线状态条：采集 → 感知 → 规划 → 探索 → 脚本 → 回放 → 报告 随运行实时点亮；
+- 闭环流水线状态条：采集 → 感知 → 规划 → 探索 → 验证 → 脚本 → 回放 → 报告 随运行实时点亮；
 - 实时执行页：**思考流**（模型规划、视觉摘要、逐步工具决策、顾问建议的聚合时间线）
   与**事件日志**（每条事件可展开查看原始 payload JSON）双视图切换、设备画面、当前元素表；
 - **顾问对话页**：探索顾问每轮 LLM 调用的输入（截图 + 候选列表）与输出（结构化建议）回放，
-  旧运行自动回退展示逐页结论；
+  探索进行中即实时累积，旧运行自动回退展示逐页结论；
 - 页面关系图：任务阶段 trace 图优先，探索型运行自动回退到探索页面状态图；
 - 历史运行列表（左栏 + 完整表格），点击任意历史 Run 即可回看轨迹/图/脚本/报告；
-- Profile 资产管理：快速复验、锁定/解锁、回退、失效；
+- Profile 资产管理：快速复验、锁定/解锁、回退、失效（启动运行时对 verified Profile
+  自动快速复验，失败仅记录证据并转入完整探索重新验证，不再自动失效；失效为手动操作）；
 - Hypium Python、生成告警、验收回放（1/3 次）与回放进度；内嵌 HTML 报告与下载。
 
 可用深链接直接查看 Run（旧 tab 值全部兼容，新增 advisor/runs）：
@@ -498,7 +501,7 @@ Invoke-RestMethod 'http://127.0.0.1:8000/api/health/live'
 Invoke-RestMethod 'http://127.0.0.1:8000/api/health'
 ```
 
-增量契约字段（2026-09，纯追加、不影响旧客户端）：`GET /api/runs/{id}/discovery` 返回 `advisor_log`（顾问逐轮输入/输出留痕）、`pages`/`transitions`（探索页面与跳转明细）；`advisor_verdicts[*]` 追加 `candidates` 摘要；`discovery_progress` 事件 payload 追加 `stage` 标识，`screen_captured` 事件 payload 追加 `summary`（视觉模型页面理解）。
+增量契约字段（2026-09，纯追加、不影响旧客户端）：`GET /api/runs/{id}/discovery` 返回 `advisor_log`（顾问逐轮输入/输出留痕）、`pages`/`transitions`（探索页面与跳转明细）；`advisor_verdicts[*]` 追加 `candidates` 摘要；`discovery_progress` 事件 payload 追加 `stage` 标识，`screen_captured` 事件 payload 追加 `summary`（视觉模型页面理解）。事件类型追加 `profile_verification_started`、`profile_verification_round_started`、`hypium_replay_started`（验证/回放过程逐轮逐次推送）；探索期每帧截图会实时发送 `screen_captured`/`elements_detected` 并追加 `trace.snapshots`，驱动实时页的设备画面与元素表。
 
 SSE 示例：
 
