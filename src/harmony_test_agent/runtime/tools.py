@@ -81,7 +81,7 @@ class ToolExecutor:
         elif decision.tool == ToolName.INSPECT_SCREEN:
             pass
         elif decision.tool == ToolName.CLICK_ELEMENT:
-            element, locator = self._resolve(snapshot, decision.target, clickable=True)
+            element, locator = self._resolve(snapshot, decision.target, clickable=True, warnings=warnings)
             if not element.bbox:
                 raise ToolExecutionError("resolved element has no usable bounds", RunState.FAILED_ELEMENT)
             command = self.device.click(*element.bbox.center)
@@ -100,7 +100,10 @@ class ToolExecutor:
         elif decision.tool == ToolName.SWIPE:
             if snapshot is None:
                 raise ToolExecutionError("swipe requires a current screenshot", RunState.FAILED_ELEMENT)
-            start, end = self._swipe_points(snapshot, decision.direction or "up")
+            anchor = self._swipe_anchor(snapshot, decision.target)
+            if anchor is None and decision.target:
+                warnings.append(f"swipe target {decision.target!r} not found; swiping at screen center")
+            start, end = self._swipe_points(snapshot, decision.direction or "up", anchor)
             command = self.device.swipe(start, end)
         elif decision.tool == ToolName.BACK:
             command = self.device.back()
@@ -138,6 +141,7 @@ class ToolExecutor:
         *,
         clickable: bool | None = None,
         editable: bool | None = None,
+        warnings: list[str] | None = None,
     ):
         if snapshot is None:
             raise ToolExecutionError("element tool requires a current screenshot", RunState.FAILED_ELEMENT)
@@ -156,10 +160,48 @@ class ToolExecutor:
             if fallback:
                 locator = next(iter(fallback.locator_candidates), None)
                 return fallback, locator or LocatorCandidate(kind=LocatorKind.SPATIAL, value="editable", score=0.6)
+        if clickable:
+            # 滚轮选择器/自绘控件的滚轮项常不带 clickable 标志（如系统时间选择器的"上午/下午"列），
+            # 但坐标点击仍然有效：放宽为任意带边界元素并按中心点击。严格匹配优先，避免放宽后误点相近元素。
+            relaxed = find_element(snapshot.elements, target or "", stable_locators=self.stable_locators)
+            if relaxed is not None:
+                if not relaxed[0].bbox:
+                    raise ToolExecutionError(
+                        f"element {target!r} exists but has no clickable bounds", RunState.FAILED_ELEMENT
+                    )
+                if warnings is not None:
+                    warnings.append(f"target {target!r} matched a non-clickable element; clicking its bounds center")
+                return relaxed
         raise ToolExecutionError(f"element not found: {target}", RunState.FAILED_ELEMENT)
 
+    def _swipe_anchor(self, snapshot: ScreenSnapshot, target: str | None) -> tuple[int, int, int, int] | None:
+        """解析滑动锚定元素：滚轮列等目标不要求 clickable 标志，但必须有边界。"""
+        if not target:
+            return None
+        result = find_element(snapshot.elements, target, stable_locators=self.stable_locators)
+        if result is None or not result[0].bbox:
+            return None
+        bbox = result[0].bbox
+        return bbox.left, bbox.top, bbox.right, bbox.bottom
+
     @staticmethod
-    def _swipe_points(snapshot: ScreenSnapshot, direction: str) -> tuple[tuple[int, int], tuple[int, int]]:
+    def _swipe_points(
+        snapshot: ScreenSnapshot,
+        direction: str,
+        anchor: tuple[int, int, int, int] | None = None,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        if anchor is not None:
+            # 锚定元素（滚轮列等）：以元素中心为轴，行程取元素尺寸的一半，方向语义与全屏滑动一致。
+            left, top, right, bottom = anchor
+            cx, cy = (left + right) // 2, (top + bottom) // 2
+            dx, dy = (right - left) // 4, (bottom - top) // 4
+            mapping = {
+                "up": ((cx, cy + dy), (cx, cy - dy)),
+                "down": ((cx, cy - dy), (cx, cy + dy)),
+                "left": ((cx + dx, cy), (cx - dx, cy)),
+                "right": ((cx - dx, cy), (cx + dx, cy)),
+            }
+            return mapping[direction]
         x, y = snapshot.width // 2, snapshot.height // 2
         dx, dy = int(snapshot.width * 0.3), int(snapshot.height * 0.3)
         mapping = {

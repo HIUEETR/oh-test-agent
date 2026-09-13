@@ -75,8 +75,10 @@ DECISION_PROMPT = """Choose exactly one allowed tool for the current planned ste
 current screenshot proves it inappropriate. For click_element and input_text, use the exact element_id from Current
 elements as target; do not return a descriptive label when an exact element_id exists. If a visible control is absent
 from Current elements but is unambiguous in the screenshot, use click_coordinate with pixel coordinates relative to
-the supplied image. Do not guess that a hierarchy element represents a visual control when its content or bbox does
-not support that conclusion. If a back step intends to navigate while a soft keyboard is visible, prefer the visible
+the supplied image. For wheel pickers (hour/minute/AM-PM columns), set swipe target to the column's element_id to
+swipe inside that column instead of at the screen center. Do not guess that a hierarchy element represents a visual
+control when its content or bbox does not support that conclusion. If a back step intends to navigate while a soft
+keyboard is visible, prefer the visible
 in-app back control because a system back may only dismiss the keyboard. If the desired destination is already visible,
 use inspect_screen instead of navigating away. Never emit shell commands, multiple actions, login, payment, captcha,
 deletion, or permission-grant actions. Never choose finish unless the planned step tool is finish.
