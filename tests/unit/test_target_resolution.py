@@ -38,6 +38,7 @@ def installed_app(
     display_name: str,
     *,
     main_ability: str | None = "EntryAbility",
+    system_app: bool = False,
 ) -> InstalledApp:
     return InstalledApp(
         bundle_name=bundle_name,
@@ -47,6 +48,7 @@ def installed_app(
         module_name="entry",
         version_name="1.2.3",
         version_code=12,
+        system_app=system_app,
     )
 
 
@@ -161,3 +163,26 @@ def test_resolver_reports_no_name_or_bundle_match() -> None:
 
     with pytest.raises(TargetNotFoundError, match="installed bundle not found"):
         TargetResolver(device).resolve(TargetQuery(bundle_name="com.example.missing"))
+
+
+def test_resolver_allows_builtin_system_apps_by_name() -> None:
+    """日历等内置系统应用是合法测试目标：issystemapp 不再触发隐式拦截（回归 2026-09-13）。"""
+    device = CatalogDevice([installed_app("com.ohos.calendar", "日历", system_app=True)])
+
+    resolved = TargetResolver(device).resolve(TargetQuery(app_name="日历"))
+
+    assert resolved.bundle_name == "com.ohos.calendar"
+    assert resolved.display_name == "日历"
+    assert resolved.source == "installed_app"
+
+
+def test_resolver_still_blocks_launcher_and_settings_bundles() -> None:
+    """危险系统组件按 bundle 名标记拦截，与是否为系统应用无关。"""
+    apps = [
+        installed_app("com.ohos.launcher", "日历", system_app=True),
+        installed_app("com.ohos.settings", "Settings", system_app=True),
+    ]
+    device = CatalogDevice(apps)
+
+    with pytest.raises(TargetNotFoundError, match="installed application not found"):
+        TargetResolver(device).resolve(TargetQuery(app_name="日历"))
