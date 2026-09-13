@@ -112,5 +112,10 @@ _BLOCKED_SYSTEM_BUNDLE_MARKERS = (
 
 
 def _blocked_implicit_system_target(app: InstalledApp) -> bool:
+    """仅按 bundle 名标记拦截桌面/设置等不可驱动系统组件。
+
+    不能用 `issystemapp` 一刀切：日历、时钟等内置系统应用是合法测试目标，
+    此前该整体封锁导致"installed application not found: 日历"。
+    """
     bundle = app.bundle_name.casefold()
-    return app.system_app or any(marker in bundle for marker in _BLOCKED_SYSTEM_BUNDLE_MARKERS)
+    return any(marker in bundle for marker in _BLOCKED_SYSTEM_BUNDLE_MARKERS)
