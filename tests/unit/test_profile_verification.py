@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from harmony_test_agent.agents import AgentOrchestrator
 from harmony_test_agent.discovery import (
     BoundedExplorer,
     DiscoveryResult,
@@ -289,3 +290,52 @@ def test_profile_verifier_blocks_promotion_when_only_dynamic_locators_exist(tmp_
     assert result.stability.promotable_locator_count == 0
     assert len(result.rounds) == 3
     assert all(len(set(item.visited_page_signatures)) >= 3 for item in result.rounds)
+
+
+def test_profile_verifier_streams_round_lifecycle_callbacks(tmp_path: Path) -> None:
+    """每轮开始/结束即时回调：编排器据此逐轮推送事件，而不是验证全部结束后补发。"""
+    device = FakeVerificationDevice(tmp_path)
+    started: list[int] = []
+    finished: list[int] = []
+    verifier = ProfileVerifier(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "verification-callbacks",
+        run_id="verification-callbacks",
+        on_round_started=started.append,
+        on_round_finished=lambda round_result: finished.append(round_result.round_number),
+    )
+
+    result = verifier.verify(_discovery(device))
+
+    assert result.passed
+    assert started == [1, 2, 3]
+    assert finished == [1, 2, 3]
+    assert [round_result.round_number for round_result in result.rounds] == [1, 2, 3]
+
+
+def test_core_flow_pages_share_locator_identity_space(tmp_path: Path) -> None:
+    """core_flows.pages 必须与验证定位器的页签名同空间（结构身份）。
+
+    旧实现写入发现期整树签名（内容敏感），快速复验的页面→定位器映射恒为空，
+    导致每次启动都判定 Profile 失效并重新全量探索。
+    """
+    device = FakeVerificationDevice(tmp_path)
+    verifier = ProfileVerifier(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "verification-identity",
+        run_id="verification-identity",
+    )
+    discovery = _discovery(device)
+    result = verifier.verify(discovery)
+    assert result.passed
+
+    profile = AgentOrchestrator._build_profile(_target(), discovery, result, "verification-identity")
+
+    flow_pages = set(profile.core_flows[0]["pages"])
+    locator_pages = {item.page_signature for item in profile.stable_locator_inventory}
+    assert len(flow_pages) >= 3
+    assert flow_pages <= locator_pages
+    # 页面身份来自结构身份而不是发现期整树签名
+    assert flow_pages == {page.structural_identity for page in discovery.pages if page.structural_identity}

@@ -9,6 +9,25 @@ def test_blocks_destructive_task():
         SafetyPolicy().validate_task("打开设置并删除用户数据")
 
 
+def test_task_text_with_gated_word_is_not_rejected():
+    """任务描述里的日常用语（如"确认"）不应导致整个运行失败；门控留给工具决策层面。"""
+    SafetyPolicy().validate_task("打开应用并确认页面能正常刷新")
+
+
+def test_task_text_with_credential_word_is_still_rejected():
+    with pytest.raises(SafetyError, match="密码"):
+        SafetyPolicy().validate_task("打开应用并输入密码")
+
+
+def test_gated_word_still_blocks_element_decision():
+    """任务文本放行后，点击带"确认"字样的按钮仍受 allow_submit 门控。"""
+    with pytest.raises(SafetyError, match="确认"):
+        SafetyPolicy().validate_decision(
+            ToolDecision(tool=ToolName.CLICK_ELEMENT, target="确认"),
+            snapshot=None,
+        )
+
+
 def test_rejects_coordinate_outside_screen(tmp_path):
     snapshot = ScreenSnapshot(
         snapshot_id="s",

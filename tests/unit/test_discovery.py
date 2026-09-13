@@ -789,3 +789,31 @@ def test_early_success_requires_configurable_interaction_kinds(tmp_path: Path) -
 
     assert BoundedExplorer._early_success(result, 2) is True
     assert BoundedExplorer._early_success(result, 3) is False
+
+
+def test_explorer_reports_captured_frames_to_snapshot_listener(tmp_path: Path) -> None:
+    """探索期每一帧（页面捕获与动作后帧）都推给 on_snapshot，驱动实时视图的设备画面与元素表。"""
+    device = FakeDiscoveryDevice(tmp_path, home_actions=3)
+    frames: list[ScreenSnapshot] = []
+    explorer = BoundedExplorer(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "discovery-listener",
+        run_id="run-snapshot-listener",
+        policy=ExplorationPolicy(settle_timeout_seconds=0),
+        on_snapshot=frames.append,
+    )
+
+    result = explorer.explore()
+
+    assert len(frames) >= len(result.pages)
+    assert {frame.snapshot_id for frame in frames} >= {page.snapshot_id for page in result.pages}
+    assert any(frame.elements for frame in frames)
+
+
+def test_explorer_without_snapshot_listener_keeps_exploration_unchanged(tmp_path: Path) -> None:
+    device = FakeDiscoveryDevice(tmp_path, home_actions=3)
+
+    result = _explorer(tmp_path, device, max_pages=2, max_actions_per_page=2).explore()
+
+    assert len(result.pages) == 2

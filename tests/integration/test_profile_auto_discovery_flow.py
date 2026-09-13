@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -295,6 +296,7 @@ def _orchestrator(tmp_path: Path, device: FlowDevice) -> AgentOrchestrator:
         artifacts=ArtifactStore(settings.resolved_runtime_dir),
         device_factory=lambda _: device,
         settle_seconds=0,
+        launch_settle_seconds=0,
     )
 
 
@@ -505,8 +507,8 @@ async def test_same_run_discovers_promotes_then_executes_original_task(
     orchestrator = _orchestrator(tmp_path, device)
     _patch_discovery(monkeypatch, verification_passed=True)
 
-    async def successful_replays(runner, generated, run_id: str, attempts: int):
-        del runner, generated, run_id
+    async def successful_replays(runner, generated, run_id: str, attempts: int, emitter=None):
+        del runner, generated, run_id, emitter
         assert attempts == 3
         return _replays(True, True, True)
 
@@ -626,8 +628,8 @@ async def test_failed_admission_replay_keeps_candidate_and_prevents_promotion(
     orchestrator = _orchestrator(tmp_path, device)
     _patch_discovery(monkeypatch, verification_passed=True)
 
-    async def failing_replays(runner, generated, run_id: str, attempts: int):
-        del runner, generated, run_id
+    async def failing_replays(runner, generated, run_id: str, attempts: int, emitter=None):
+        del runner, generated, run_id, emitter
         assert attempts == 3
         return _replays(True, False, True)
 
@@ -645,6 +647,125 @@ async def test_failed_admission_replay_keeps_candidate_and_prevents_promotion(
     assert candidate.status == ProfileStatus.CANDIDATE
     assert registry.get(target_app_id=TARGET_A, status=ProfileStatus.VERIFIED) is None
     assert not any(event.type == EventType.PROFILE_PROMOTED for event in trace.events)
+
+
+async def test_failed_quick_revalidation_keeps_verified_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """快速复验失败只记录证据并转入完整探索，不得销毁既有 verified Profile。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device)
+    registry = ProfileRegistry(orchestrator.settings.resolved_profiles_dir)
+    _promote(registry, _profile())
+    _patch_discovery(monkeypatch, verification_passed=True)
+
+    async def successful_replays(runner, generated, run_id: str, attempts: int, emitter=None):
+        del runner, generated, run_id, emitter
+        return _replays(True, True, True)
+
+    monkeypatch.setattr(orchestrator, "_run_replays", successful_replays)
+    trace = await orchestrator.run(
+        RunRequest(target={"bundle_name": BUNDLE_A}, task="check target home", auto_generate=False),
+        run_id="run-keep-verified",
+    )
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    revalidation = [event for event in trace.events if event.type == EventType.PROFILE_REVALIDATION_FINISHED]
+    assert revalidation[-1].payload["passed"] is False
+    assert revalidation[-1].payload["kept"] is True
+    assert any(event.type == EventType.PROFILE_VERIFICATION_STARTED for event in trace.events)
+    # 旧 verified Profile 未被失效，新一轮探索晋级后自然覆盖
+    stored = registry.read(TARGET_A, ProfileStatus.VERIFIED)
+    assert stored.provenance.discovery_run_id == trace.run_id
+    assert any(
+        item.provenance.evidence.get("quick_verification", {}).get("passed") is False
+        for item in registry.history(BUNDLE_A)
+    )
+
+
+async def test_replay_events_stream_per_attempt(tmp_path: Path, monkeypatch) -> None:
+    """Hypium 回放事件逐次推送：每次尝试的开始/完成交错出现，而非全部结束后补发。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device)
+    _patch_discovery(monkeypatch, verification_passed=True)
+    monkeypatch.setattr(
+        "harmony_test_agent.agents.orchestrator.HypiumRunner.execute",
+        lambda self, generated, attempt: _replays(True, True, True)[attempt - 1],
+    )
+    trace = await orchestrator.run(
+        RunRequest(target={"bundle_name": BUNDLE_A}, task="check target home", auto_generate=False),
+        run_id="run-stream-replays",
+    )
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    types = [event.type for event in trace.events]
+    started_index = [index for index, item in enumerate(types) if item == EventType.HYPIUM_REPLAY_STARTED]
+    finished_index = [index for index, item in enumerate(types) if item == EventType.HYPIUM_REPLAY_FINISHED]
+    assert len(started_index) == 3
+    assert len(finished_index) == 3
+    assert all(start < finish for start, finish in zip(started_index, finished_index, strict=True))
+    assert all(finish < start for finish, start in zip(finished_index[:-1], started_index[1:], strict=True))
+    assert [item.attempt for item in trace.profile_validation_replays] == [1, 2, 3]
+
+
+class _RecordingDevice(FlowDevice):
+    """记录关键调用时刻的包装设备：断言 OPEN_APP 与 after 截图之间存在启动静默期。"""
+
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(tmp_path)
+        self.timeline: list[tuple[str, float]] = []
+
+    def _mark(self, name: str) -> None:
+        self.timeline.append((name, time.monotonic()))
+
+    def open_app(self, profile, reset: bool = False):
+        result = super().open_app(profile, reset)
+        self._mark("open_app")
+        return result
+
+    def current_foreground_app(self):
+        self._mark("foreground_poll")
+        return super().current_foreground_app()
+
+    def screenshot(self, output_dir: Path, run_id: str, label: str = "screen"):
+        self._mark(f"screenshot:{label}")
+        return super().screenshot(output_dir, run_id, label)
+
+
+async def test_open_app_waits_launch_settle_before_after_capture(tmp_path: Path) -> None:
+    """任务阶段 OPEN_APP 后进入冷启动静默期：轮询前台且静默满预算后才截 after 帧。
+
+    回归背景：`aa start` 返回即截图会截到启动 logo 页（应用冷启动 2-5 秒）。
+    """
+    device = _RecordingDevice(tmp_path)
+    settings = _settings(tmp_path)
+    orchestrator = AgentOrchestrator(
+        settings,
+        provider=OriginalTaskProvider(),
+        repository=RunRepository(settings.resolved_database_path),
+        artifacts=ArtifactStore(settings.resolved_runtime_dir),
+        device_factory=lambda _: device,
+        settle_seconds=0,
+        launch_settle_seconds=0.25,
+    )
+    trace = await orchestrator.run(
+        RunRequest(
+            target={"bundle_name": BUNDLE_A},
+            task="check target home",
+            auto_generate=True,
+            exploration_policy=ExplorationPolicy(enabled=False),
+        ),
+        run_id="run-launch-settle",
+    )
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    marks = device.timeline
+    start_index = max(index for index, (name, _) in enumerate(marks) if name == "open_app")
+    after_index = next(index for index, (name, _) in enumerate(marks) if name == "screenshot:step_01_after")
+    polls_between = [1 for name, _ in marks[start_index:after_index] if name == "foreground_poll"]
+    assert polls_between, "launch settle must poll foreground before the after capture"
+    assert marks[after_index][1] - marks[start_index][1] >= 0.25
 
 
 def test_profile_api_lifecycle_errors_and_explicit_history_rollback(tmp_path: Path) -> None:

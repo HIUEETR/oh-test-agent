@@ -48,7 +48,7 @@ describe("derivePipeline", () => {
 
   it("无运行时全部待命", () => {
     const phases = derivePipeline([], null, false);
-    expect(phases.map((phase) => phase.state)).toEqual(Array(7).fill("pending"));
+    expect(phases.map((phase) => phase.state)).toEqual(Array(8).fill("pending"));
   });
 
   it("探索进行中：采集/感知完成，探索高亮", () => {
@@ -58,7 +58,35 @@ describe("derivePipeline", () => {
     expect(byKey.capture).toBe("done");
     expect(byKey.perceive).toBe("done");
     expect(byKey.explore).toBe("active");
+    expect(byKey.verify).toBe("pending");
     expect(byKey.script).toBe("pending");
+  });
+
+  it("探索完成后验证阶段点亮，脚本与回放随后推进", () => {
+    const events = [
+      event("discovery_started", 1), event("discovery_finished", 2), event("profile_draft_saved", 3),
+      event("profile_verification_started", 4), event("profile_verification_round_started", 5),
+      event("profile_verification_round_finished", 6), event("script_generated", 7),
+      event("hypium_replay_started", 8), event("hypium_replay_finished", 9),
+    ];
+    const phases = derivePipeline(events, trace({}), false);
+    const byKey = Object.fromEntries(phases.map((phase) => [phase.key, phase.state]));
+    expect(byKey.explore).toBe("done");
+    expect(byKey.verify).toBe("done");
+    expect(byKey.script).toBe("done");
+    // bootstrap 准入回放按 hypium_replay_* 事件逐次点亮
+    expect(byKey.replay).toBe("active");
+  });
+
+  it("三次准入回放完成后回放阶段完成", () => {
+    const events = [
+      event("script_generated", 1), event("hypium_replay_started", 2), event("hypium_replay_finished", 3),
+      event("hypium_replay_started", 4), event("hypium_replay_finished", 5),
+      event("hypium_replay_started", 6), event("hypium_replay_finished", 7),
+    ];
+    const phases = derivePipeline(events, trace({}), false);
+    const byKey = Object.fromEntries(phases.map((phase) => [phase.key, phase.state]));
+    expect(byKey.replay).toBe("done");
   });
 
   it("脚本与回放完成后报告就绪", () => {
@@ -67,6 +95,7 @@ describe("derivePipeline", () => {
     ];
     const phases = derivePipeline(events, trace({ state: "completed" }), true);
     const byKey = Object.fromEntries(phases.map((phase) => [phase.key, phase.state]));
+    expect(byKey.verify).toBe("done");
     expect(byKey.script).toBe("done");
     expect(byKey.replay).toBe("done");
     expect(byKey.report).toBe("done");

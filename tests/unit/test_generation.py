@@ -319,3 +319,35 @@ def test_generator_filters_desktop_icon_marker_in_key(tmp_path: Path) -> None:
 
     assert generated.replay_eligible is True
     assert "Container_AppIcon_Image" not in source
+
+
+def test_generator_normalizes_swipe_direction_for_hypium(tmp_path: Path) -> None:
+    """Hypium 的 swipe 只接受大写方向枚举：小写必须规范化，非法值回退 UP 并写入警告。"""
+    store = ArtifactStore(tmp_path / "runs")
+    trace = RunTrace(
+        run_id="run-swipe",
+        target_app_id="zhihu-plus",
+        task="测试滑动",
+        device_id="device-1",
+        actions=[
+            ActionResult(step_id="swipe", tool=ToolName.SWIPE, success=True, params={"direction": "up"}),
+            ActionResult(step_id="swipe-bad", tool=ToolName.SWIPE, success=True, params={"direction": "sideways"}),
+            ActionResult(
+                step_id="assert",
+                tool=ToolName.ASSERT_VISIBLE,
+                success=True,
+                params={"target": "搜索"},
+                locator=LocatorCandidate(kind=LocatorKind.KEY, value="search_key"),
+            ),
+            finish_action(),
+        ],
+    )
+
+    generated = HypiumGenerator(store).generate(trace, profile())
+    source = generated.python_path.read_text(encoding="utf-8")
+    metadata = json.loads(generated.metadata_path.read_text(encoding="utf-8"))
+
+    compile(source, str(generated.python_path), "exec")
+    assert "driver.swipe('UP')" in source
+    assert "driver.swipe('up')" not in source
+    assert any("unknown swipe direction 'sideways'" in warning for warning in metadata["warnings"])

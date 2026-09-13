@@ -1,4 +1,4 @@
-// 闭环流水线：把 采集→感知→规划→探索→脚本→回放→报告 的推进状态映射为阶段条。
+// 闭环流水线：把 采集→感知→规划→探索→验证→脚本→回放→报告 的推进状态映射为阶段条。
 // 纯函数推导，事件存在即完成；进行中的阶段高亮，不适用时跳过。
 
 import { TERMINAL_STATES, type RunEvent, type RunTrace } from "../api/types";
@@ -29,9 +29,16 @@ export function derivePipeline(events: RunEvent[], trace: RunTrace | null, repor
   const planned = hasEvent(events, "plan_created");
   const exploring = hasEvent(events, "discovery_started") && !hasEvent(events, "discovery_finished");
   const explored = hasEvent(events, "discovery_finished");
+  // Profile 设备验证（3 轮独立重启回放）：draft 保存后进入，脚本生成或验证结果落盘即完成。
+  const verifying = hasEvent(events, "profile_verification_started") || hasEvent(events, "profile_draft_saved");
+  const verified = hasEvent(events, "script_generated") || Boolean(trace?.verification_result);
   const scripted = hasEvent(events, "script_generated") || Boolean(trace?.generated);
-  const replaying = hasEvent(events, "execution_started") && !hasEvent(events, "execution_finished");
-  const replayed = hasEvent(events, "execution_finished") || Boolean(trace?.replays.length);
+  const replayFinished = events.filter((event) => event.type === "hypium_replay_finished").length;
+  // 回放覆盖两类来源：任务阶段的 execution_* 与 bootstrap 准入的 hypium_replay_*（逐次推送）。
+  const replaying = (hasEvent(events, "execution_started") && !hasEvent(events, "execution_finished"))
+    || (hasEvent(events, "hypium_replay_started") && !hasEvent(events, "execution_finished") && replayFinished < 3);
+  const replayed = hasEvent(events, "execution_finished") || replayFinished >= 3
+    || Boolean(trace?.replays.length) || Boolean(trace?.profile_validation_replays?.length);
   const reportDone = reportReady || (terminal && scripted);
 
   const skipReplay = terminal && !replaying && !replayed
@@ -42,7 +49,8 @@ export function derivePipeline(events: RunEvent[], trace: RunTrace | null, repor
     perceived ? "done" : captured ? "active" : "pending",
     planned ? "done" : terminal ? "skipped" : "pending",
     explored ? "done" : exploring ? "active" : terminal ? "skipped" : "pending",
-    scripted ? "done" : replaying || replayed ? "done" : terminal ? "skipped" : "pending",
+    verified ? "done" : verifying ? "active" : terminal ? "skipped" : "pending",
+    scripted ? "done" : verified ? "active" : terminal ? "skipped" : "pending",
     replayed ? "done" : replaying ? "active" : skipReplay ? "skipped" : "pending",
     reportDone ? "done" : terminal ? (scripted ? "active" : "pending") : "pending",
   ];
@@ -55,6 +63,7 @@ const PIPELINE_LABELS: Array<[string, string]> = [
   ["perceive", "感知"],
   ["plan", "规划"],
   ["explore", "探索"],
+  ["verify", "验证"],
   ["script", "脚本"],
   ["replay", "回放"],
   ["report", "报告"],

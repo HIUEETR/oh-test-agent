@@ -1,7 +1,9 @@
 // 顾问对话视图：完整展示探索顾问每轮 LLM 调用的输入（截图+候选列表）与输出（结构化建议）。
-// 数据源：/api/runs/{id}/discovery 的 advisor_log（后端增量字段），轮询期间持续增长。
+// 数据源：SSE 实时累积的 advisor_turn 留痕（探索进行中即可见）+ /api/runs/{id}/discovery 的
+// advisor_log（探索结束后的完整快照），按轮次合并去重。
 
 import { BrainCircuit, MessageSquareQuote, ScanEye } from "lucide-react";
+import { useMemo } from "react";
 import { EmptyState, JsonViewer, RetryImage } from "../../components/ui/primitives";
 import { useConsole } from "../../stores/console";
 import { artifactUrl } from "../../utils/artifact";
@@ -10,8 +12,15 @@ import type { AdvisorTurnRecord, AdvisorVerdictEntry } from "../../api/types";
 export function AdvisorPanel() {
   const runId = useConsole((state) => state.runId);
   const discovery = useConsole((state) => state.discovery);
+  const liveTurns = useConsole((state) => state.advisorTurns);
   const health = useConsole((state) => state.health);
-  const turns = discovery?.advisor_log ?? [];
+  const turns = useMemo(() => {
+    const byTurn = new Map<number, AdvisorTurnRecord>();
+    for (const turn of [...(discovery?.advisor_log ?? []), ...liveTurns]) {
+      byTurn.set(turn.turn, turn);
+    }
+    return [...byTurn.values()].sort((a, b) => a.turn - b.turn);
+  }, [discovery?.advisor_log, liveTurns]);
 
   const verdictCount = turns.filter((turn) => turn.output).length;
   const mockModel = Boolean(health && !health.model.configured);

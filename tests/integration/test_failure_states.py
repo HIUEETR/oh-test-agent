@@ -100,6 +100,7 @@ def make_orchestrator(tmp_path: Path, device: MinimalDevice, provider: MockAgent
         artifacts=ArtifactStore(settings.resolved_runtime_dir),
         device_factory=lambda _: device,
         settle_seconds=0,
+        launch_settle_seconds=0,
     )
 
 

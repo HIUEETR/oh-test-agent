@@ -53,7 +53,8 @@ class SafetyPolicy:
                 "allow_download": ("下载", "保存到本地", "download", "save file"),
             }
 
-    def _blocked_match(self, text: str) -> str | None:
+    def _permanent_match(self, text: str) -> str | None:
+        """永久禁用项与凭证词：在任务文本层面也应拒绝。"""
         lowered = text.casefold()
         permanent = next((term for term in self.always_blocked if term.casefold() in lowered), None)
         if permanent:
@@ -67,9 +68,11 @@ class SafetyPolicy:
             "passcode",
             "pin",
         )
-        credential = next((term for term in credentials if term.casefold() in lowered), None)
-        if credential:
-            return credential
+        return next((term for term in credentials if term.casefold() in lowered), None)
+
+    def _gated_match(self, text: str) -> str | None:
+        """门控词按 allow_* 开关匹配；只在工具决策层面调用，避免误伤任务描述里的日常用语。"""
+        lowered = text.casefold()
         policy = self.exploration_policy
         for permission, terms in (self.gated_terms or {}).items():
             if not bool(policy and getattr(policy, permission, False)):
@@ -78,8 +81,12 @@ class SafetyPolicy:
                     return min(candidates)[1]
         return None
 
+    def _blocked_match(self, text: str) -> str | None:
+        return self._permanent_match(text) or self._gated_match(text)
+
     def validate_task(self, task: str) -> None:
-        match = self._blocked_match(task)
+        """任务描述只拦永久禁用项与凭证词；"确认/提交/发送"等门控词留给工具决策层面拦截。"""
+        match = self._permanent_match(task)
         if match:
             raise SafetyError(f"task contains blocked operation: {match}")
 

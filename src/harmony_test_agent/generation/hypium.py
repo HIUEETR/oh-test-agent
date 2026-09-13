@@ -11,6 +11,9 @@ from pathlib import Path
 from ..models import ActionResult, GeneratedArtifact, LocatorKind, RunState, RunTrace, TargetAppProfile, ToolName
 from ..storage import ArtifactStore
 
+# Hypium Driver 的 swipe 只接受大写方向枚举（RIGHT/LEFT/UP/DOWN），小写会在设备端抛参数错误。
+_SWIPE_DIRECTIONS = frozenset({"UP", "DOWN", "LEFT", "RIGHT"})
+
 
 @dataclass
 class GenerationCoverage:
@@ -156,7 +159,13 @@ class HypiumGenerator:
                 coverage.lines.append(f"        driver.input_text({selector}, {action.params.get('text', '')!r})")
                 coverage.generated_actions += 1
             elif tool == ToolName.SWIPE:
-                coverage.lines.append(f"        driver.swipe({(action.params.get('direction') or 'up')!r})")
+                direction = str(action.params.get("direction") or "up").upper()
+                if direction not in _SWIPE_DIRECTIONS:
+                    coverage.warnings.append(
+                        f"{action.step_id}: unknown swipe direction {action.params.get('direction')!r}, fallback to UP"
+                    )
+                    direction = "UP"
+                coverage.lines.append(f"        driver.swipe({direction!r})")
                 coverage.generated_actions += 1
             elif tool == ToolName.BACK:
                 coverage.lines.append("        driver.go_back()")
