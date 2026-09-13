@@ -223,6 +223,8 @@ stable key/id
 
 `target_variants` 会从“搜索图标/搜索框”“首页界面元素”“内容列表中的一条内容”等自然语言中提取可匹配语义，但精确 `element_id` 优先。
 
+`click_element` 目标解析为两级：先按 `clickable=True` 严格匹配，失败时放宽为任意带边界的匹配元素（滚轮选择器/自绘控件常不标记 clickable，坐标点击仍有效）并写入动作告警；目标带 bbox 的元素也可作为 `swipe` 的锚点——以元素 bbox 中心为轴、行程为元素尺寸一半滑动（滚轮列调值），无 target 时维持屏幕中心滑动。
+
 VLM 元素必须满足：
 
 - bbox 在截图边界内；
