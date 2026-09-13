@@ -166,23 +166,25 @@ def test_find_installed_apps_resolves_launcher_label_across_pages(tmp_path: Path
     ]
     assert device.collect_calls == 3
     assert device.swipe_calls == 2
-    assert not any("Home" in " ".join(args) for args in device.run_calls)
+    # Home 必须无条件发送：即使桌面已在前台也要回到主页，从第 0 页扫起（回归 2026-09-13）。
+    assert any("Home" in " ".join(args) for args in device.run_calls)
 
 
-def test_find_installed_apps_presses_home_when_not_on_launcher(tmp_path: Path, monkeypatch) -> None:
+def test_find_installed_apps_aborts_scan_when_home_does_not_reach_launcher(tmp_path: Path, monkeypatch) -> None:
+    """按 Home 后前台仍不是桌面：当前页不是桌面层级，扫描中止并回退完整目录匹配。"""
     monkeypatch.setattr("harmony_test_agent.devices.harmony.time.sleep", lambda seconds: None)
     device = ScriptedDevice(
         tmp_path,
         bundles="\n".join(PAGE_BUNDLES) + "\n",
         metadata={bundle: bundle_metadata(bundle, "$string:app_name") for bundle in PAGE_BUNDLES},
-        foreground=["com.example.other", "com.ohos.sceneboard"],
+        foreground=["com.example.other"],
         pages=[PAGE_ONE, PAGE_TWO],
     )
 
     apps = device.find_installed_apps("知乎++")
 
-    assert [app.bundle_name for app in apps] == ["com.github.zhuoyi233.zhplus"]
     assert any("Home" in " ".join(args) for args in device.run_calls)
+    assert apps == []
 
 
 def test_find_installed_apps_falls_back_to_catalog_when_launcher_scan_fails(tmp_path: Path, monkeypatch) -> None:
