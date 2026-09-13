@@ -63,6 +63,8 @@ class ProfileVerifier:
         analyzer: StabilityAnalyzer | None = None,
         should_stop: Callable[[], bool] | None = None,
         min_interaction_kinds: int = 2,
+        on_round_started: Callable[[int], None] | None = None,
+        on_round_finished: Callable[[VerificationRound], None] | None = None,
     ) -> None:
         self.device = device
         self.target = target
@@ -71,6 +73,8 @@ class ProfileVerifier:
         self.analyzer = analyzer or StabilityAnalyzer()
         self.should_stop = should_stop or (lambda: False)
         self.min_interaction_kinds = max(min_interaction_kinds, 1)
+        self.on_round_started = on_round_started
+        self.on_round_finished = on_round_finished
         self._replay_resolver = BoundedExplorer(
             device,
             target,
@@ -93,11 +97,18 @@ class ProfileVerifier:
             self._save(result)
             return result
 
+        def finish_round(round_result: VerificationRound) -> None:
+            result.rounds.append(round_result)
+            if self.on_round_finished is not None:
+                self.on_round_finished(round_result)
+
         for round_number in range(1, 4):
+            if self.on_round_started is not None:
+                self.on_round_started(round_number)
             current = VerificationRound(round_number=round_number, passed=False)
             if self.should_stop():
                 current.failures.append("stopped by user")
-                result.rounds.append(current)
+                finish_round(current)
                 break
             stopped = self.device.stop_app(self.target.bundle_name)
             started = (
@@ -107,13 +118,13 @@ class ProfileVerifier:
             )
             if not stopped.ok or started is None or not started.ok:
                 current.failures.append("independent stop/start failed")
-                result.rounds.append(current)
+                finish_round(current)
                 continue
             self.device.wait(0.5)
 
             foreground = self._target_foreground(current)
             if foreground is None:
-                result.rounds.append(current)
+                finish_round(current)
                 continue
             snapshot = self._replay_resolver._capture_settled(f"profile-verification-{round_number}-00")
             current.resolution = (snapshot.width, snapshot.height)
@@ -217,7 +228,7 @@ class ProfileVerifier:
             log_path = self.output_dir / f"round-{round_number:02d}.hilog.txt"
             self.device.collect_logs(log_path)
             result.log_paths.append(log_path)
-            result.rounds.append(current)
+            finish_round(current)
 
         result.stability = self.analyzer.analyze(all_locators, all_assertions)
         if len(discovery.interaction_types) < self.min_interaction_kinds:

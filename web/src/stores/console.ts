@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import { apiError, apiJson, apiUrl, locks, responseDetail } from "../api/client";
 import type {
+  AdvisorTurnRecord,
   DiscoveryPolicy,
   DiscoveryStatus,
   ExecuteResult,
@@ -52,6 +53,8 @@ interface ConsoleState {
   trace: RunTrace | null;
   discovery: DiscoveryStatus | null;
   events: RunEvent[];
+  /** 从 discovery_progress(stage=advisor_turn) 事件实时累积的顾问对话留痕（REST advisor_log 只在探索结束后可见）。 */
+  advisorTurns: AdvisorTurnRecord[];
   candidates: TargetCandidate[];
   selectedCandidate: string;
   script: ScriptResult | null;
@@ -111,6 +114,7 @@ export const useConsole = create<ConsoleState>()((set, get) => ({
   trace: null,
   discovery: null,
   events: [],
+  advisorTurns: [],
   candidates: [],
   selectedCandidate: "",
   script: null,
@@ -266,6 +270,12 @@ export const useConsole = create<ConsoleState>()((set, get) => ({
     if (event.type === "target_candidates_found" && Array.isArray(event.payload.candidates)) {
       set({ candidates: event.payload.candidates as TargetCandidate[] });
     }
+    if (event.type === "discovery_progress" && event.payload.stage === "advisor_turn") {
+      const turn = event.payload.turn as AdvisorTurnRecord | undefined;
+      if (turn && !get().advisorTurns.some((item) => item.turn === turn.turn)) {
+        set({ advisorTurns: [...get().advisorTurns, turn].sort((a, b) => a.turn - b.turn) });
+      }
+    }
   },
 
   refreshTrace: async (quiet = false) => {
@@ -409,6 +419,9 @@ export const useConsole = create<ConsoleState>()((set, get) => ({
 
   /** 清空运行相关视图状态（启动/切换运行时调用）。 */
   resetRunView: () => {
-    set({ trace: null, discovery: null, events: [], script: null, candidates: [], selectedCandidate: "", reportReady: false });
+    set({
+      trace: null, discovery: null, events: [], advisorTurns: [], script: null,
+      candidates: [], selectedCandidate: "", reportReady: false,
+    });
   },
 }));

@@ -505,8 +505,8 @@ async def test_same_run_discovers_promotes_then_executes_original_task(
     orchestrator = _orchestrator(tmp_path, device)
     _patch_discovery(monkeypatch, verification_passed=True)
 
-    async def successful_replays(runner, generated, run_id: str, attempts: int):
-        del runner, generated, run_id
+    async def successful_replays(runner, generated, run_id: str, attempts: int, emitter=None):
+        del runner, generated, run_id, emitter
         assert attempts == 3
         return _replays(True, True, True)
 
@@ -626,8 +626,8 @@ async def test_failed_admission_replay_keeps_candidate_and_prevents_promotion(
     orchestrator = _orchestrator(tmp_path, device)
     _patch_discovery(monkeypatch, verification_passed=True)
 
-    async def failing_replays(runner, generated, run_id: str, attempts: int):
-        del runner, generated, run_id
+    async def failing_replays(runner, generated, run_id: str, attempts: int, emitter=None):
+        del runner, generated, run_id, emitter
         assert attempts == 3
         return _replays(True, False, True)
 
@@ -645,6 +645,66 @@ async def test_failed_admission_replay_keeps_candidate_and_prevents_promotion(
     assert candidate.status == ProfileStatus.CANDIDATE
     assert registry.get(target_app_id=TARGET_A, status=ProfileStatus.VERIFIED) is None
     assert not any(event.type == EventType.PROFILE_PROMOTED for event in trace.events)
+
+
+async def test_failed_quick_revalidation_keeps_verified_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """快速复验失败只记录证据并转入完整探索，不得销毁既有 verified Profile。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device)
+    registry = ProfileRegistry(orchestrator.settings.resolved_profiles_dir)
+    _promote(registry, _profile())
+    _patch_discovery(monkeypatch, verification_passed=True)
+
+    async def successful_replays(runner, generated, run_id: str, attempts: int, emitter=None):
+        del runner, generated, run_id, emitter
+        return _replays(True, True, True)
+
+    monkeypatch.setattr(orchestrator, "_run_replays", successful_replays)
+    trace = await orchestrator.run(
+        RunRequest(target={"bundle_name": BUNDLE_A}, task="check target home", auto_generate=False),
+        run_id="run-keep-verified",
+    )
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    revalidation = [event for event in trace.events if event.type == EventType.PROFILE_REVALIDATION_FINISHED]
+    assert revalidation[-1].payload["passed"] is False
+    assert revalidation[-1].payload["kept"] is True
+    assert any(event.type == EventType.PROFILE_VERIFICATION_STARTED for event in trace.events)
+    # 旧 verified Profile 未被失效，新一轮探索晋级后自然覆盖
+    stored = registry.read(TARGET_A, ProfileStatus.VERIFIED)
+    assert stored.provenance.discovery_run_id == trace.run_id
+    assert any(
+        item.provenance.evidence.get("quick_verification", {}).get("passed") is False
+        for item in registry.history(BUNDLE_A)
+    )
+
+
+async def test_replay_events_stream_per_attempt(tmp_path: Path, monkeypatch) -> None:
+    """Hypium 回放事件逐次推送：每次尝试的开始/完成交错出现，而非全部结束后补发。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device)
+    _patch_discovery(monkeypatch, verification_passed=True)
+    monkeypatch.setattr(
+        "harmony_test_agent.agents.orchestrator.HypiumRunner.execute",
+        lambda self, generated, attempt: _replays(True, True, True)[attempt - 1],
+    )
+    trace = await orchestrator.run(
+        RunRequest(target={"bundle_name": BUNDLE_A}, task="check target home", auto_generate=False),
+        run_id="run-stream-replays",
+    )
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    types = [event.type for event in trace.events]
+    started_index = [index for index, item in enumerate(types) if item == EventType.HYPIUM_REPLAY_STARTED]
+    finished_index = [index for index, item in enumerate(types) if item == EventType.HYPIUM_REPLAY_FINISHED]
+    assert len(started_index) == 3
+    assert len(finished_index) == 3
+    assert all(start < finish for start, finish in zip(started_index, finished_index, strict=True))
+    assert all(finish < start for finish, start in zip(finished_index[:-1], started_index[1:], strict=True))
+    assert [item.attempt for item in trace.profile_validation_replays] == [1, 2, 3]
 
 
 def test_profile_api_lifecycle_errors_and_explicit_history_rollback(tmp_path: Path) -> None:

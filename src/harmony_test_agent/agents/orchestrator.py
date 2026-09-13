@@ -325,7 +325,7 @@ class AgentOrchestrator:
                 trace.state = RunState.SCRIPT_EXECUTING
                 emitter.emit(EventType.EXECUTION_STARTED, "开始执行生成的 Hypium 用例")
                 runner = HypiumRunner(self.settings.resolved_runtime_home)
-                trace.replays = await self._run_replays(runner, trace.generated, trace.run_id, 3)
+                trace.replays = await self._run_replays(runner, trace.generated, trace.run_id, 3, emitter)
                 self._update_replay_summary(trace)
                 if not all(item.passed for item in trace.replays):
                     raise ToolExecutionError("one or more Hypium replay attempts failed", RunState.FAILED_SCRIPT)
@@ -483,10 +483,23 @@ class AgentOrchestrator:
                 emitter.emit(EventType.PROFILE_REVALIDATION_FINISHED, "Profile 快速复验通过", {"passed": True})
                 return existing
             emitter.emit(
-                EventType.PROFILE_REVALIDATION_FINISHED, "Profile 快速复验失败，转入完整探索", {"passed": False}
+                EventType.PROFILE_REVALIDATION_FINISHED,
+                "Profile 快速复验失败，保留既有 Profile 并转入完整探索重新验证",
+                {"passed": False, "kept": True},
             )
-            if not existing.locked:
-                registry.invalidate(existing.target_app_id, "quick revalidation failed")
+            # 复验失败不销毁 verified Profile：单次失败可能来自内容抖动或临时环境问题，
+            # 完整探索成功晋级时 promote 会自然覆盖旧文件；手动失效仍走 Profile 页操作。
+            evidence = dict(existing.provenance.evidence)
+            evidence["quick_verification"] = {
+                "passed": False,
+                "checked_at": utc_now().isoformat(),
+                "run_id": trace.run_id,
+            }
+            existing = existing.model_copy(
+                update={"provenance": existing.provenance.model_copy(update={"evidence": evidence}, deep=True)},
+                deep=True,
+            )
+            registry.update_verified(existing)
 
         if not request.exploration_policy.enabled:
             if request.bootstrap_only:
@@ -564,6 +577,27 @@ class AgentOrchestrator:
                 event_type = EventType.DISCOVERY_PROGRESS
             emitter.emit(event_type, "自动探索进度", payload)
 
+        def exploration_snapshot(snapshot: ScreenSnapshot) -> None:
+            """把探索期的每一帧推进 trace 与事件流，驱动实时视图的设备画面与元素表。"""
+            trace.snapshots.append(snapshot)
+            emitter.emit(
+                EventType.SCREEN_CAPTURED,
+                "已采集本地截图",
+                {
+                    "snapshot_id": snapshot.snapshot_id,
+                    "image_path": str(snapshot.image_path),
+                    "width": snapshot.width,
+                    "height": snapshot.height,
+                    "sha256": snapshot.image_sha256,
+                    "summary": snapshot.summary,
+                },
+            )
+            emitter.emit(
+                EventType.ELEMENTS_DETECTED,
+                f"识别到 {len(snapshot.elements)} 个元素",
+                {"snapshot_id": snapshot.snapshot_id, "count": len(snapshot.elements)},
+            )
+
         advisor: ExplorationAdvisor | None = None
         if request.exploration_policy.advisor_enabled and not self.provider.mock:
             advisor = ExplorationAdvisor(self.provider, request.exploration_policy)
@@ -577,6 +611,7 @@ class AgentOrchestrator:
                 progress=discovery_progress,
                 should_stop=lambda: self._should_stop(trace.run_id),
                 advisor=advisor,
+                on_snapshot=exploration_snapshot,
             ).explore
         )
         if discovery.stop_reason == "stopped_by_user":
@@ -604,6 +639,7 @@ class AgentOrchestrator:
         self.artifacts.write_json(run_dir / "discovery" / "draft-profile.json", draft)
         emitter.emit(EventType.PROFILE_DRAFT_SAVED, "已保存 draft Profile", {"path": str(draft_path)})
         trace.state = RunState.PROFILE_VERIFYING
+        emitter.emit(EventType.PROFILE_VERIFICATION_STARTED, "开始 Profile 设备验证（3 轮独立重启回放）", {})
         verification = await asyncio.to_thread(
             ProfileVerifier(
                 device,
@@ -612,16 +648,21 @@ class AgentOrchestrator:
                 trace.run_id,
                 should_stop=lambda: self._should_stop(trace.run_id),
                 min_interaction_kinds=request.exploration_policy.min_interaction_kinds,
+                # 每轮开始/结束即时推送：验证全程约数分钟，攒批发送会让实时视图长时间无反馈。
+                on_round_started=lambda number: emitter.emit(
+                    EventType.PROFILE_VERIFICATION_ROUND_STARTED,
+                    f"Profile 验证第 {number} 轮开始",
+                    {"round_number": number},
+                ),
+                on_round_finished=lambda round_result: emitter.emit(
+                    EventType.PROFILE_VERIFICATION_ROUND_FINISHED,
+                    f"Profile 验证第 {round_result.round_number} 轮完成",
+                    round_result.model_dump(mode="json"),
+                ),
             ).verify,
             discovery,
         )
         trace.verification_result = verification.model_dump(mode="json", exclude={"rounds": {"__all__": {"snapshots"}}})
-        for round_result in verification.rounds:
-            emitter.emit(
-                EventType.PROFILE_VERIFICATION_ROUND_FINISHED,
-                f"Profile 验证第 {round_result.round_number} 轮完成",
-                round_result.model_dump(mode="json"),
-            )
         if not verification.passed:
             failed_draft = draft.model_copy(update={"status": ProfileStatus.INVALID}, deep=True)
             registry.save_draft(failed_draft)
@@ -663,14 +704,8 @@ class AgentOrchestrator:
         trace.state = RunState.SCRIPT_EXECUTING
         runner = HypiumRunner(self.settings.resolved_runtime_home)
         trace.profile_validation_replays = await self._run_replays(
-            runner, trace.profile_validation_generated, trace.run_id, 3
+            runner, trace.profile_validation_generated, trace.run_id, 3, emitter
         )
-        for replay in trace.profile_validation_replays:
-            emitter.emit(
-                EventType.HYPIUM_REPLAY_FINISHED,
-                f"Profile Hypium 回放第 {replay.attempt} 次完成",
-                replay.model_dump(mode="json"),
-            )
         if not all(item.passed for item in trace.profile_validation_replays):
             raise ToolExecutionError("Profile Hypium replay gate failed", RunState.FAILED_SCRIPT)
         trace.state = RunState.PROFILE_PROMOTING
@@ -865,7 +900,9 @@ class AgentOrchestrator:
             for page in pages
         }
         if any(locator is None for locator in page_locators.values()):
-            return False
+            # 旧版 Profile 的 core_flows.pages 是发现期整树签名，与验证期定位器的结构身份
+            # 不在同一哈希空间，映射可能整体失败；退回入口页强定位器检查而不是直接判失败。
+            return self._legacy_entry_revalidate(device, resolved, profile, trace, output_dir)
         for page_index, page_signature in enumerate(pages):
             foreground = device.current_foreground_app()
             if (
@@ -1053,7 +1090,9 @@ class AgentOrchestrator:
             else [],
             core_flows=[
                 {
-                    "pages": [page.signature for page in ProfileVerifier._core_pages(discovery)],
+                    # pages 必须与验证期定位器的页签名同空间：结构身份跨启动稳定，
+                    # 整树签名随信息流内容抖动，会导致快速复验的页面映射恒失败。
+                    "pages": [page.structural_identity for page in ProfileVerifier._core_pages(discovery)],
                     "page_ids": [page.page_id for page in ProfileVerifier._core_pages(discovery)],
                     "steps": [
                         action.model_dump(mode="json")
@@ -1089,13 +1128,20 @@ class AgentOrchestrator:
             ),
         )
 
-    async def _run_replays(self, runner, generated, run_id: str, attempts: int):
+    async def _run_replays(self, runner, generated, run_id: str, attempts: int, emitter: RunEventEmitter):
         """Execute replay attempts independently and honor stop requests between attempts."""
         results = []
         for attempt in range(1, attempts + 1):
             if self._should_stop(run_id):
                 raise asyncio.CancelledError
-            results.append(await asyncio.to_thread(runner.execute, generated, attempt))
+            emitter.emit(EventType.HYPIUM_REPLAY_STARTED, f"Hypium 回放第 {attempt} 次开始", {"attempt": attempt})
+            replay = await asyncio.to_thread(runner.execute, generated, attempt)
+            results.append(replay)
+            emitter.emit(
+                EventType.HYPIUM_REPLAY_FINISHED,
+                f"Hypium 回放第 {replay.attempt} 次完成",
+                replay.model_dump(mode="json"),
+            )
         return results
 
     async def _capture(self, trace, emitter, device, perception, graph, label):

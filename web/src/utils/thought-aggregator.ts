@@ -61,6 +61,20 @@ function noticePhase(level: NoticeLevel): ThoughtPhase {
 
 type NoticeLevel = "info" | "success" | "warn" | "error";
 
+/** 探索停止原因的可读描述：探索早停不是整个运行的终点，后续仍会进行 Profile 验证与回放。 */
+const STOP_REASON_LABELS: Record<string, string> = {
+  admission_metrics_reached: "已达准入指标，探索提前完成，继续 Profile 验证与回放",
+  page_limit: "达到页面上限，继续 Profile 验证与回放",
+  duration_limit: "达到时长上限，继续 Profile 验证与回放",
+  queue_exhausted: "候选页面探索完毕，继续 Profile 验证与回放",
+  stopped_by_user: "已由用户停止探索",
+  disabled: "自动探索未启用",
+};
+
+function describeStopReason(reason: string): string {
+  return STOP_REASON_LABELS[reason] ?? `探索停止：${reason}`;
+}
+
 /** 已知事件的展示规则表：level 决定相位，部分事件跳过（由专用块或页面图呈现）。 */
 const NOTICE_RULES: Record<string, { level: NoticeLevel; skip?: boolean }> = {
   run_started: { level: "info" },
@@ -74,8 +88,11 @@ const NOTICE_RULES: Record<string, { level: NoticeLevel; skip?: boolean }> = {
   profile_revalidation_finished: { level: "success" },
   profile_live_mode: { level: "warn" },
   profile_draft_saved: { level: "success" },
+  profile_verification_started: { level: "info" },
+  profile_verification_round_started: { level: "info" },
   profile_verification_round_finished: { level: "success" },
   profile_promoted: { level: "success" },
+  hypium_replay_started: { level: "info" },
   hypium_replay_finished: { level: "success" },
   discovery_started: { level: "info" },
   discovery_finished: { level: "success" },
@@ -229,7 +246,7 @@ export function aggregateThoughts(events: RunEvent[]): ThoughtBlock[] {
           || event.type === "hypium_replay_finished" || event.type === "execution_finished") {
           level = payload.passed === false ? "error" : "success";
         }
-        const detail = typeof payload.stop_reason === "string" ? `停止原因：${payload.stop_reason}`
+        const detail = typeof payload.stop_reason === "string" ? describeStopReason(payload.stop_reason)
           : typeof payload.error === "string" ? payload.error
           : typeof payload.task === "string" ? payload.task
           : typeof payload.bundle_name === "string" ? payload.bundle_name

@@ -173,6 +173,7 @@ class ActionRiskClassifier:
 
 
 DiscoveryProgress = Callable[[str, dict[str, object]], None]
+SnapshotListener = Callable[[ScreenSnapshot], None]
 
 _LOADING_TEXT_PATTERN = re.compile(r"正在加载|加载中|加载更多|loading|refreshing|请稍候|请等待", re.IGNORECASE)
 _TIME_TEXT_PATTERN = re.compile(r"^\d{1,2}[:：]\d{2}([:：]\d{2})?$")
@@ -198,6 +199,7 @@ class BoundedExplorer:
         progress: DiscoveryProgress | None = None,
         should_stop: Callable[[], bool] | None = None,
         advisor: ExplorationAdvisor | None = None,
+        on_snapshot: SnapshotListener | None = None,
     ) -> None:
         self.device = device
         self.target = target
@@ -208,6 +210,7 @@ class BoundedExplorer:
         self.progress = progress
         self.should_stop = should_stop or (lambda: False)
         self.advisor = advisor
+        self.on_snapshot = on_snapshot
         # 结构身份 -> (建议, 来源, 建议时的候选摘要)；候选摘要用于把编号建议映射回可读控件。
         self._advisor_verdicts: dict[str, tuple[AdvisorVerdict, str, list[dict[str, object]]]] = {}
         self._advisor_summaries: list[str] = []
@@ -677,6 +680,7 @@ class BoundedExplorer:
             return transition, None
         self.device.wait(0.5)
         after = self.device.screenshot(self.output_dir, self.run_id, f"discovery-{sequence + 1:03d}")
+        self._report_snapshot(after)
         transition.after_snapshot_id = after.snapshot_id
         after_foreground = self.device.current_foreground_app()
         transition.foreground_after = after_foreground
@@ -758,10 +762,17 @@ class BoundedExplorer:
             raise DeviceError(self._restore_mismatch_detail(expected, snapshot))
         return snapshot, foreground
 
+    def _report_snapshot(self, snapshot: ScreenSnapshot) -> None:
+        """Push one settled exploration frame to the live view (device screen + element table)."""
+        if self.on_snapshot is None:
+            return
+        self.on_snapshot(snapshot)
+
     def _capture_settled(self, label: str) -> ScreenSnapshot:
         """Capture one frame and poll the hierarchy within the settle budget for stability."""
         snapshot = self.device.screenshot(self.output_dir, self.run_id, label)
         if self.policy.settle_timeout_seconds <= 0:
+            self._report_snapshot(snapshot)
             return snapshot
         fingerprint = self._stability_fingerprint(snapshot.page_path, snapshot.elements)
         deadline = time.monotonic() + self.policy.settle_timeout_seconds
@@ -773,8 +784,11 @@ class BoundedExplorer:
                 break
             elements = normalize_layout(hierarchy, snapshot.width, snapshot.height)
             if self._stability_fingerprint(page_path(hierarchy), elements) == fingerprint:
+                self._report_snapshot(snapshot)
                 return snapshot
-        return self.device.screenshot(self.output_dir, self.run_id, f"{label}-settled")
+        snapshot = self.device.screenshot(self.output_dir, self.run_id, f"{label}-settled")
+        self._report_snapshot(snapshot)
+        return snapshot
 
     @classmethod
     def _stability_fingerprint(cls, page: str, elements: list[UIElement]) -> tuple[str, int, tuple[str, ...]]:
