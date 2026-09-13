@@ -5,6 +5,7 @@ from pathlib import Path
 from harmony_test_agent.agents import AgentOrchestrator
 from harmony_test_agent.discovery import (
     BoundedExplorer,
+    DiscoveryPage,
     DiscoveryResult,
     DiscoveryTransition,
     ExplorationAction,
@@ -339,3 +340,98 @@ def test_core_flow_pages_share_locator_identity_space(tmp_path: Path) -> None:
     assert flow_pages <= locator_pages
     # 页面身份来自结构身份而不是发现期整树签名
     assert flow_pages == {page.structural_identity for page in discovery.pages if page.structural_identity}
+
+
+class _DriftingHomeDevice(FakeVerificationDevice):
+    """首页在验证期发生结构漂移的假设备：可注入额外控件或改变原控件可点击性。"""
+
+    def __init__(self, tmp_path: Path, *, home_clickable: bool = True) -> None:
+        super().__init__(tmp_path)
+        self.home_clickable = home_clickable
+        self.extra_control: str | None = None
+
+    def snapshot_for_page(self, page: int, *, label: str = "fixture") -> ScreenSnapshot:
+        snapshot = super().snapshot_for_page(page, label=label)
+        if page != 0:
+            return snapshot
+        elements = [element.model_copy(update={"clickable": self.home_clickable}) for element in snapshot.elements]
+        if self.extra_control:
+            elements.append(
+                UIElement(
+                    element_id=self.extra_control,
+                    key=self.extra_control,
+                    type="Button",
+                    clickable=True,
+                    enabled=True,
+                    bbox=BoundingBox(left=10, top=10, right=60, bottom=50),
+                )
+            )
+        return snapshot.model_copy(update={"elements": elements})
+
+
+def test_verification_first_page_accepts_structural_superset(tmp_path: Path) -> None:
+    """冷启动首页比探索期多出内容控件（结构超集）时，第一页身份按子集匹配放行。"""
+    device = _DriftingHomeDevice(tmp_path)
+    discovery = _discovery(device)
+    device.extra_control = "promo-banner"
+
+    verifier = ProfileVerifier(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "superset",
+        run_id="superset-run",
+    )
+    result = verifier.verify(discovery)
+
+    assert result.passed
+    assert not any("page identity mismatch" in failure for failure in result.failures)
+
+
+def test_verification_first_page_still_rejects_different_structure(tmp_path: Path) -> None:
+    """可交互结构不同（控件不再可点击）时，子集匹配不通过，身份不匹配照常失败。"""
+    device = _DriftingHomeDevice(tmp_path)
+    discovery = _discovery(device)
+    device.home_clickable = False
+
+    verifier = ProfileVerifier(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "different",
+        run_id="different-run",
+    )
+    result = verifier.verify(discovery)
+
+    assert not result.passed
+    assert any(
+        "page identity mismatch" in round_failure
+        for round_result in result.rounds
+        for round_failure in round_result.failures
+    )
+
+
+def test_identity_subset_requires_identity_features(tmp_path: Path) -> None:
+    """旧探索结果没有身份特征字段时，子集匹配不可用（维持全等校验）。"""
+    device = FakeVerificationDevice(tmp_path)
+    snapshot = device.snapshot_for_page(0)
+    page = DiscoveryPage(
+        page_id="legacy",
+        signature="legacy-signature",
+        page_path=snapshot.page_path,
+        bundle_name=_target().bundle_name,
+        snapshot_id=snapshot.snapshot_id,
+        image_path=snapshot.image_path,
+        element_count=len(snapshot.elements),
+        discovered_order=1,
+    )
+
+    assert ProfileVerifier._identity_subset(page, snapshot) is False
+
+
+def test_discovery_page_serializes_identity_features(tmp_path: Path) -> None:
+    device = FakeVerificationDevice(tmp_path)
+    page = BoundedExplorer._page(device.snapshot_for_page(0), device.current_foreground_app(), 1)
+
+    restored = DiscoveryPage.model_validate(page.model_dump(mode="json"))
+
+    assert restored.identity_keys == page.identity_keys and restored.identity_keys
+    assert restored.identity_interactive == page.identity_interactive and restored.identity_interactive

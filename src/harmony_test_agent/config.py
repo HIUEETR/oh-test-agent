@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     agent_action_timeout: float = Field(default=30, gt=0, le=300)
     agent_model_timeout: float = Field(default=90, gt=0, le=300)
     agent_retry_limit: int = Field(default=2, ge=0, le=5)
+    agent_step_recovery_limit: int = Field(default=2, ge=0, le=5)
     unchanged_screen_limit: int = Field(default=2, ge=1, le=5)
     vlm_min_confidence: float = Field(default=0.55, ge=0, le=1)
     harmony_cors_origins: Annotated[list[str], NoDecode] = Field(

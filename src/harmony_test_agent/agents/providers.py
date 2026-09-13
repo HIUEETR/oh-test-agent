@@ -76,7 +76,10 @@ current screenshot proves it inappropriate. For click_element and input_text, us
 elements as target; do not return a descriptive label when an exact element_id exists. If a visible control is absent
 from Current elements but is unambiguous in the screenshot, use click_coordinate with pixel coordinates relative to
 the supplied image. For wheel pickers (hour/minute/AM-PM columns), set swipe target to the column's element_id to
-swipe inside that column instead of at the screen center. Do not guess that a hierarchy element represents a visual
+swipe inside that column instead of at the screen center. When recovery feedback is provided, the previous attempt at
+this step failed: you may first take corrective actions (for example an anchored swipe inside a wheel column or
+clicking another control) and re-attempt the planned goal, including re-issuing its assertion once the state matches.
+Do not guess that a hierarchy element represents a visual
 control when its content or bbox does not support that conclusion. If a back step intends to navigate while a soft
 keyboard is visible, prefer the visible
 in-app back control because a system back may only dismiss the keyboard. If the desired destination is already visible,
@@ -189,8 +192,13 @@ class AgentProvider(ABC):
         ...
 
     @abstractmethod
-    async def decide(self, step: PlannedStep, snapshot: ScreenSnapshot | None) -> ToolDecision:
-        """结合计划步骤和当前快照选择一个受支持的工具动作。"""
+    async def decide(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        feedback: str | None = None,
+    ) -> ToolDecision:
+        """结合计划步骤和当前快照选择一个受支持的工具动作；feedback 为恢复尝试的失败反馈。"""
         ...
 
     async def advise_turn(
@@ -271,7 +279,12 @@ class MockAgentProvider(AgentProvider):
         """分析屏幕快照并返回可选的视觉观察结果。"""
         return None
 
-    async def decide(self, step: PlannedStep, snapshot: ScreenSnapshot | None) -> ToolDecision:
+    async def decide(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        feedback: str | None = None,
+    ) -> ToolDecision:
         """结合计划步骤和当前快照选择一个受支持的工具动作。"""
         tool = step.tool
         if tool == ToolName.BACK and "返回首页" in step.instruction and snapshot:
@@ -360,7 +373,12 @@ class OpenAICompatibleProvider(AgentProvider):
         )
         return result.output
 
-    async def decide(self, step: PlannedStep, snapshot: ScreenSnapshot | None) -> ToolDecision:
+    async def decide(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        feedback: str | None = None,
+    ) -> ToolDecision:
         """结合计划步骤和当前快照选择一个受支持的工具动作。"""
         from pydantic_ai import Agent, BinaryContent, PromptedOutput
 
@@ -388,9 +406,12 @@ class OpenAICompatibleProvider(AgentProvider):
             }
             for item in snapshot.elements[:120]
         ]
+        prompt = f"Planned step: {step.model_dump_json()}\nCurrent elements: {elements}"
+        if feedback:
+            prompt += f"\nRecovery feedback: {feedback}"
         result = await agent.run(
             [
-                f"Planned step: {step.model_dump_json()}\nCurrent elements: {elements}",
+                prompt,
                 BinaryContent(data=snapshot.image_path.read_bytes(), media_type="image/png"),
             ],
             model_settings=self._model_settings(),

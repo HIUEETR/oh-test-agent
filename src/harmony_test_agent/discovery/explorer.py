@@ -57,6 +57,10 @@ class DiscoveryPage(BaseModel):
     page_id: str
     signature: str
     structural_identity: str = ""
+    # 结构身份的组成部分（折叠 key 集与可交互结构集）：验证首页身份子集匹配使用；
+    # 旧探索结果缺省为空，验证器据此回退严格全等校验。
+    identity_keys: list[str] = Field(default_factory=list)
+    identity_interactive: list[str] = Field(default_factory=list)
     page_path: str
     bundle_name: str
     ability_name: str | None = None
@@ -939,10 +943,16 @@ class BoundedExplorer:
         structural_identity: str = "",
     ) -> DiscoveryPage:
         signature = BoundedExplorer._snapshot_signature(snapshot, foreground)
+        identity_keys, identity_interactive = BoundedExplorer._structural_features(snapshot)
         return DiscoveryPage(
             page_id=f"page-{signature[:12]}",
             signature=signature,
             structural_identity=structural_identity or BoundedExplorer._structural_identity(snapshot, foreground),
+            identity_keys=sorted(identity_keys),
+            identity_interactive=sorted(
+                f"{kind}/{clickable}/{editable}/{scrollable}"
+                for kind, clickable, editable, scrollable in identity_interactive
+            ),
             page_path=snapshot.page_path,
             bundle_name=foreground.bundle_name,
             ability_name=foreground.ability_name,

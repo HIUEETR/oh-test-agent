@@ -165,7 +165,13 @@ class ProfileVerifier:
                     if flow_failed:
                         break
                 identity = BoundedExplorer._structural_identity(snapshot, foreground)
-                if page.structural_identity and identity != page.structural_identity:
+                if (
+                    page.structural_identity
+                    and identity != page.structural_identity
+                    and not (page_index == 0 and self._identity_subset(page, snapshot))
+                ):
+                    # 仅核心流第一页（应用启动态）允许结构子集放宽：冷启动首页常带多内容抖动；
+                    # 后续页保持全等，防止重放动作静默落在错误页面。
                     current.failures.append(f"page identity mismatch: {page.page_id}")
                     break
                 signature = BoundedExplorer._snapshot_signature(snapshot, foreground)
@@ -209,10 +215,13 @@ class ProfileVerifier:
                 and recovery_snapshot
                 and recovered.bundle_name == self.target.bundle_name
                 and (not recovered.ability_name or recovered.ability_name == self.target.main_ability)
-                and BoundedExplorer._structural_identity(recovery_snapshot, recovered)
-                == (
-                    core_pages[0].structural_identity
-                    or BoundedExplorer._structural_identity(recovery_snapshot, recovered)
+                and (
+                    BoundedExplorer._structural_identity(recovery_snapshot, recovered)
+                    == (
+                        core_pages[0].structural_identity
+                        or BoundedExplorer._structural_identity(recovery_snapshot, recovered)
+                    )
+                    or self._identity_subset(core_pages[0], recovery_snapshot)
                 )
             )
             if not current.recovery_passed:
@@ -250,6 +259,22 @@ class ProfileVerifier:
         result.passed = not result.failures
         self._save(result)
         return result
+
+    @staticmethod
+    def _identity_subset(page: DiscoveryPage, snapshot: ScreenSnapshot) -> bool:
+        """首页身份子集匹配：page_path 一致且期望的折叠 key 与可交互结构均为实际页子集。
+
+        用于容忍冷启动首页的内容抖动；旧探索结果没有身份特征字段时返回 False（维持全等）。
+        """
+        if not page.identity_keys and not page.identity_interactive:
+            return False
+        if page.page_path != snapshot.page_path:
+            return False
+        keys, interactive = BoundedExplorer._structural_features(snapshot)
+        actual_interactive = {
+            f"{kind}/{clickable}/{editable}/{scrollable}" for kind, clickable, editable, scrollable in interactive
+        }
+        return set(page.identity_keys) <= keys and set(page.identity_interactive) <= actual_interactive
 
     @staticmethod
     def _core_pages(discovery: DiscoveryResult, min_interaction_kinds: int = 2) -> list[DiscoveryPage]:
