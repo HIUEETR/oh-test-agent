@@ -155,6 +155,7 @@ async def test_mock_agent_runs_full_vertical_slice(tmp_path):
         artifacts=ArtifactStore(settings.resolved_runtime_dir),
         device_factory=lambda _: fake,
         settle_seconds=0,
+        launch_settle_seconds=0,
     )
     trace = await orchestrator.run(
         RunRequest(

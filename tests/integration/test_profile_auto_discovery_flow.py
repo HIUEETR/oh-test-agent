@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -295,6 +296,7 @@ def _orchestrator(tmp_path: Path, device: FlowDevice) -> AgentOrchestrator:
         artifacts=ArtifactStore(settings.resolved_runtime_dir),
         device_factory=lambda _: device,
         settle_seconds=0,
+        launch_settle_seconds=0,
     )
 
 
@@ -705,6 +707,65 @@ async def test_replay_events_stream_per_attempt(tmp_path: Path, monkeypatch) -> 
     assert all(start < finish for start, finish in zip(started_index, finished_index, strict=True))
     assert all(finish < start for finish, start in zip(finished_index[:-1], started_index[1:], strict=True))
     assert [item.attempt for item in trace.profile_validation_replays] == [1, 2, 3]
+
+
+class _RecordingDevice(FlowDevice):
+    """记录关键调用时刻的包装设备：断言 OPEN_APP 与 after 截图之间存在启动静默期。"""
+
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(tmp_path)
+        self.timeline: list[tuple[str, float]] = []
+
+    def _mark(self, name: str) -> None:
+        self.timeline.append((name, time.monotonic()))
+
+    def open_app(self, profile, reset: bool = False):
+        result = super().open_app(profile, reset)
+        self._mark("open_app")
+        return result
+
+    def current_foreground_app(self):
+        self._mark("foreground_poll")
+        return super().current_foreground_app()
+
+    def screenshot(self, output_dir: Path, run_id: str, label: str = "screen"):
+        self._mark(f"screenshot:{label}")
+        return super().screenshot(output_dir, run_id, label)
+
+
+async def test_open_app_waits_launch_settle_before_after_capture(tmp_path: Path) -> None:
+    """任务阶段 OPEN_APP 后进入冷启动静默期：轮询前台且静默满预算后才截 after 帧。
+
+    回归背景：`aa start` 返回即截图会截到启动 logo 页（应用冷启动 2-5 秒）。
+    """
+    device = _RecordingDevice(tmp_path)
+    settings = _settings(tmp_path)
+    orchestrator = AgentOrchestrator(
+        settings,
+        provider=OriginalTaskProvider(),
+        repository=RunRepository(settings.resolved_database_path),
+        artifacts=ArtifactStore(settings.resolved_runtime_dir),
+        device_factory=lambda _: device,
+        settle_seconds=0,
+        launch_settle_seconds=0.25,
+    )
+    trace = await orchestrator.run(
+        RunRequest(
+            target={"bundle_name": BUNDLE_A},
+            task="check target home",
+            auto_generate=True,
+            exploration_policy=ExplorationPolicy(enabled=False),
+        ),
+        run_id="run-launch-settle",
+    )
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    marks = device.timeline
+    start_index = max(index for index, (name, _) in enumerate(marks) if name == "open_app")
+    after_index = next(index for index, (name, _) in enumerate(marks) if name == "screenshot:step_01_after")
+    polls_between = [1 for name, _ in marks[start_index:after_index] if name == "foreground_poll"]
+    assert polls_between, "launch settle must poll foreground before the after capture"
+    assert marks[after_index][1] - marks[start_index][1] >= 0.25
 
 
 def test_profile_api_lifecycle_errors_and_explicit_history_rollback(tmp_path: Path) -> None:

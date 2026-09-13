@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -41,6 +42,7 @@ from ..models import (
     utc_now,
 )
 from ..perception import PerceptionService
+from ..perception.normalizer import normalize_layout, page_path
 from ..profiles import ProfileRegistry
 from ..reporting import ReportBuilder
 from ..runner import HypiumRunner
@@ -65,6 +67,7 @@ class AgentOrchestrator:
         device_factory: DeviceFactory | None = None,
         event_callback: Callable[[RunEvent], None] | None = None,
         settle_seconds: float = 0.8,
+        launch_settle_seconds: float = 3.0,
     ):
         self.settings = settings
         self.provider = provider or create_provider(settings)
@@ -73,6 +76,7 @@ class AgentOrchestrator:
         self.device_factory = device_factory or self._default_device_factory
         self.event_callback = event_callback
         self.settle_seconds = settle_seconds
+        self.launch_settle_seconds = launch_settle_seconds
         self._stop_requested: set[str] = set()
         self._target_selections: dict[str, str] = {}
         self._target_selection_events: dict[str, asyncio.Event] = {}
@@ -267,7 +271,9 @@ class AgentOrchestrator:
                     emitter.emit(EventType.ACTION_FINISHED, "Agent 已结束工具循环", result.model_dump(mode="json"))
                     break
 
-                if self.settle_seconds and decision.tool not in {ToolName.INSPECT_SCREEN, ToolName.WAIT}:
+                if decision.tool == ToolName.OPEN_APP:
+                    await self._wait_launch_settled(device, trace)
+                elif self.settle_seconds and decision.tool not in {ToolName.INSPECT_SCREEN, ToolName.WAIT}:
                     await asyncio.sleep(self.settle_seconds)
                 trace.state = RunState.VERIFYING
                 after, after_node = await self._capture(
@@ -1144,9 +1150,58 @@ class AgentOrchestrator:
             )
         return results
 
+    async def _wait_launch_settled(self, device, trace) -> None:
+        """冷启动静默期：OPEN_APP 后至少等待 launch_settle_seconds，期间确认前台已是目标应用。
+
+        `aa start` 命令返回不代表首页已渲染；固定等待加前台校验，避免把启动 logo 页当作任务首页截图。
+        """
+        resolved = trace.resolved_target
+        budget = max(self.launch_settle_seconds, 0.0)
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:
+            foreground = await asyncio.to_thread(device.current_foreground_app)
+            if (
+                foreground
+                and foreground.bundle_name == resolved.bundle_name
+                and (
+                    not foreground.ability_name
+                    or not resolved.main_ability
+                    or foreground.ability_name == resolved.main_ability
+                )
+            ):
+                break
+            await asyncio.sleep(0.3)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+    @staticmethod
+    def _capture_stable_frame(device, run_dir: Path, trace, label: str):
+        """采集前轮询 UI 层级稳定：静止页返回首帧，持续变化页在预算耗尽后补截一帧。
+
+        与探索阶段 `_capture_settled` 同语义，用于过滤点击/输入后的加载动画与过渡帧；
+        静态启动页对轮询完全"稳定"，由 OPEN_APP 的冷启动静默期兜底。
+        """
+        snapshot = device.screenshot(run_dir / "screens", trace.run_id, label)
+        budget = trace.exploration_policy.settle_timeout_seconds if trace.exploration_policy else 0
+        if budget <= 0:
+            return snapshot
+        fingerprint = BoundedExplorer._stability_fingerprint(snapshot.page_path, snapshot.elements)
+        deadline = time.monotonic() + budget
+        while time.monotonic() < deadline:
+            device.wait(0.5)
+            try:
+                hierarchy = device.collect_ui_hierarchy()
+            except DeviceError:
+                break
+            elements = normalize_layout(hierarchy, snapshot.width, snapshot.height)
+            if BoundedExplorer._stability_fingerprint(page_path(hierarchy), elements) == fingerprint:
+                return snapshot
+        return device.screenshot(run_dir / "screens", trace.run_id, f"{label}-settled")
+
     async def _capture(self, trace, emitter, device, perception, graph, label):
         run_dir = self.artifacts.run_dir(trace.run_id)
-        snapshot = await asyncio.to_thread(device.screenshot, run_dir / "screens", trace.run_id, label)
+        snapshot = await asyncio.to_thread(self._capture_stable_frame, device, run_dir, trace, label)
         try:
             observation = await asyncio.wait_for(
                 self.provider.analyze(snapshot),
