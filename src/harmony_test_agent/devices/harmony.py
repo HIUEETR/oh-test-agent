@@ -303,8 +303,8 @@ class HarmonyDeviceAdapter(DeviceAdapter):
                 return None
             return foreground.bundle_name in _LAUNCHER_BUNDLES
 
-        if _on_launcher():
-            return True
+        # Home 必须无条件发送：launcher 会停留在上次浏览的页，若因已在前台而跳过按键，
+        # 扫描只能覆盖当前页（此前导致主页上的日历等图标解析不到，见 2026-09-13 回归）。
         self._run("shell", "uitest", "uiInput", "keyEvent", "Home")
         time.sleep(_LAUNCHER_HOME_SETTLE_SECONDS)
         return _on_launcher() is not False
