@@ -73,9 +73,9 @@ class SafetyPolicy:
         policy = self.exploration_policy
         for permission, terms in (self.gated_terms or {}).items():
             if not bool(policy and getattr(policy, permission, False)):
-                match = next((term for term in terms if term.casefold() in lowered), None)
-                if match:
-                    return match
+                candidates = [(lowered.find(term.casefold()), term) for term in terms if term.casefold() in lowered]
+                if candidates:
+                    return min(candidates)[1]
         return None
 
     def validate_task(self, task: str) -> None:

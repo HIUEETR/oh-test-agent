@@ -4,6 +4,8 @@
 
 项目于 2026-09-09 完成真实模型、真实设备、Hypium 三次回放和 Web 全链路验收。详细安装与排错见 [docs/STARTUP_GUIDE.md](docs/STARTUP_GUIDE.md)。
 
+Web 控制台于 2026-09 完全重写（浅色玻璃拟态界面，旧版冻结在 `web-legacy/`）：实时展示大模型的规划、视觉理解、逐步决策与探索顾问对话留痕，配闭环流水线状态条、探索页面状态图、历史运行回看与 Profile 资产管理，详见 [web/README.md](web/README.md)。
+
 ## 核心原则
 
 - **模型负责理解与选择，不负责任意执行。** Agent 没有通用 Shell 工具。
@@ -17,17 +19,27 @@
 
 当前系统属于受控 UI 测试 Agent：编排器维护计划、页面状态和运行证据，模型每轮只输出一个结构化决策，HDC 与 Hypium 由白名单适配器执行。`AGENT_MODEL` 负责规划，`AGENT_VISION_MODEL` 负责截图理解和逐步决策；后者留空时自动复用前者，因此一个支持图像和结构化输出的模型即可覆盖全流程。两个阶段通过 `PlanResult`、`ScreenSnapshot` 和 `ToolDecision` 通信，没有模型间的直接聊天。
 
-当前每次模型调用都是独立请求，没有项目侧 Prompt Cache、共享消息历史或命中率指标。把两个配置统一为同一模型可以减少模型切换，但缓存是否命中仍由兼容服务和请求前缀稳定性决定，不能仅凭统一模型名推断命中率提升。
+任务规划与逐步决策仍是独立请求；自动探索阶段的 LLM 视觉顾问在单次探索内维护一段连续对话（system 前缀稳定、逐页追加截图与候选），使"首页 → 搜索 → 热搜"这类连贯流程共享上下文，历史超过 `advisor_history_turns` 轮时保留 system 头并裁掉最旧交换，被裁页面的摘要由确定性上下文摘要继续携带。命中率仍由兼容服务决定，项目侧不统计缓存指标。
 ## 无预置 Profile 的应用发现
 
 新运行可以只提供应用名称或 `bundleName`。系统通过 `bm dump` 解析已安装应用，以 `aa start` 启动并进行有界探索，生成 `draft → candidate → verified` Profile。探索默认限制为 20 个页面、每页 8 个动作、15 分钟；登录、授权、提交、发布和下载需要逐项启用，支付、删除、卸载和清除数据始终禁止。
+
+探索治理（防过度探索）：
+
+- **逻辑页身份**：页面按 `page_path + 前台 + 全量折叠 key + 可交互结构` 去重，信息流/热搜等"同页不同内容"的抖动不再被当成新页面。
+- **内容候选抑制**：key/id 内嵌长数字 ID 或标题超长的可点击元素被降级到 input/swipe 之后，避免主动误触信息流卡片进入不可回放的内容页；此类跃迁不会入队。
+- **类型配额**：每页动作预算按类型分配（click ≤ max-2、input 1、swipe 1），点击富集页面也能覆盖输入与滑动。
+- **恢复节奏**：候选动作之间优先"落地页身份校验 → 一次 back → 冷启动重放"逐级兜底（input 动作因软键盘强制冷恢复）；只有队列出队回放路径时才必须冷启动。
+- **LLM 视觉顾问**（配置了 vision 模型时默认开启）：每个新逻辑页向连续会话追加一次截图+候选询问，模型返回"推荐/回避"建议对确定性候选重排过滤；安全分类器在顾问之后照常执行，任何调用失败自动回退启发式排序。
 
 ```powershell
 uv run main.py run --app "示例应用" --task "打开设置并验证版本信息" --execute
 uv run main.py run --bundle-name com.example.app --task "验证首页" --execute
 ```
 
-已有 `TARGET_PROFILE_PATH` 和 `--target-app` 继续作为兼容入口，并会输出弃用提示。Profile 验证要求三轮独立启动下至少 3 个可重复页面、3 类交互、3 个稳定定位器和 2 个应用级断言；随后三次 Hypium Driver 回放全部通过才自动晋级 `verified`。运行轨迹冻结目标与 Profile 快照，历史 Run 重新生成时不会读取后来变化的全局 Profile。
+已有 `TARGET_PROFILE_PATH` 和 `--target-app` 继续作为兼容入口，并会输出弃用提示。Profile 验证要求三轮独立启动下至少 3 个可重复页面、`min_interaction_kinds`（默认 2，可配置至 3）类交互、3 个稳定定位器和 2 个应用级断言；随后三次 Hypium Driver 回放全部通过才自动晋级 `verified`。运行轨迹冻结目标与 Profile 快照，历史 Run 重新生成时不会读取后来变化的全局 Profile。
+
+**实时模式（无 Profile 执行）**：不再强制"先有 verified Profile 才能执行任务"。没有可用 Profile 且探索关闭、或探索/验证失败时，运行自动降级为实时模式——每步现取截图决策继续执行任务，但不生成/回放 Hypium 脚本，前端显示"实时模式"徽章；`bootstrap_only` 显式生成 Profile 的运行仍会如实失败。
 
 ## 已实现能力
 
@@ -36,6 +48,9 @@ uv run main.py run --bundle-name com.example.app --task "验证首页" --execute
 - Pydantic AI OpenAI-compatible Provider、实际 PNG 多模态输入和显式 Mock Provider。
 - 规划对齐：不擅自把“输入文本”扩展为“提交搜索”；软键盘返回流程可被确定性补全。
 - Agent 状态机、安全白名单、模型/设备独立超时、有限重试、停止和失败即停。
+- 探索治理：结构身份去重、内容候选抑制、类型配额、back 优先恢复节奏与可配置准入门槛。
+- LLM 视觉探索顾问：连续会话逐页约束点击范围与次数，启发式兜底，事件流留痕。
+- 实时模式：无 Profile 直接执行任务（探索失败自动降级），不生成/回放 Hypium 脚本。
 - SQLite + JSON/PNG/日志/HTML 报告、SSE 事件流和页面关系图。
 - Hypium Python、JSON 与元数据生成；动态 key 前缀化；坐标降级显式告警。
 - FastAPI 后端与 React/Vite/TypeScript 控制台。
@@ -189,6 +204,7 @@ uv lock --check
 .\.venv\Scripts\python.exe -m pytest -q
 Push-Location web
 npm run build
+npm run test
 Pop-Location
 git diff --check
 ```
@@ -213,6 +229,7 @@ $env:RUN_LIVE_TESTS = '1'
 ## 当前限制
 
 - Hypium Driver 模式已真实验证；DevEco Testing 测试工程模式仍为 `not_validated`。
-- 页面签名会受到动态信息流和 VLM 标题变化影响，可能把一个语义页面拆成多个状态。
+- 探索按"逻辑页身份"去重后，信息流抖动不再拆分页面；页面签名仍受 VLM 标题变化影响，仅作快照证据而非去重键。
 - 无稳定 key/id 的控件会降级为经过边界验证的坐标，并在代码、元数据和 Web 中持续告警。
+- 实时模式不产出 Hypium 脚本与回放证据；需要回归脚本时仍需先完成 Profile 引导。
 - FastAPI 当前是本机开发服务，没有鉴权，不应直接暴露到不受信任网络。

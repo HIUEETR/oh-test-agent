@@ -34,11 +34,12 @@ class ProfileTransitionError(ProfileRegistryError):
 class ProfileRegistry:
     """Stores lifecycle versions with schema validation, backups, and atomic replacement."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, min_interaction_kinds: int = 2):
         self.root = Path(root)
         self.draft_dir = self.root / "draft"
         self.candidate_dir = self.root / "candidate"
         self.history_dir = self.root / "history"
+        self.min_interaction_kinds = max(min_interaction_kinds, 1)
         self._lock = threading.RLock()
         for directory in (self.root, self.draft_dir, self.candidate_dir, self.history_dir):
             directory.mkdir(parents=True, exist_ok=True)
@@ -388,8 +389,7 @@ class ProfileRegistry:
                 )
         return path
 
-    @staticmethod
-    def _validate_admission_assets(profile: TargetAppProfile, transition: str) -> None:
+    def _validate_admission_assets(self, profile: TargetAppProfile, transition: str) -> None:
         locators = profile.stable_locator_inventory
         if len(locators) < 3:
             raise ProfileTransitionError(f"{transition} requires three stable locators")
@@ -409,8 +409,8 @@ class ProfileRegistry:
             raise ProfileTransitionError(f"{transition} requires three-round assertion evidence")
         if not profile.core_flows or len(profile.core_flows[0].get("pages", [])) < 3:
             raise ProfileTransitionError(f"{transition} requires a replayable three-page core flow")
-        if len(set(profile.core_flows[0].get("interaction_types", []))) < 3:
-            raise ProfileTransitionError(f"{transition} requires three interaction types")
+        if len(set(profile.core_flows[0].get("interaction_types", []))) < self.min_interaction_kinds:
+            raise ProfileTransitionError(f"{transition} requires {self.min_interaction_kinds} interaction types")
         evidence = profile.provenance.evidence
         if not evidence.get("verification_passed"):
             raise ProfileTransitionError(f"{transition} requires passed device verification evidence")

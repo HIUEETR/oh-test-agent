@@ -91,6 +91,10 @@ class FakeVerificationDevice:
         self.serial += 1
         return self.snapshot_for_page(self.state, label=f"{label}-{self.serial}")
 
+    def collect_ui_hierarchy(self) -> dict:
+        # settle 轮询读到空层级即等待超时后刷新截图，不影响确定性断言。
+        return {}
+
     def click(self, x: int, y: int) -> CommandResult:
         del x, y
         self.state = min(self.state + 1, 3)
@@ -123,8 +127,20 @@ class FakeVerificationDevice:
 
 def _discovery(device: FakeVerificationDevice) -> DiscoveryResult:
     foreground = device.current_foreground_app()
-    first = ExplorationAction(action_id="open-page-one", kind="click", coordinate=(200, 140))
-    second = ExplorationAction(action_id="fixed-input", kind="input", coordinate=(300, 140))
+    first = ExplorationAction(
+        action_id="open-page-one",
+        kind="click",
+        locator_kind="key",
+        locator_value=device.snapshot_for_page(0).elements[0].key,
+        coordinate=(140, 140),
+    )
+    second = ExplorationAction(
+        action_id="fixed-input",
+        kind="input",
+        locator_kind="key",
+        locator_value=device.snapshot_for_page(1).elements[0].key,
+        coordinate=(240, 140),
+    )
     third = ExplorationAction(action_id="scroll", kind="swipe", direction="up")
     paths = [[], [first], [first, second], [first, second, third]]
     pages = [
@@ -170,6 +186,72 @@ def test_profile_verifier_replays_three_pages_across_three_independent_rounds(tm
     assert len(device.log_paths) == 3
     assert result.stability.promotable_locator_count >= 3
     assert result.stability.app_assertion_count >= 2
+
+
+def test_verifier_honors_configurable_min_interaction_kinds(tmp_path: Path) -> None:
+    """click+input 两条腿的路径：min=2 时可通过，min=3 时记录原因失败。"""
+    device = FakeVerificationDevice(tmp_path)
+    click = ExplorationAction(
+        action_id="open-page-one",
+        kind="click",
+        locator_kind="key",
+        locator_value=device.snapshot_for_page(0).elements[0].key,
+        coordinate=(140, 140),
+    )
+    enter = ExplorationAction(
+        action_id="fixed-input",
+        kind="input",
+        locator_kind="key",
+        locator_value=device.snapshot_for_page(1).elements[0].key,
+        coordinate=(240, 140),
+    )
+    paths = [[], [click], [click, enter]]
+    foreground = device.current_foreground_app()
+    pages = [
+        BoundedExplorer._page(device.snapshot_for_page(index), foreground, index + 1, path)
+        for index, path in enumerate(paths)
+    ]
+    discovery = DiscoveryResult(
+        target=_target(),
+        policy=ExplorationPolicy(),
+        pages=pages,
+        transitions=[
+            DiscoveryTransition(
+                source_page_id=pages[0].page_id,
+                target_page_id=pages[1].page_id,
+                action=click,
+                before_snapshot_id="before-click",
+                success=True,
+            ),
+            DiscoveryTransition(
+                source_page_id=pages[1].page_id,
+                target_page_id=pages[2].page_id,
+                action=enter,
+                before_snapshot_id="before-input",
+                success=True,
+            ),
+        ],
+    )
+
+    tolerant = ProfileVerifier(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "verification-min2",
+        run_id="verification-min2",
+        min_interaction_kinds=2,
+    )
+    assert tolerant.verify(discovery).passed
+
+    strict = ProfileVerifier(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "verification-min3",
+        run_id="verification-min3",
+        min_interaction_kinds=3,
+    )
+    strict_result = strict.verify(discovery)
+    assert not strict_result.passed
+    assert any("no replayable discovery path covers 3 pages" in item for item in strict_result.failures)
 
 
 def test_stability_analyzer_rejects_dynamic_identifier_even_when_seen_in_all_rounds(tmp_path: Path) -> None:

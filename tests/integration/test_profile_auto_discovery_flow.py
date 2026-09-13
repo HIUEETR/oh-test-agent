@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from harmony_test_agent.agents import AgentOrchestrator, MockAgentProvider
+from harmony_test_agent.agents.providers import PlanningContext
 from harmony_test_agent.api import create_app
 from harmony_test_agent.config import Settings
 from harmony_test_agent.devices import DeviceAdapter
@@ -18,6 +19,7 @@ from harmony_test_agent.discovery import (
     DiscoveryResult,
     DiscoveryTransition,
     ExplorationAction,
+    ExplorationPolicy,
     LocatorObservation,
     ProfileVerificationResult,
     StabilityLevel,
@@ -170,8 +172,8 @@ class FlowDevice(DeviceAdapter):
 
 
 class OriginalTaskProvider(MockAgentProvider):
-    async def plan(self, task: str, profile: TargetAppProfile, max_steps: int) -> PlanResult:
-        del profile
+    async def plan(self, task: str, context: PlanningContext, max_steps: int) -> PlanResult:
+        del context
         steps = [
             PlannedStep(step_id="task-open", instruction="open target", tool=ToolName.OPEN_APP),
             PlannedStep(
@@ -420,6 +422,7 @@ def _verification_result(*, passed: bool = True) -> ProfileVerificationResult:
                 locator_observations=locator_observations,
                 assertion_observations=assertion_observations,
                 resolution=(360, 720),
+                snapshot_ids=[f"snapshot-round-{round_number}"],
             )
         )
     return ProfileVerificationResult(
@@ -683,3 +686,73 @@ def test_profile_api_lifecycle_errors_and_explicit_history_rollback(tmp_path: Pa
     assert restored_detail.json()["display_name"] == "Notes v1"
     assert locked.status_code == 200
     assert locked_rollback.status_code == 409
+
+
+async def test_live_mode_runs_original_task_without_profile(tmp_path: Path) -> None:
+    """无 verified Profile 且探索关闭时进入实时模式：任务照常执行，不生成脚本。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device)
+
+    trace = await orchestrator.run(
+        RunRequest(
+            target={"bundle_name": BUNDLE_A},
+            task="check target home",
+            auto_generate=True,
+            auto_execute=True,
+            exploration_policy=ExplorationPolicy(enabled=False),
+        ),
+        run_id="run-live-mode",
+    )
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    assert trace.live_mode is True
+    assert trace.profile_snapshot is None
+    assert trace.generated is None
+    assert trace.replays == []
+    assert any(event.type == EventType.PROFILE_LIVE_MODE for event in trace.events)
+    assert any(event.type == EventType.ORIGINAL_TASK_STARTED for event in trace.events)
+    assert any(action.step_id == "task-assert" for action in trace.actions)
+
+
+async def test_failed_profile_verification_downgrades_to_live_mode(tmp_path: Path) -> None:
+    """探索在静态假设备上只能得到单页，验证失败后降级实时模式继续任务而非整个 run 失败。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device)
+
+    trace = await orchestrator.run(
+        RunRequest(
+            target={"bundle_name": BUNDLE_A},
+            task="check target home",
+            auto_generate=True,
+        ),
+        run_id="run-verification-downgrade",
+    )
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    assert trace.live_mode is True
+    # 失败草稿保留为 INVALID 证据，实时模式不使用它生成脚本
+    assert trace.profile_snapshot is not None
+    assert trace.profile_snapshot.status == ProfileStatus.INVALID
+    assert trace.generated is None
+    live_events = [event for event in trace.events if event.type == EventType.PROFILE_LIVE_MODE]
+    assert live_events
+    registry = ProfileRegistry(orchestrator.settings.resolved_profiles_dir)
+    assert not registry.list(ProfileStatus.VERIFIED)
+
+
+async def test_bootstrap_only_still_fails_when_verification_fails(tmp_path: Path) -> None:
+    """bootstrap_only 语义保持：Profile 准备失败时 run 明确失败，不降级。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device)
+
+    trace = await orchestrator.run(
+        RunRequest(
+            target={"bundle_name": BUNDLE_A},
+            task="check target home",
+            bootstrap_only=True,
+        ),
+        run_id="run-bootstrap-fail",
+    )
+
+    assert trace.state == RunState.FAILED_PROFILE_VERIFICATION
+    assert trace.live_mode is False

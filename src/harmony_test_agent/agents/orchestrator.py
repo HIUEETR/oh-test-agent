@@ -12,6 +12,7 @@ from pathlib import Path
 from ..config import Settings
 from ..devices import DeviceAdapter, DeviceError, HarmonyDeviceAdapter
 from ..discovery import BoundedExplorer, ExplorationAction, ProfileVerifier, StabilityLevel
+from ..discovery.advisor import ExplorationAdvisor
 from ..generation import HypiumGenerator
 from ..graph import PageGraphBuilder
 from ..models import (
@@ -43,10 +44,10 @@ from ..perception import PerceptionService
 from ..profiles import ProfileRegistry
 from ..reporting import ReportBuilder
 from ..runner import HypiumRunner
-from ..runtime import RunEventEmitter, SafetyError, SafetyPolicy, ToolExecutionError, ToolExecutor
+from ..runtime import LaunchSpec, RunEventEmitter, SafetyError, SafetyPolicy, ToolExecutionError, ToolExecutor
 from ..storage import ArtifactStore, RunRepository
 from ..targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
-from .providers import AgentProvider, create_provider
+from .providers import AgentProvider, PlanningContext, create_provider
 
 DeviceFactory = Callable[[str], DeviceAdapter]
 
@@ -142,9 +143,10 @@ class AgentOrchestrator:
                 trace.ended_at = utc_now()
                 emitter.emit(EventType.RUN_FINISHED, "任务已由用户停止")
                 return trace
-            trace.target_app_id = profile.target_app_id
-            trace.profile_snapshot = profile.model_copy(deep=True)
-            trace.profile_status_at_start = profile.status
+            trace.target_app_id = profile.target_app_id if profile else trace.target_app_id
+            if profile is not None:
+                trace.profile_snapshot = profile.model_copy(deep=True)
+                trace.profile_status_at_start = profile.status
             if request.bootstrap_only:
                 trace.state = RunState.COMPLETED
                 trace.ended_at = utc_now()
@@ -154,10 +156,19 @@ class AgentOrchestrator:
                     {"profile_status": profile.status},
                 )
                 return trace
+            resolved = trace.resolved_target
+            if resolved is None:  # pragma: no cover - _prepare_target guarantees resolution
+                raise ToolExecutionError("target resolution missing after profile preparation", RunState.FAILED_ACTION)
+            launch = (
+                LaunchSpec.from_profile(profile)
+                if profile
+                else LaunchSpec.from_kwargs(resolved.bundle_name, resolved.main_ability, resolved.module_name)
+            )
             executor = ToolExecutor(
                 device=device,
-                profile=profile,
+                launch=launch,
                 safety=SafetyPolicy(exploration_policy=request.exploration_policy),
+                stable_locators=list(profile.stable_locator_inventory) if profile else [],
             )
             executor.safety.validate_task(request.task)
             trace.phase = "task"
@@ -166,8 +177,11 @@ class AgentOrchestrator:
             trace.state = RunState.PLANNING
             try:
                 step_limit = min(request.max_steps, self.settings.agent_max_steps)
+                planning_context = (
+                    PlanningContext.from_profile(profile) if profile else PlanningContext.from_resolved(resolved)
+                )
                 plan = await asyncio.wait_for(
-                    self.provider.plan(request.task, profile, step_limit),
+                    self.provider.plan(request.task, planning_context, step_limit),
                     timeout=self.settings.agent_model_timeout,
                 )
             except Exception as exc:
@@ -294,7 +308,7 @@ class AgentOrchestrator:
             trace.graph = graph.graph
             self.artifacts.write_json(self.artifacts.run_dir(trace.run_id) / "graph.json", trace.graph)
 
-            if trace.provisional:
+            if trace.provisional or trace.live_mode:
                 request.auto_generate = False
                 request.auto_execute = False
             if request.auto_generate:
@@ -356,10 +370,13 @@ class AgentOrchestrator:
             self.artifacts.save_trace(trace)
             ReportBuilder(self.artifacts).build(trace)
 
-    async def _prepare_target(self, request, trace, emitter, device) -> TargetAppProfile:
-        """Resolve, discover, validate and promote an application before the original task."""
+    async def _prepare_target(self, request, trace, emitter, device) -> TargetAppProfile | None:
+        """Resolve、复验或探索晋级 Profile；实时模式降级时返回 None。"""
         explicit_path = self.settings.resolved_target_profile_path
-        registry = ProfileRegistry(self.settings.resolved_profiles_dir)
+        registry = ProfileRegistry(
+            self.settings.resolved_profiles_dir,
+            min_interaction_kinds=request.exploration_policy.min_interaction_kinds,
+        )
         explicit_override = bool(self.settings.target_profile_path and "TARGET_PROFILE_PATH" in os.environ)
         if explicit_override:
             print("warning: TARGET_PROFILE_PATH is deprecated; use the Profile Registry", file=sys.stderr)
@@ -472,10 +489,48 @@ class AgentOrchestrator:
                 registry.invalidate(existing.target_app_id, "quick revalidation failed")
 
         if not request.exploration_policy.enabled:
-            raise ToolExecutionError(
-                "no verified Profile and automatic discovery is disabled", RunState.FAILED_DISCOVERY
+            if request.bootstrap_only:
+                raise ToolExecutionError(
+                    "no verified Profile and automatic discovery is disabled", RunState.FAILED_DISCOVERY
+                )
+            return self._enter_live_mode(
+                trace, emitter, "未发现 verified Profile 且自动探索已关闭，进入实时模式执行任务"
             )
         run_dir = self.artifacts.run_dir(trace.run_id)
+        try:
+            return await self._bootstrap_profile(request, trace, emitter, device, resolved, registry, run_dir)
+        except asyncio.CancelledError:
+            raise
+        except (ToolExecutionError, DeviceError) as exc:
+            # 候选 Profile 已保存后的回放门控/晋级失败属于明确的收尾失败，保持原语义；
+            # 其余准备阶段失败按实时模式降级继续任务。
+            if (
+                request.bootstrap_only
+                or isinstance(exc, ToolExecutionError)
+                and exc.state in {RunState.FAILED_SCRIPT, RunState.FAILED_PROFILE_PROMOTION}
+            ):
+                raise
+            return self._enter_live_mode(trace, emitter, f"Profile 准备未完成，降级为实时模式继续任务：{exc}")
+
+    @staticmethod
+    def _enter_live_mode(trace: RunTrace, emitter: RunEventEmitter, reason: str) -> None:
+        """记录实时模式并通知前端；实时模式不生成/回放脚本。"""
+        trace.live_mode = True
+        trace.profile_status_at_start = ProfileStatus.ABSENT
+        emitter.emit(EventType.PROFILE_LIVE_MODE, reason, {"live_mode": True})
+        return None
+
+    async def _bootstrap_profile(
+        self,
+        request: RunRequest,
+        trace: RunTrace,
+        emitter: RunEventEmitter,
+        device: DeviceAdapter,
+        resolved: ResolvedTarget,
+        registry: ProfileRegistry,
+        run_dir: Path,
+    ) -> TargetAppProfile:
+        """有界探索 → draft → 验证 → 准入 → Hypium 回放 → 晋级 verified。"""
         trace.state = RunState.PROBING_TARGET
         started = await asyncio.to_thread(
             device.start_app, resolved.bundle_name, resolved.main_ability, resolved.module_name
@@ -503,9 +558,15 @@ class AgentOrchestrator:
         )
 
         def discovery_progress(kind: str, payload: dict[str, object]) -> None:
-            event_type = EventType.DISCOVERY_PATH_BLOCKED if kind == "blocked" else EventType.DISCOVERY_PROGRESS
+            if kind == "blocked":
+                event_type = EventType.DISCOVERY_PATH_BLOCKED
+            else:
+                event_type = EventType.DISCOVERY_PROGRESS
             emitter.emit(event_type, "自动探索进度", payload)
 
+        advisor: ExplorationAdvisor | None = None
+        if request.exploration_policy.advisor_enabled and not self.provider.mock:
+            advisor = ExplorationAdvisor(self.provider, request.exploration_policy)
         discovery = await asyncio.to_thread(
             BoundedExplorer(
                 device,
@@ -515,6 +576,7 @@ class AgentOrchestrator:
                 request.exploration_policy,
                 progress=discovery_progress,
                 should_stop=lambda: self._should_stop(trace.run_id),
+                advisor=advisor,
             ).explore
         )
         if discovery.stop_reason == "stopped_by_user":
@@ -549,6 +611,7 @@ class AgentOrchestrator:
                 run_dir / "verification",
                 trace.run_id,
                 should_stop=lambda: self._should_stop(trace.run_id),
+                min_interaction_kinds=request.exploration_policy.min_interaction_kinds,
             ).verify,
             discovery,
         )
@@ -643,8 +706,9 @@ class AgentOrchestrator:
             exploration_policy=trace.exploration_policy,
             discovery_result=trace.discovery_result,
             verification_result=trace.verification_result,
+            agent_outcome="completed",
         )
-        core_pages = ProfileVerifier._core_pages(discovery)
+        core_pages = ProfileVerifier._core_pages(discovery, trace.exploration_policy.min_interaction_kinds)
         if len(core_pages) < 3:
             raise ValueError("Profile admission replay requires a contiguous three-page core flow")
         validation.actions.append(
@@ -661,51 +725,52 @@ class AgentOrchestrator:
         assertions_by_page = {item.page_signature: item for item in profile.assertion_inventory}
         for page_index, page in enumerate(core_pages):
             if page_index:
-                action = page.path_actions[-1]
-                tool = {
-                    "click": ToolName.CLICK_ELEMENT,
-                    "input": ToolName.CLICK_COORDINATE,
-                    "swipe": ToolName.SWIPE,
-                    "back": ToolName.BACK,
-                }[action.kind]
-                params: dict[str, object] = {"target": action.element_id or action.target_text}
-                if action.coordinate:
-                    params["coordinate"] = action.coordinate
-                if action.kind == "input":
-                    params["text"] = discovery.policy.fixed_input_text
-                if action.kind == "swipe":
-                    params["direction"] = action.direction or "up"
-                action_locator = (
-                    LocatorCandidate(kind=LocatorKind(action.locator_kind), value=action.locator_value)
-                    if action.locator_kind != "coordinate" and action.locator_value
-                    else None
-                )
-                if action.kind == "input" and action.coordinate:
+                previous = core_pages[page_index - 1]
+                pending = page.path_actions[len(previous.path_actions) :]
+                for step_index, action in enumerate(pending):
+                    tool = {
+                        "click": ToolName.CLICK_ELEMENT,
+                        "input": ToolName.CLICK_COORDINATE,
+                        "swipe": ToolName.SWIPE,
+                        "back": ToolName.BACK,
+                    }[action.kind]
+                    params: dict[str, object] = {"target": action.element_id or action.target_text}
+                    if action.coordinate:
+                        params["coordinate"] = action.coordinate
+                    if action.kind == "input":
+                        params["text"] = discovery.policy.fixed_input_text
+                    if action.kind == "swipe":
+                        params["direction"] = action.direction or "up"
+                    action_locator = (
+                        LocatorCandidate(kind=LocatorKind(action.locator_kind), value=action.locator_value)
+                        if action.locator_kind != "coordinate" and action.locator_value
+                        else None
+                    )
+                    if action.kind == "input" and action.coordinate:
+                        validation.actions.append(
+                            ActionResult(
+                                step_id=f"profile-flow-{page_index:02d}-{step_index:02d}-{action.action_id}-focus",
+                                tool=ToolName.CLICK_COORDINATE,
+                                params={"coordinate": action.coordinate},
+                                success=True,
+                            )
+                        )
+                        tool = ToolName.INPUT_TEXT
                     validation.actions.append(
                         ActionResult(
-                            step_id=f"profile-flow-{page_index:02d}-{action.action_id}-focus",
-                            tool=ToolName.CLICK_COORDINATE,
-                            params={"coordinate": action.coordinate},
+                            step_id=f"profile-flow-{page_index:02d}-{step_index:02d}-{action.action_id}",
+                            tool=tool,
+                            params=params,
                             success=True,
+                            locator=action_locator,
                         )
                     )
-                    tool = ToolName.INPUT_TEXT
-                validation.actions.append(
-                    ActionResult(
-                        step_id=f"profile-flow-{page_index:02d}-{action.action_id}",
-                        tool=tool,
-                        params=params,
-                        success=True,
-                        locator=action_locator,
-                    )
-                )
-            locator = next(iter(locators_by_page.get(page.signature, [])), None)
-            if locator is None:
-                locator = None
+            page_key = page.structural_identity or page.signature
+            locator = next(iter(locators_by_page.get(page_key, [])), None)
             if locator is None:
                 continue
             kind, value = AgentOrchestrator._profile_locator(locator)
-            assertion = assertions_by_page.get(page.signature)
+            assertion = assertions_by_page.get(page_key)
             validation.actions.append(
                 ActionResult(
                     step_id=f"profile-page-{page_index + 1:02d}-assert",
@@ -729,6 +794,8 @@ class AgentOrchestrator:
         }
         if len(covered_pages) < 3 or len(validation.assertions) < 2:
             raise ValueError("Profile admission replay requires 3 page checks and 2 application assertions")
+        # 合成准入轨迹代表一次完整成功的准入运行；缺少完成结局与 FINISH 会被回放资格门控判为诊断脚本。
+        validation.actions.append(ActionResult(step_id="profile-finish", tool=ToolName.FINISH, success=True))
         validation.snapshots = [
             snapshot.model_copy(update={"run_id": validation_id}, deep=True)
             for round_result in verification.rounds
@@ -1056,6 +1123,8 @@ class AgentOrchestrator:
                 "width": snapshot.width,
                 "height": snapshot.height,
                 "sha256": snapshot.image_sha256,
+                # 视觉模型对页面的理解摘要（mock 或分析失败时为占位说明），供前端思考流展示 LLM 输入理解。
+                "summary": snapshot.summary,
             },
         )
         emitter.emit(

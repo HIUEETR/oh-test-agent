@@ -10,6 +10,7 @@ from harmony_test_agent.config import Settings
 from harmony_test_agent.generation import HypiumGenerator
 from harmony_test_agent.models import (
     ActionResult,
+    AssertionDefinition,
     EventType,
     PageGraph,
     PageNode,
@@ -18,6 +19,7 @@ from harmony_test_agent.models import (
     RunState,
     RunTrace,
     ScreenSnapshot,
+    StableLocator,
     TargetAppProfile,
     ToolName,
     UIElement,
@@ -218,12 +220,46 @@ def _profile_api_client(tmp_path: Path) -> tuple[TestClient, object, _ProfileReg
         agent_provider="mock",
     )
     app = create_app(settings)
+    page_locators = [
+        StableLocator(
+            name=f"page-{index}",
+            page_signature=f"page-{index}",
+            key=f"page-key-{index}",
+            observed_rounds=3,
+            unique_match_rounds=3,
+            evidence_snapshot_ids=[f"snapshot-round-{round}" for round in range(1, 4)],
+        )
+        for index in range(1, 4)
+    ]
+    assertions = [
+        AssertionDefinition(
+            name=f"assertion-{index}",
+            kind="visible",
+            target=f"page-key-{index}",
+            page_signature=f"page-{index}",
+            observed_rounds=3,
+            evidence_snapshot_ids=[f"snapshot-round-{round}" for round in range(1, 4)],
+        )
+        for index in range(1, 3)
+    ]
     profile = TargetAppProfile(
         target_app_id="notes",
         display_name="Notes",
         bundle_name="com.example.notes",
         main_ability="EntryAbility",
         status=ProfileStatus.VERIFIED,
+        stable_locator_inventory=page_locators,
+        assertion_inventory=assertions,
+        provenance={
+            "verified_at": "2026-01-01T00:00:00Z",
+            "discovery_run_id": "run-profile",
+            "hypium_replay_run_ids": [
+                "run-profile:profile-attempt-1",
+                "run-profile:profile-attempt-2",
+                "run-profile:profile-attempt-3",
+            ],
+            "evidence": {"verification_passed": True, "cross_bundle_violations": 0},
+        },
     )
     registry = _ProfileRegistryStub(profile=profile)
     app.state.manager.profile_registry = registry

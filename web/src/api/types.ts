@@ -1,4 +1,6 @@
-// 本文件描述前端实际消费的 API JSON 子集；可选字段兼容旧 Trace 与并行演进中的后端契约。
+// 本文件描述前端消费的后端 API JSON 契约（含本次新增的 LLM 思考留痕字段）。
+// 可选字段兼容旧 Trace 与并行演进中的后端契约；新增字段均为后端纯增量输出。
+
 export type Health = {
   status: string;
   model: { configured: boolean; vision_configured: boolean; provider: string };
@@ -6,10 +8,12 @@ export type Health = {
   hypium: { importable: boolean; version?: string };
 };
 
+export type RunEventType = string;
+
 export type RunEvent = {
   event_id: number;
   run_id: string;
-  type: string;
+  type: RunEventType;
   timestamp: string;
   message: string;
   payload: Record<string, unknown>;
@@ -106,9 +110,68 @@ export type ReplayResult = {
   };
 };
 
+/* ---------- LLM 思考留痕（后端增量字段） ---------- */
+
+/** 顾问建议的结构化输出（编号对应候选摘要 candidates 的下标）。 */
+export type AdvisorVerdictView = {
+  page_summary: string;
+  recommended: number[];
+  avoid: number[];
+  reason: string;
+};
+
+/** 候选动作的可读摘要：recommended/avoid 的编号即此列表下标。 */
+export type CandidateDigestEntry = {
+  index: number;
+  kind: string;
+  label: string;
+  coordinate: [number, number] | null;
+};
+
+/** 一次顾问 LLM 调用的输入/输出留痕（AdvisorTurnRecord）。 */
+export type AdvisorTurnRecord = {
+  turn: number;
+  page_path: string;
+  snapshot_path: string | null;
+  input: string;
+  output: AdvisorVerdictView | null;
+  source: "model" | "heuristic-fallback" | "error" | string;
+  error: string | null;
+  elapsed_ms: number | null;
+};
+
+/** 按页面归档的顾问结论（advisor_verdicts 列表项）。 */
+export type AdvisorVerdictEntry = AdvisorVerdictView & {
+  identity: string;
+  source: string;
+  candidates?: CandidateDigestEntry[];
+};
+
+/* ---------- 运行状态 ---------- */
+
+/** 探索发现的页面（DiscoveryResult.pages 列表项）。 */
+export type DiscoveryPageView = {
+  page_id: string;
+  page_path: string;
+  snapshot_id: string;
+  image_path?: string;
+  element_count: number;
+  discovered_order: number;
+};
+
+/** 探索执行的跳转（DiscoveryResult.transitions 列表项，action 为探索动作摘要）。 */
+export type DiscoveryTransitionView = {
+  source_page_id: string;
+  target_page_id: string | null;
+  success: boolean;
+  blocked_reason?: string | null;
+  action: { kind: string; target_text?: string; locator_value?: string; locator_kind?: string };
+};
+
 export type DiscoveryStatus = {
   phase?: "bootstrap" | "task";
   provisional?: boolean;
+  live_mode?: boolean;
   profile_status?: string;
   profile_status_at_start?: string;
   profile_snapshot?: ProfileSummary;
@@ -123,6 +186,45 @@ export type DiscoveryStatus = {
   validation_rounds?: Array<{ round_number: number; passed: boolean; failures?: string[] }>;
   replays?: ReplayResult[];
   gates?: Record<string, boolean | number | string>;
+  /* DiscoveryResult 展开字段（advisor 相关为本次增量） */
+  pages?: DiscoveryPageView[];
+  transitions?: DiscoveryTransitionView[];
+  advisor_turns?: number;
+  advisor_verdicts?: AdvisorVerdictEntry[];
+  advisor_log?: AdvisorTurnRecord[];
+};
+
+export type PlannedStepView = {
+  step_id: string;
+  instruction: string;
+  tool: string;
+  target?: string | null;
+  text?: string | null;
+  coordinate?: [number, number] | null;
+  direction?: string | null;
+  wait_seconds?: number | null;
+  expected?: string | null;
+};
+
+/** 模型逐步工具决策（action_started 事件 payload.decision / ToolDecision）。 */
+export type ToolDecisionView = {
+  tool: string;
+  target?: string | null;
+  text?: string | null;
+  coordinate?: [number, number] | null;
+  direction?: string | null;
+  wait_seconds?: number | null;
+  reasoning?: string;
+};
+
+/** 工具执行结果（action_finished 事件 payload / ActionResult）。 */
+export type ActionResultView = {
+  step_id: string;
+  tool: string;
+  success: boolean;
+  duration_ms?: number;
+  error?: string | null;
+  warnings?: string[];
 };
 
 export type RunTrace = {
@@ -137,6 +239,7 @@ export type RunTrace = {
   updated_at?: string;
   phase?: "bootstrap" | "task";
   provisional?: boolean;
+  live_mode?: boolean;
   profile_status_at_start?: string;
   profile_snapshot?: ProfileSummary;
   resolved_target?: TargetCandidate;
@@ -146,16 +249,9 @@ export type RunTrace = {
   profile_validation_replays?: ReplayResult[];
   discovery?: DiscoveryStatus;
   error?: string;
-  plan: Array<{ step_id: string; instruction: string; tool: string; target?: string }>;
+  plan: PlannedStepView[];
   snapshots: Snapshot[];
-  actions: Array<{
-    step_id: string;
-    tool: string;
-    success: boolean;
-    duration_ms: number;
-    error?: string;
-    warnings: string[];
-  }>;
+  actions: ActionResultView[];
   assertions: Array<{ kind: string; target: string; passed: boolean; message: string }>;
   graph: {
     nodes: Array<ArtifactImage & {
@@ -191,6 +287,15 @@ export type RunTrace = {
   replay_passed?: number;
 };
 
+/** 历史运行摘要（GET /api/runs 列表项）。 */
+export type RunSummary = {
+  run_id: string;
+  state: string;
+  target_app_id?: string;
+  task?: string;
+  updated_at?: string;
+};
+
 export type ScriptResult = {
   python: string;
   config: Record<string, unknown>;
@@ -215,3 +320,21 @@ export type ExecuteResult = {
   attempts?: number;
   replays?: ReplayResult[];
 };
+
+/** 后端 EventType 枚举的全量镜像：SSE 订阅按名字监听。 */
+export const RUN_EVENT_TYPES = [
+  "run_started", "target_candidates_found", "target_resolved", "target_started", "profile_found",
+  "profile_revalidation_started", "profile_revalidation_finished", "discovery_started", "discovery_progress",
+  "discovery_finished", "discovery_path_blocked", "locator_candidate_observed", "profile_live_mode",
+  "profile_draft_saved", "profile_verification_round_finished", "hypium_replay_finished", "profile_promoted",
+  "original_task_started", "preflight_passed", "screen_captured", "elements_detected", "plan_created",
+  "action_started", "action_finished", "assertion_passed", "assertion_failed", "page_discovered",
+  "edge_created", "script_generated", "execution_started", "execution_finished", "run_failed", "run_finished",
+] as const;
+
+/** 终态集合：与后端 TERMINAL_STATES 保持一致。 */
+export const TERMINAL_STATES = new Set([
+  "completed", "failed_device", "failed_model", "failed_element", "failed_action",
+  "failed_assertion", "failed_script", "failed_target_resolution", "failed_target_probe",
+  "failed_discovery", "failed_profile_verification", "failed_profile_promotion", "stopped_by_user",
+]);

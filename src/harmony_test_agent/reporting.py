@@ -99,18 +99,20 @@ class ReportBuilder:
     @staticmethod
     def _document(trace: RunTrace, cards: str, coverage: str, replays: str, failures: str) -> str:
         css = """
-body { font-family: Inter, "Microsoft YaHei", sans-serif; background: #08111f; color: #e6edf7;
+body { font-family: "HarmonyOS Sans SC", Inter, "Microsoft YaHei", sans-serif; background: #eef3f9; color: #17212b;
   margin: 0; padding: 32px; }
 main { max-width: 1180px; margin: auto; }
-.summary, .step { background: #111d2e; border: 1px solid #263953; border-radius: 16px;
-  padding: 20px; margin: 16px 0; }
+.summary, .step { background: rgba(255, 255, 255, 0.88); border: 1px solid rgba(23, 58, 94, 0.12); border-radius: 16px;
+  padding: 20px; margin: 16px 0; box-shadow: 0 8px 24px rgba(23, 58, 94, 0.06); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
-.metric { background: #17263a; padding: 12px; border-radius: 10px; }
+.metric { background: #f2f7fc; padding: 12px; border-radius: 10px; }
+h1 { color: #0b48c4; } h2 { font-size: 17px; }
 img { display: block; max-width: 420px; max-height: 620px; object-fit: contain; border-radius: 12px;
-  border: 1px solid #324865; margin-top: 12px; }
-.ok { color: #61d6a3; } .bad { color: #ff7c8e; } code { color: #86d8ff; }
+  border: 1px solid #d7e2ee; background: #f7fafd; margin-top: 12px; }
+.ok { color: #0c7a48; } .bad { color: #b53539; }
+code { color: #0b48c4; background: rgba(10, 89, 247, 0.08); padding: 1px 6px; border-radius: 5px; }
 table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-th, td { border-bottom: 1px solid #324865; padding: 10px; text-align: left; }
+th, td { border-bottom: 1px solid #e3ecf5; padding: 10px; text-align: left; }
 """
         error = html.escape(trace.agent_error or trace.error or "")
         target = trace.resolved_target.model_dump(mode="json") if trace.resolved_target else {}

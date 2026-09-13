@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..devices import DeviceAdapter
 from ..models import (
@@ -13,6 +13,7 @@ from ..models import (
     LocatorKind,
     RunState,
     ScreenSnapshot,
+    StableLocator,
     TargetAppProfile,
     ToolDecision,
     ToolName,
@@ -31,12 +32,38 @@ class ToolExecutionError(RuntimeError):
 
 
 @dataclass(slots=True)
+class LaunchSpec:
+    """最小启动规格：verified Profile 或实时模式解析结果都能产出它。"""
+
+    bundle_name: str
+    main_ability: str
+    launch_strategy: dict[str, str] | None = None
+
+    @classmethod
+    def from_profile(cls, profile: TargetAppProfile) -> LaunchSpec:
+        return cls(
+            bundle_name=profile.bundle_name,
+            main_ability=profile.main_ability,
+            launch_strategy=dict(profile.launch_strategy) if profile.launch_strategy else None,
+        )
+
+    @classmethod
+    def from_kwargs(cls, bundle_name: str, main_ability: str, module_name: str | None = None) -> LaunchSpec:
+        return cls(
+            bundle_name=bundle_name,
+            main_ability=main_ability,
+            launch_strategy={"module_name": module_name} if module_name else None,
+        )
+
+
+@dataclass(slots=True)
 class ToolExecutor:
     """解析元素、调用设备适配器并生成统一的动作结果。"""
 
     device: DeviceAdapter
-    profile: TargetAppProfile
+    launch: LaunchSpec
     safety: SafetyPolicy
+    stable_locators: list[StableLocator] = field(default_factory=list)
 
     def execute(self, step_id: str, decision: ToolDecision, snapshot: ScreenSnapshot | None) -> ActionResult:
         """执行一个已规划工具决策，并返回标准化动作结果。"""
@@ -50,7 +77,7 @@ class ToolExecutor:
         warnings: list[str] = []
 
         if decision.tool == ToolName.OPEN_APP:
-            command = self.device.open_app(self.profile, reset=True)
+            command = self.device.open_app(self.launch, reset=True)
         elif decision.tool == ToolName.INSPECT_SCREEN:
             pass
         elif decision.tool == ToolName.CLICK_ELEMENT:
@@ -117,7 +144,7 @@ class ToolExecutor:
         result = find_element(
             snapshot.elements,
             target or "",
-            stable_locators=self.profile.stable_locator_inventory,
+            stable_locators=self.stable_locators,
             clickable=clickable,
             editable=editable,
         )
@@ -164,7 +191,7 @@ class ToolExecutor:
             found = find_element(
                 snapshot.elements,
                 candidate,
-                stable_locators=self.profile.stable_locator_inventory,
+                stable_locators=self.stable_locators,
             )
             if found:
                 matched_candidate = candidate

@@ -45,6 +45,52 @@ class ForegroundApp(BaseModel):
     window_type: str | None = None
 
 
+def normalize_display_label(value: str) -> str:
+    """Canonical display-name comparison form: collapse whitespace and casefold."""
+    return " ".join(value.split()).casefold()
+
+
+def parse_launcher_labels(
+    hierarchy: Mapping[str, Any],
+    bundle_names: Iterable[str],
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Extract launcher-rendered display names per bundle from a desktop hierarchy dump.
+
+    Bundle Manager reports application labels as unresolved resource references
+    (``$string:app_name``) on recent system versions, while the launcher renders the
+    resolved localized name as icon text and embeds the bundle name inside ancestor
+    test keys (e.g. ``SwiperPage_GridItem_[<bundle>___...``). Returns the
+    bundle -> display-name mapping plus the signature of all node keys so callers can
+    detect page changes while swiping through the desktop.
+    """
+    bundles = sorted({name for name in bundle_names if name}, key=len, reverse=True)
+    mapping: dict[str, str] = {}
+    signature: list[str] = []
+
+    def _walk(node: Mapping[str, Any], ancestor_keys: list[str]) -> None:
+        attrs = node.get("attributes")
+        attrs = attrs if isinstance(attrs, Mapping) else {}
+        key = str(attrs.get("key", ""))
+        node_id = str(attrs.get("id", ""))
+        keys = [*ancestor_keys, key, node_id]
+        for value in (key, node_id):
+            if value:
+                signature.append(value)
+        text = str(attrs.get("text", "")).strip()
+        if text:
+            for bundle in bundles:
+                if any(bundle in value for value in keys):
+                    mapping[bundle] = text
+                    break
+        for child in node.get("children") or []:
+            if isinstance(child, Mapping):
+                _walk(child, keys)
+
+    if isinstance(hierarchy, Mapping):
+        _walk(hierarchy, [])
+    return mapping, tuple(signature)
+
+
 def parse_bundle_list(raw: str) -> list[str]:
     """Parse ``bm dump -a`` output without treating diagnostic text as a bundle."""
     if not raw.strip():

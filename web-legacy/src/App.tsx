@@ -377,10 +377,10 @@ export default function App() {
   const graphArtifactUrl = useCallback((path: string) => artifactUrl(runId, path), [runId]);
   const state = trace?.state ?? (runId ? "created" : "idle");
   const resolved = discovery?.resolved_target ?? trace?.resolved_target;
-  const profileStatus = discovery?.profile_status ?? trace?.profile_snapshot?.status ?? trace?.profile_status_at_start ?? "未创建";
+  const profileStatus = discovery?.profile_status ?? trace?.profile_snapshot?.status ?? (trace?.live_mode ? "实时模式" : trace?.profile_status_at_start ?? "未创建");
   const blockedPaths = discovery?.blocked_paths ?? [];
   const scriptDiagnostic = script?.diagnostic ?? (script?.purpose ? script.purpose === "diagnostic" : !["regression", "stability"].includes(trace?.mode ?? mode));
-  const replayAllowed = (script?.acceptance_replay_enabled ?? !scriptDiagnostic) && !trace?.provisional;
+  const replayAllowed = (script?.acceptance_replay_enabled ?? !scriptDiagnostic) && !trace?.provisional && !trace?.live_mode;
   const scriptStatus = operation === "generating" ? "生成中" : script ? (scriptDiagnostic ? "诊断脚本" : "已生成") : trace?.generated ? "正在读取" : "待自动生成";
   const operationBusy = operation !== "idle";
   const completedAttempts = trace?.replay_completed ?? trace?.replays.filter((item) => ["passed", "failed", "timed_out", "ineligible", "invalid_result"].includes(replayStatus(item))).length ?? 0;

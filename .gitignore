@@ -11,6 +11,7 @@ wheels/
 .coverage
 .coverage.*
 htmlcov/
+.zcode/
 
 # Virtual environments
 .venv/
@@ -24,12 +25,13 @@ htmlcov/
 .runtime-user/
 
 # Node/Web build and test outputs
-web/node_modules/
-web/dist/
-web/.vite/
-web/coverage/
-web/playwright-report/
-web/test-results/
+web*/node_modules/
+web*/dist/
+web*/.vite/
+web*/.tmp/
+web*/coverage/
+web*/playwright-report/
+web*/test-results/
 
 # Runtime artifacts. Keep only the directory contract in Git.
 profiles/draft/

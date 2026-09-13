@@ -10,14 +10,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
 from ..devices import DeviceAdapter, DeviceError
 from ..models import CommandResult, ExplorationPolicy, ScreenSnapshot, UIElement
+from ..perception.normalizer import normalize_layout, page_path
 from ..runtime.safety import SafetyPolicy
 from ..targets import ForegroundApp, ResolvedTarget
+from .advisor import AdvisorTurnRecord
+
+if TYPE_CHECKING:
+    from .advisor import AdvisorVerdict, ExplorationAdvisor
 
 
 class ActionRisk(StrEnum):
@@ -43,6 +48,7 @@ class ExplorationAction(BaseModel):
     risk: ActionRisk = ActionRisk.DEFAULT_ALLOWED
     risk_reason: str = ""
     required_permission: str | None = None
+    content_like: bool = False
 
 
 class DiscoveryPage(BaseModel):
@@ -50,6 +56,7 @@ class DiscoveryPage(BaseModel):
 
     page_id: str
     signature: str
+    structural_identity: str = ""
     page_path: str
     bundle_name: str
     ability_name: str | None = None
@@ -76,6 +83,7 @@ class DiscoveryTransition(BaseModel):
     success: bool = False
     blocked_reason: str | None = None
     elapsed_ms: int = 0
+    replayable: bool = True
 
 
 class DiscoveryResult(BaseModel):
@@ -86,6 +94,9 @@ class DiscoveryResult(BaseModel):
     pages: list[DiscoveryPage] = Field(default_factory=list)
     transitions: list[DiscoveryTransition] = Field(default_factory=list)
     blocked_actions: list[ExplorationAction] = Field(default_factory=list)
+    advisor_turns: int = 0
+    advisor_verdicts: list[dict[str, object]] = Field(default_factory=list)
+    advisor_log: list[AdvisorTurnRecord] = Field(default_factory=list)
     started_at_monotonic: float = Field(exclude=True, default=0)
     duration_seconds: float = 0
     stop_reason: str = "queue_exhausted"
@@ -163,6 +174,15 @@ class ActionRiskClassifier:
 
 DiscoveryProgress = Callable[[str, dict[str, object]], None]
 
+_LOADING_TEXT_PATTERN = re.compile(r"正在加载|加载中|加载更多|loading|refreshing|请稍候|请等待", re.IGNORECASE)
+_TIME_TEXT_PATTERN = re.compile(r"^\d{1,2}[:：]\d{2}([:：]\d{2})?$")
+_DIGIT_PUNCT_TEXT_PATTERN = re.compile(r"^[\d\s:：.，,。、%/+-]+$")
+_STRUCTURAL_KEY_ID_PATTERN = re.compile(r"\d{4,}")
+_IDENTITY_KEY_ID_PATTERN = re.compile(r"\d+")
+_CONTENT_LIKE_KEY_ID_PATTERN = re.compile(r"\d{4,}")
+_CONTENT_STREAM_KEY_PATTERN = re.compile(r"feed|card|banner|recommend|article|answer|video", re.IGNORECASE)
+_CONTENT_LIKE_TEXT_LIMIT = 40
+
 
 class BoundedExplorer:
     """Explore safe UI candidates within page, action, duration, and bundle boundaries."""
@@ -177,6 +197,7 @@ class BoundedExplorer:
         classifier: ActionRiskClassifier | None = None,
         progress: DiscoveryProgress | None = None,
         should_stop: Callable[[], bool] | None = None,
+        advisor: ExplorationAdvisor | None = None,
     ) -> None:
         self.device = device
         self.target = target
@@ -186,6 +207,10 @@ class BoundedExplorer:
         self.classifier = classifier or ActionRiskClassifier()
         self.progress = progress
         self.should_stop = should_stop or (lambda: False)
+        self.advisor = advisor
+        # 结构身份 -> (建议, 来源, 建议时的候选摘要)；候选摘要用于把编号建议映射回可读控件。
+        self._advisor_verdicts: dict[str, tuple[AdvisorVerdict, str, list[dict[str, object]]]] = {}
+        self._advisor_summaries: list[str] = []
 
     def explore(self) -> DiscoveryResult:
         result = DiscoveryResult(target=self.target, policy=self.policy, started_at_monotonic=time.monotonic())
@@ -210,8 +235,8 @@ class BoundedExplorer:
             raise DeviceError(f"aa start failed: {started.stderr or started.stdout}")
 
         visited_actions: set[tuple[str, str]] = set()
-        page_by_signature: dict[str, DiscoveryPage] = {}
-        snapshot = self.device.screenshot(self.output_dir, self.run_id, "discovery-000")
+        pages_by_identity: dict[str, DiscoveryPage] = {}
+        snapshot = self._capture_settled("discovery-000")
         foreground = self._assert_target_foreground()
         queue: list[tuple[ScreenSnapshot, ForegroundApp, list[ExplorationAction]]] = [(snapshot, foreground, [])]
 
@@ -223,25 +248,40 @@ class BoundedExplorer:
                 result.stop_reason = "duration_limit"
                 break
             current_snapshot, current_foreground, current_path = queue.pop(0)
-            current_snapshot, current_foreground = self._restore_path(
-                current_path,
-                current_snapshot,
-                current_foreground,
-                len(result.transitions),
-            )
-            page = self._page(current_snapshot, current_foreground, len(page_by_signature) + 1, current_path)
-            if page.signature not in page_by_signature:
-                if len(page_by_signature) >= self.policy.max_pages:
+            if current_path:
+                # 空路径即启动后的首页快照，无需恢复；非空路径冷启动重放以验证可回放性。
+                try:
+                    current_snapshot, current_foreground = self._restore_path(
+                        current_path,
+                        current_snapshot,
+                        current_foreground,
+                        len(result.transitions),
+                    )
+                except DeviceError as exc:
+                    self._progress("page_unreachable", {"path_length": len(current_path), "error": str(exc)})
+                    continue
+            source_identity = self._structural_identity(current_snapshot, current_foreground)
+            page = pages_by_identity.get(source_identity)
+            if page is None:
+                if len(pages_by_identity) >= self.policy.max_pages:
                     result.stop_reason = "page_limit"
                     break
-                page_by_signature[page.signature] = page
+                page = self._page(
+                    current_snapshot,
+                    current_foreground,
+                    len(pages_by_identity) + 1,
+                    current_path,
+                    structural_identity=source_identity,
+                )
+                pages_by_identity[source_identity] = page
                 result.pages.append(page)
-            else:
-                page = page_by_signature[page.signature]
 
-            candidates = self.candidate_actions(current_snapshot)[: self.policy.max_actions_per_page]
+            candidates = self._select_candidates(current_snapshot)
+            verdict, advisor_source = self._advise_page(page, current_snapshot, candidates)
+            if verdict is not None:
+                candidates = self._apply_advisor(candidates, verdict)
             for action in candidates:
-                key = (page.signature, action.action_id)
+                key = (page.structural_identity or page.signature, action.action_id)
                 if key in visited_actions:
                     continue
                 visited_actions.add(key)
@@ -264,9 +304,28 @@ class BoundedExplorer:
                 if self.should_stop():
                     result.stop_reason = "stopped_by_user"
                     break
+                try:
+                    action = self.resolve_replay_action(action, current_snapshot)
+                except DeviceError as exc:
+                    result.transitions.append(
+                        DiscoveryTransition(
+                            source_page_id=page.page_id,
+                            action=action,
+                            before_snapshot_id=current_snapshot.snapshot_id,
+                            foreground_before=current_foreground,
+                            blocked_reason=f"candidate locator no longer resolves: {exc}",
+                            replayable=False,
+                        )
+                    )
+                    self._progress(
+                        "stale_candidate",
+                        {"page_id": page.page_id, "action_id": action.action_id, "error": str(exc)},
+                    )
+                    continue
                 transition, after = self._perform(
                     page, current_snapshot, current_foreground, action, len(result.transitions)
                 )
+                transition.replayable = not (action.kind == "click" and action.content_like)
                 result.transitions.append(transition)
                 if transition.blocked_reason and "cross-bundle" in transition.blocked_reason:
                     result.blocked_actions.append(action)
@@ -288,41 +347,66 @@ class BoundedExplorer:
                     },
                 )
                 if after is not None and transition.foreground_after:
-                    after_page = self._page(
-                        after, transition.foreground_after, len(page_by_signature) + 1, [*current_path, action]
-                    )
-                    if after_page.signature not in page_by_signature and len(page_by_signature) < self.policy.max_pages:
-                        page_by_signature[after_page.signature] = after_page
+                    after_identity = self._structural_identity(after, transition.foreground_after)
+                    known = pages_by_identity.get(after_identity)
+                    if known is not None:
+                        transition.target_page_id = known.page_id
+                    elif len(pages_by_identity) < self.policy.max_pages and not (
+                        action.kind == "click" and action.content_like
+                    ):
+                        after_page = self._page(
+                            after,
+                            transition.foreground_after,
+                            len(pages_by_identity) + 1,
+                            [*current_path, action],
+                            structural_identity=after_identity,
+                        )
+                        pages_by_identity[after_identity] = after_page
                         result.pages.append(after_page)
                         transition.target_page_id = after_page.page_id
                         queue.append((after, transition.foreground_after, [*current_path, action]))
-                    elif after_page.signature in page_by_signature:
-                        transition.target_page_id = page_by_signature[after_page.signature].page_id
-                current_snapshot, current_foreground = self._restore_path(
-                    current_path,
-                    current_snapshot,
-                    current_foreground,
-                    len(result.transitions),
-                )
-            if self._early_success(result):
+                try:
+                    current_snapshot, current_foreground = self._recover_to_source(
+                        current_path,
+                        source_identity,
+                        current_snapshot,
+                        current_foreground,
+                        action,
+                        after,
+                        transition,
+                        len(result.transitions),
+                    )
+                except DeviceError as exc:
+                    self._progress("source_unreachable", {"page_id": page.page_id, "error": str(exc)})
+                    break
+            if self._early_success(result, self.policy.min_interaction_kinds):
                 result.stop_reason = "admission_metrics_reached"
                 break
 
         result.duration_seconds = round(time.monotonic() - result.started_at_monotonic, 3)
+        result.advisor_turns = self.advisor.turn_count if self.advisor else 0
+        result.advisor_verdicts = [
+            {"identity": identity, "source": source, "candidates": digest, **verdict.model_dump()}
+            for identity, (verdict, source, digest) in self._advisor_verdicts.items()
+        ]
+        if self.advisor:
+            result.advisor_log = list(self.advisor.turns)
         self._save(result)
         self._save_observations(result)
         self._progress("finished", {"stop_reason": result.stop_reason, "pages": len(result.pages)})
         return result
 
     def candidate_actions(self, snapshot: ScreenSnapshot) -> list[ExplorationAction]:
-        """Rank hierarchy-backed actions and cap them later per page."""
+        """Rank hierarchy-backed actions; content-like clicks drop below input/swipe."""
         ranked: list[tuple[int, ExplorationAction]] = []
         for element in snapshot.elements:
             text = " ".join(filter(None, (element.content, element.description, element.key, element.id, element.type)))
             risk, reason, permission = self.classifier.classify(text, self.policy)
             stable = bool(element.key or element.id)
+            content_like = self._is_content_like(element)
             if element.clickable and element.bbox:
-                ranked.append((0 if stable else 1, self._action("click", element, text, risk, reason, permission)))
+                rank = 4 if content_like else (0 if stable else 1)
+                ranked.append((rank, self._action("click", element, text, risk, reason, permission, content_like)))
             if element.editable and element.bbox:
                 ranked.append((2, self._action("input", element, text, risk, reason, permission)))
             if element.scrollable:
@@ -332,6 +416,154 @@ class BoundedExplorer:
             unique.setdefault(item[1].action_id, item)
         return [item[1] for item in sorted(unique.values(), key=lambda item: (item[0], item[1].action_id))]
 
+    def _select_candidates(self, snapshot: ScreenSnapshot) -> list[ExplorationAction]:
+        """Type-balanced per-page budget so input/swipe survive on click-rich pages."""
+        ranked = self.candidate_actions(snapshot)
+        budget = self.policy.max_actions_per_page
+        inputs = [item for item in ranked if item.kind == "input"][:1]
+        swipes = [item for item in ranked if item.kind == "swipe"][:1]
+        clicks = [item for item in ranked if item.kind == "click"]
+        click_budget = max(budget - len(inputs) - len(swipes), 1)
+        selected = [*inputs, *swipes, *clicks[:click_budget]]
+        order = {item.action_id: index for index, item in enumerate(ranked)}
+        return sorted(selected, key=lambda item: order[item.action_id])[:budget]
+
+    @staticmethod
+    def _is_content_like(element: UIElement) -> bool:
+        """信息流卡片/内容实例的 key 内嵌长数字 ID 或标题超长，主动点击只会进入不可回放的内容页。"""
+        identity_text = " ".join(filter(None, (element.key, element.id)))
+        if _CONTENT_LIKE_KEY_ID_PATTERN.search(identity_text):
+            return True
+        return bool(element.content and len(element.content) > _CONTENT_LIKE_TEXT_LIMIT)
+
+    def _advise_page(
+        self,
+        page: DiscoveryPage,
+        snapshot: ScreenSnapshot,
+        candidates: list[ExplorationAction],
+    ) -> tuple[AdvisorVerdict | None, str]:
+        """为逻辑页请求顾问建议；同一结构身份复用既有建议，不再追加对话轮次。"""
+        if self.advisor is None:
+            return None, "heuristic"
+        known = self._advisor_verdicts.get(page.structural_identity)
+        if known is not None:
+            verdict, source, digest = known
+            self._progress(
+                "advisor",
+                {
+                    "page_id": page.page_id,
+                    "source": "reuse",
+                    "turns": self.advisor.turn_count,
+                    "verdict": verdict.model_dump(),
+                    "candidates": digest,
+                },
+            )
+            return verdict, "reuse"
+        turns_before = len(self.advisor.turns)
+        verdict, source = self.advisor.advise(snapshot, candidates, self._advisor_context_note())
+        digest = self._candidate_digest(candidates)
+        if verdict is not None:
+            self._advisor_verdicts[page.structural_identity] = (verdict, source, digest)
+            summary = f"{page.page_path}: {verdict.page_summary or '（无摘要）'}"
+            self._advisor_summaries.append(summary)
+        self._progress(
+            "advisor",
+            {
+                "page_id": page.page_id,
+                "source": source,
+                "turns": self.advisor.turn_count,
+                "verdict": verdict.model_dump() if verdict else None,
+                "candidates": digest,
+            },
+        )
+        # 把本轮（或异常兜底轮）LLM 调用的输入/输出留痕作为独立进度事件推送，供前端实时渲染思考流。
+        for record in self.advisor.turns[turns_before:]:
+            self._progress(
+                "advisor_turn",
+                {"page_id": page.page_id, "turn": record.model_dump(mode="json"), "candidates": digest},
+            )
+        return verdict, source
+
+    @staticmethod
+    def _candidate_digest(candidates: list[ExplorationAction]) -> list[dict[str, object]]:
+        """候选动作的可读摘要：顾问的 recommended/avoid 编号即此列表的下标。"""
+        digest: list[dict[str, object]] = []
+        for index, action in enumerate(candidates):
+            locator = action.locator_value if action.locator_kind in {"key", "id"} else action.target_text
+            digest.append(
+                {
+                    "index": index,
+                    "kind": action.kind,
+                    "label": str(locator)[:60],
+                    "coordinate": list(action.coordinate) if action.coordinate else None,
+                }
+            )
+        return digest
+
+    def _apply_advisor(
+        self,
+        candidates: list[ExplorationAction],
+        verdict: AdvisorVerdict,
+    ) -> list[ExplorationAction]:
+        """按建议重排/过滤候选：recommended 提前，avoid 剔除（input/swipe 不受 avoid 影响）。"""
+        limit = len(candidates)
+        recommended_ids = {
+            candidates[index].action_id
+            for index in verdict.recommended
+            if isinstance(index, int) and 0 <= index < limit
+        }
+        avoid_ids = {
+            candidates[index].action_id
+            for index in verdict.avoid
+            if isinstance(index, int) and 0 <= index < limit and candidates[index].kind == "click"
+        }
+        recommended = [item for item in candidates if item.action_id in recommended_ids]
+        rest = [
+            item for item in candidates if item.action_id not in recommended_ids and item.action_id not in avoid_ids
+        ]
+        ordered = recommended + rest
+        return ordered[: max(self.policy.max_actions_per_page, len(recommended))]
+
+    def _advisor_context_note(self) -> str:
+        """已探索页面的确定性摘要，随 payload 携带；不额外调用模型做压缩。"""
+        if not self._advisor_summaries:
+            return ""
+        lines = [f"- {summary}" for summary in self._advisor_summaries[-10:]]
+        return "此前已探索页面摘要（避免重复推荐已走过的入口）：\n" + "\n".join(lines)
+
+    def _recover_to_source(
+        self,
+        path: list[ExplorationAction],
+        source_identity: str,
+        expected: ScreenSnapshot,
+        expected_foreground: ForegroundApp,
+        action: ExplorationAction,
+        after: ScreenSnapshot | None,
+        transition: DiscoveryTransition,
+        sequence: int,
+    ) -> tuple[ScreenSnapshot, ForegroundApp]:
+        """Cheaply return to the source page between candidates; cold restore is the last resort.
+
+        队列出队的冷启动回放承担路径验证；候选动作之间先看落地页身份、再试一次 back，
+        都失败才走冷启动重放。input 动作因软键盘污染状态必须冷恢复，优先于身份检查。
+        """
+        if action.kind == "input":
+            return self._restore_path(path, expected, expected_foreground, sequence)
+        if after is not None and transition.foreground_after:
+            if self._structural_identity(after, transition.foreground_after) == source_identity:
+                return after, transition.foreground_after
+        backed = self.device.back()
+        if backed.ok:
+            self.device.wait(0.5)
+            try:
+                recovered_foreground = self._assert_target_foreground()
+                recovered = self._capture_settled(f"recover-{sequence:03d}")
+                if self._structural_identity(recovered, recovered_foreground) == source_identity:
+                    return recovered, recovered_foreground
+            except DeviceError:
+                pass
+        return self._restore_path(path, expected, expected_foreground, sequence)
+
     def _action(
         self,
         kind: Literal["click", "input", "swipe"],
@@ -340,6 +572,7 @@ class BoundedExplorer:
         risk: ActionRisk,
         reason: str,
         permission: str | None,
+        content_like: bool = False,
     ) -> ExplorationAction:
         identity = element.key or element.id or element.element_id
         if element.key:
@@ -365,6 +598,7 @@ class BoundedExplorer:
             risk=risk,
             risk_reason=reason,
             required_permission=permission,
+            content_like=content_like,
         )
 
     def resolve_replay_action(
@@ -479,7 +713,28 @@ class BoundedExplorer:
         expected_foreground: ForegroundApp,
         sequence: int,
     ) -> tuple[ScreenSnapshot, ForegroundApp]:
-        """Rebuild one queued state from a clean launch and verify every path step."""
+        """Rebuild one queued state from a clean launch with bounded retries per attempt."""
+        attempts = 1 + self.policy.restore_retries
+        failure: str | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._restore_attempt(path, expected, expected_foreground, sequence, attempt)
+            except DeviceError as exc:
+                failure = str(exc)
+                if attempt >= attempts:
+                    break
+                self._progress("restore_retry", {"sequence": sequence, "attempt": attempt, "error": failure})
+        raise DeviceError(failure or "exploration path restoration failed")
+
+    def _restore_attempt(
+        self,
+        path: list[ExplorationAction],
+        expected: ScreenSnapshot,
+        expected_foreground: ForegroundApp,
+        sequence: int,
+        attempt: int,
+    ) -> tuple[ScreenSnapshot, ForegroundApp]:
+        """Rebuild one queued state from a clean launch and verify the structural match."""
         stopped = self.device.stop_app(self.target.bundle_name)
         if not stopped.ok:
             raise DeviceError(f"force-stop failed while restoring exploration path: {stopped.stderr or stopped.stdout}")
@@ -487,7 +742,7 @@ class BoundedExplorer:
         if not started.ok:
             raise DeviceError(f"launch failed while restoring exploration path: {started.stderr or started.stdout}")
         foreground = self._assert_target_foreground()
-        snapshot = self.device.screenshot(self.output_dir, self.run_id, f"restore-{sequence:03d}-000")
+        snapshot = self._capture_settled(f"restore-{sequence + attempt - 1:03d}-000")
         for index, action in enumerate(path, 1):
             source = self._page(snapshot, foreground, 0, path[: index - 1])
             action = self.resolve_replay_action(action, snapshot)
@@ -499,15 +754,135 @@ class BoundedExplorer:
                 )
             snapshot = after
             foreground = transition.foreground_after
-        actual = self._page(snapshot, foreground, 0, path)
-        expected_signature = self._snapshot_signature(expected, expected_foreground)
-        if actual.signature != expected_signature:
-            raise DeviceError("restored exploration state does not match the queued page signature")
+        if not self._structural_match(expected, expected_foreground, snapshot, foreground):
+            raise DeviceError(self._restore_mismatch_detail(expected, snapshot))
         return snapshot, foreground
+
+    def _capture_settled(self, label: str) -> ScreenSnapshot:
+        """Capture one frame and poll the hierarchy within the settle budget for stability."""
+        snapshot = self.device.screenshot(self.output_dir, self.run_id, label)
+        if self.policy.settle_timeout_seconds <= 0:
+            return snapshot
+        fingerprint = self._stability_fingerprint(snapshot.page_path, snapshot.elements)
+        deadline = time.monotonic() + self.policy.settle_timeout_seconds
+        while time.monotonic() < deadline:
+            self.device.wait(0.5)
+            try:
+                hierarchy = self.device.collect_ui_hierarchy()
+            except DeviceError:
+                break
+            elements = normalize_layout(hierarchy, snapshot.width, snapshot.height)
+            if self._stability_fingerprint(page_path(hierarchy), elements) == fingerprint:
+                return snapshot
+        return self.device.screenshot(self.output_dir, self.run_id, f"{label}-settled")
+
+    @classmethod
+    def _stability_fingerprint(cls, page: str, elements: list[UIElement]) -> tuple[str, int, tuple[str, ...]]:
+        return (page, len(elements), tuple(sorted(cls._stable_texts(elements))))
+
+    @staticmethod
+    def _stable_texts(elements: list[UIElement]) -> set[str]:
+        return {
+            _normalize_text(item.content)
+            for item in elements
+            if item.content and len(item.content) <= 80 and not _is_volatile_text(item.content)
+        }
+
+    @classmethod
+    def _structural_match(
+        cls,
+        expected: ScreenSnapshot,
+        expected_foreground: ForegroundApp,
+        actual: ScreenSnapshot,
+        actual_foreground: ForegroundApp,
+    ) -> bool:
+        """Page identity holds when the queued page's interactive structure is still present.
+
+        key/id 集合不参与判定：真实应用的 key 常携带内容实例 ID 或面板模式（热榜/历史），
+        跨启动不可复现；错误页由每个回放动作的定位符重解析兜底。
+        """
+        _, expected_interactive = cls._structural_features(expected)
+        _, actual_interactive = cls._structural_features(actual)
+        if (
+            expected.page_path != actual.page_path
+            or expected_foreground.bundle_name != actual_foreground.bundle_name
+            or expected_foreground.window_type != actual_foreground.window_type
+        ):
+            return False
+        return expected_interactive.issubset(actual_interactive)
+
+    @staticmethod
+    def _structural_features(snapshot: ScreenSnapshot) -> tuple[set[str], set[tuple[str, bool, bool, bool]]]:
+        """卡片 key 常携带内容实例 ID（如知乎流卡片），长数字串折叠后才能跨启动比较同类结构。"""
+        keys = {
+            _STRUCTURAL_KEY_ID_PATTERN.sub("#", item.key or item.id)
+            for item in snapshot.elements
+            if item.key or item.id
+        }
+        interactive = {
+            (item.type, item.clickable, item.editable, item.scrollable)
+            for item in snapshot.elements
+            if item.clickable or item.editable or item.scrollable
+        }
+        return keys, interactive
+
+    @classmethod
+    def _structural_identity(cls, snapshot: ScreenSnapshot, foreground: ForegroundApp) -> str:
+        """内容抖动稳定的逻辑页身份：page_path + 前台 + 结构骨架 key + 可交互结构。
+
+        与 `_structural_match` 的差异：身份用于探索去重与跨轮比对，key 折叠到任意
+        数字串，并进一步剔除内容流噪音 key——信息流卡片（携带内容实例 ID）与
+        feed/card 等内容容器会随推荐内容在"存在/不存在"之间翻转（知乎首页实测存在
+        feed_list 与 feed_card_article 两个互不为子集的变体），只保留结构骨架才能
+        让"同一页面、不同内容实例"收敛为同一逻辑页。
+        """
+        keys = {
+            _IDENTITY_KEY_ID_PATTERN.sub("#", item.key or item.id)
+            for item in snapshot.elements
+            if (item.key or item.id)
+            and not _CONTENT_LIKE_KEY_ID_PATTERN.search(item.key or item.id)
+            and not _CONTENT_STREAM_KEY_PATTERN.search(item.key or item.id)
+        }
+        _, interactive = cls._structural_features(snapshot)
+        raw = json.dumps(
+            [
+                snapshot.page_path,
+                foreground.bundle_name,
+                foreground.window_type,
+                sorted(keys),
+                sorted(interactive),
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _restore_mismatch_detail(expected: ScreenSnapshot, actual: ScreenSnapshot) -> str:
+        expected_texts = BoundedExplorer._stable_texts(expected.elements)
+        actual_texts = BoundedExplorer._stable_texts(actual.elements)
+        expected_keys, expected_interactive = BoundedExplorer._structural_features(expected)
+        actual_keys, actual_interactive = BoundedExplorer._structural_features(actual)
+        missing_texts = sorted(expected_texts - actual_texts)[:5]
+        unexpected_texts = sorted(actual_texts - expected_texts)[:5]
+        missing_keys = sorted(expected_keys - actual_keys)[:5]
+        unexpected_keys = sorted(actual_keys - expected_keys)[:5]
+        missing_widgets = sorted(
+            f"{kind}/{clickable}/{editable}/{scrollable}"
+            for kind, clickable, editable, scrollable in (expected_interactive - actual_interactive)
+        )[:5]
+        return (
+            "restored exploration state does not match the queued page structure: "
+            f"expected page_path={expected.page_path!r}, actual page_path={actual.page_path!r}; "
+            f"missing widgets={missing_widgets}; "
+            f"missing keys={missing_keys}, unexpected keys={unexpected_keys}; "
+            f"missing texts={missing_texts}, unexpected texts={unexpected_texts}"
+        )
 
     def _progress(self, kind: str, payload: dict[str, object]) -> None:
         if self.progress:
-            self.progress(kind, payload)
+            # 注入 stage 便于前端按阶段分发（advisor/advisor_turn/blocked/finished 等）。
+            self.progress(kind, {"stage": kind, **payload})
 
     def _assert_target_foreground(self) -> ForegroundApp:
         foreground = self.device.current_foreground_app()
@@ -526,9 +901,7 @@ class BoundedExplorer:
     @staticmethod
     def _snapshot_signature(snapshot: ScreenSnapshot, foreground: ForegroundApp) -> str:
         stable_keys = sorted({item.key or item.id for item in snapshot.elements if item.key or item.id})
-        texts = sorted(
-            {_normalize_text(item.content) for item in snapshot.elements if item.content and len(item.content) <= 80}
-        )[:30]
+        texts = sorted(BoundedExplorer._stable_texts(snapshot.elements))[:30]
         raw = json.dumps(
             [
                 snapshot.page_path,
@@ -549,11 +922,13 @@ class BoundedExplorer:
         foreground: ForegroundApp,
         order: int,
         path_actions: list[ExplorationAction] | None = None,
+        structural_identity: str = "",
     ) -> DiscoveryPage:
         signature = BoundedExplorer._snapshot_signature(snapshot, foreground)
         return DiscoveryPage(
             page_id=f"page-{signature[:12]}",
             signature=signature,
+            structural_identity=structural_identity or BoundedExplorer._structural_identity(snapshot, foreground),
             page_path=snapshot.page_path,
             bundle_name=foreground.bundle_name,
             ability_name=foreground.ability_name,
@@ -567,12 +942,17 @@ class BoundedExplorer:
         )
 
     @staticmethod
-    def _early_success(result: DiscoveryResult) -> bool:
-        # Metrics split across branches cannot satisfy the replay admission gate.
-        return any(
-            len(page.path_actions) >= 3 and len({action.kind for action in page.path_actions}) >= 3
-            for page in result.pages
-        )
+    def _early_success(result: DiscoveryResult, min_interaction_kinds: int) -> bool:
+        # 与 Profile 验证准入门槛一致：一条动作类型达标的路径覆盖 ≥3 个逻辑页即可早停。
+        for page in result.pages:
+            if len({action.kind for action in page.path_actions}) < min_interaction_kinds:
+                continue
+            flow_pages = [
+                item for item in result.pages if page.path_actions[: len(item.path_actions)] == item.path_actions
+            ]
+            if len(flow_pages) >= 3:
+                return True
+        return False
 
     def _save_observations(self, result: DiscoveryResult) -> None:
         locator_observations: list[dict[str, object]] = []
@@ -612,3 +992,15 @@ class BoundedExplorer:
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _is_volatile_text(value: str) -> bool:
+    """加载占位、时间样式与纯数字/标点文本跨启动或跨分钟不稳定，不参与页面签名。"""
+    normalized = _normalize_text(value)
+    if not normalized:
+        return True
+    if _LOADING_TEXT_PATTERN.search(normalized):
+        return True
+    if _TIME_TEXT_PATTERN.match(normalized):
+        return True
+    return bool(_DIGIT_PUNCT_TEXT_PATTERN.match(normalized))

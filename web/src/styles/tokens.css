@@ -1,0 +1,54 @@
+/*
+ * 设计令牌：浅色玻璃拟态控制台。
+ * 主色取 OpenHarmony 品牌蓝（#0A59F7），底色为冷调晨蓝灰而非米色，
+ * 全部组件样式只允许引用这里的变量，保证主题一致性与后续双主题扩展。
+ */
+:root {
+  /* 画布底色：冷调晨蓝灰，带极浅的品牌色光晕（由 global.css 的 body 背景使用） */
+  --bg: #eef3f9;
+  --bg-deep: #e3ebf5;
+  --glow-brand: rgba(10, 89, 247, 0.09);
+  --glow-ok: rgba(18, 183, 106, 0.07);
+
+  /* 玻璃面板 */
+  --glass: rgba(255, 255, 255, 0.66);
+  --glass-strong: rgba(255, 255, 255, 0.85);
+  --glass-soft: rgba(255, 255, 255, 0.42);
+  --glass-border: rgba(255, 255, 255, 0.9);
+  --glass-line: rgba(23, 58, 94, 0.12);
+  --glass-line-soft: rgba(23, 58, 94, 0.07);
+  --inner-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --shadow-panel: 0 10px 30px rgba(23, 58, 94, 0.09), 0 1px 2px rgba(23, 58, 94, 0.05);
+  --shadow-pop: 0 18px 44px rgba(23, 58, 94, 0.16);
+
+  /* 品牌与语义色 */
+  --brand: #0a59f7;
+  --brand-strong: #0b48c4;
+  --brand-soft: rgba(10, 89, 247, 0.1);
+  --brand-softer: rgba(10, 89, 247, 0.06);
+  --ok: #12b76a;
+  --ok-soft: rgba(18, 183, 106, 0.13);
+  --warn: #d97706;
+  --warn-soft: rgba(217, 119, 6, 0.12);
+  --danger: #e5484d;
+  --danger-soft: rgba(229, 72, 77, 0.11);
+  --neutral-soft: rgba(23, 58, 94, 0.08);
+
+  /* 文本层级 */
+  --text: #17212b;
+  --text-2: #46586c;
+  --text-3: #7e90a4;
+
+  /* 排版 */
+  --font-body: "HarmonyOS Sans SC", "MiSans", "MiSans VF", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+
+  /* 几何 */
+  --radius-s: 9px;
+  --radius-m: 14px;
+  --radius-l: 20px;
+
+  /* 组件尺寸 */
+  --rail-width: 360px;
+  --topbar-height: 64px;
+}

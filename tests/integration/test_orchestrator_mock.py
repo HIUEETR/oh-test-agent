@@ -158,14 +158,16 @@ async def test_mock_agent_runs_full_vertical_slice(tmp_path):
     )
     trace = await orchestrator.run(
         RunRequest(
-            task="打开知乎++，进入搜索，输入 OpenHarmony，返回首页，打开一条内容详情，确认内容后返回首页",
+            task="打开知乎++，进入搜索，输入 OpenHarmony，返回首页，打开一条内容详情，查看内容后返回首页",
             auto_generate=True,
         )
     )
     assert trace.state == RunState.COMPLETED, trace.error
+    # FakeDevice 无法通过 Profile 引导（无前台查询/探索面），按实时模式降级继续任务：
+    # 全链路仍然覆盖 规划 → 决策 → 执行 → 页面图 → 断言 → 报告，但不生成 Hypium 脚本。
+    assert trace.live_mode is True
+    assert trace.generated is None
     assert len(trace.graph.nodes) >= 4
     assert len(trace.graph.edges) >= 3
     assert len(trace.assertions) == 3
-    assert trace.generated is not None
-    assert trace.generated.python_path.exists()
     assert (settings.resolved_runtime_dir / trace.run_id / "reports" / "report.html").exists()

@@ -26,6 +26,11 @@ src/harmony_test_agent/
 ├─ devices/
 │  ├─ base.py            DeviceAdapter 抽象
 │  └─ harmony.py         HDC 命令、截图、布局、操作和日志
+├─ discovery/
+│  ├─ advisor.py         连续会话式 LLM 视觉探索顾问
+│  ├─ explorer.py        有界探索、逻辑页去重、内容抑制与恢复节奏
+│  ├─ stability.py       跨轮稳定定位器/断言分析
+│  └─ verification.py    三轮设备验证与准入门控
 ├─ generation/
 │  └─ hypium.py          模板化 Hypium Python/JSON/元数据
 ├─ graph/
@@ -140,7 +145,7 @@ stopped_by_user
 
 `AGENT_MODEL` 用于任务规划；`AGENT_VISION_MODEL` 用于截图理解和逐步工具决策。它们通过编排器持久化的 `PlanResult`、`ScreenSnapshot`、页面元素和当前 `PlannedStep` 交换结构化数据，没有模型之间的直接会话通道。将 `AGENT_VISION_MODEL` 留空会让视觉阶段回退到 `AGENT_MODEL`，因此可以统一为一个支持图像输入和结构化输出的多模态模型。
 
-统一模型只减少模型切换和提示前缀差异，不等于共享一个连续对话：当前每次 `plan`、`analyze`、`decide` 都新建 Pydantic AI `Agent` 并发起独立请求，仓库没有 provider prompt-cache 控制、命中统计或共享消息历史。实际缓存命中取决于兼容服务是否支持前缀缓存，以及请求前缀、图片和页面元素是否稳定；仅把两个配置名设成相同模型，命中率不一定明显提高。
+统一模型只减少模型切换和提示前缀差异，不等于共享一个连续对话：`plan`、`analyze`、`decide` 各自新建 Pydantic AI `Agent` 并发起独立请求。规划上下文由 `PlanningContext` 承载——`from_profile` 提供 verified Profile 的定位器清单与已知限制，`from_resolved` 仅为实时模式提供解析出的应用身份。例外是探索顾问（`discovery/advisor.py`）：它在单次探索内通过 `advise_turn` 的 `message_history` 维护跨页连续对话（见"探索治理与 LLM 视觉顾问"）。仓库没有 provider prompt-cache 控制或命中统计；实际命中取决于兼容服务是否支持前缀缓存以及请求前缀是否稳定。
 ## 7. 设备边界
 
 `HarmonyDeviceAdapter` 暴露：
@@ -270,9 +275,11 @@ SQLite 用于查询和 SSE；JSON/PNG/日志是可移植证据。它们全部被
 
 FastAPI 提供健康、设备、Run 创建/停止/查询、SSE、Graph、Script、Report、Generate、Execute 和安全产物下载。
 
-SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关闭。React 控制台使用 EventSource 展示事件，同时轮询 Run Trace；页面图使用 React Flow，报告使用 iframe，脚本页可通过 API 触发 3 次回放。
+SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关闭。Web 控制台（`web/`，2026-09 完全重写；旧版冻结于 `web-legacy/`）基于 React 19 + TypeScript + Vite + zustand，按 feature 分层（launcher/live/advisor/graph/script/profiles/report/runs/pipeline），API 访问集中在 `src/api/`（fetch 封装 + EventSource 封装），业务状态集中在 `src/stores/console.ts`。
 
-前端不依赖运行时外部字体 CDN，便于受限网络和离线开发。
+控制台用 EventSource 订阅全部事件类型并按 event_id 去重，同时串行轮询 Run Trace 与 discovery 快照；`src/utils/thought-aggregator.ts` 把事件流聚合为「计划/感知/决策/断言/顾问/页面/通知」思考块，驱动实时页的思考流与顶部闭环流水线状态条。页面图使用 React Flow：任务阶段渲染 `trace.graph`，探索型运行回退渲染 `discovery.pages/transitions` 构建的页面状态图。顾问对话页展示 `/discovery` 返回的 `advisor_log` 逐轮输入/输出留痕。报告使用 iframe，脚本页可通过 API 触发 1/3 次回放；历史运行列表来自 `GET /api/runs`。
+
+前端测试使用 vitest + Testing Library（`cd web && npm run test`），覆盖思考流聚合、Markdown 渲染（含 XSS 防护）、深链解析、流水线推导与组件冒烟。前端不依赖运行时外部字体 CDN，便于受限网络和离线开发。
 
 ## 14. 真实验收
 
@@ -299,11 +306,22 @@ SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关�
 
 ## 自动目标发现与 Profile 生命周期
 
-`targets/catalog.py` 封装 `bm dump -a/-n/-l`，`targets/resolver.py` 执行 bundle 精确匹配、应用名唯一匹配和多候选停止。`discovery/explorer.py` 在确定性安全策略和 20/8/900 边界内构建页面图；`discovery/stability.py` 从三轮独立启动证据筛选稳定定位器和应用级断言；`profiles/registry.py` 通过临时文件、Schema 校验和原子替换维护 draft、candidate、verified、history 和 locked 状态。
+`targets/catalog.py` 封装 `bm dump -a/-n/-l`，`targets/resolver.py` 执行 bundle 精确匹配、应用名唯一匹配和多候选停止。`discovery/explorer.py` 在确定性安全策略和 20/8/900 边界内构建页面图；`discovery/advisor.py` 提供连续会话式 LLM 视觉探索顾问；`discovery/stability.py` 从三轮独立启动证据筛选稳定定位器和应用级断言；`profiles/registry.py` 通过临时文件、Schema 校验和原子替换维护 draft、candidate、verified、history 和 locked 状态。
 
 每个 `RunTrace` 冻结 `target_query`、`resolved_target`、`profile_snapshot`、探索策略和验证结果。Hypium 生成器只读取该快照，生成脚本必须含可观测的应用 UI 断言。通过三次 Driver 回放后 Registry 才将 candidate 原子晋级为 verified。CLI、API 和 Web 使用相同的 resolve、discover、verify、generate、replay、promote、test 状态机。
+
+
+### 探索治理与 LLM 视觉顾问
+
+探索器以**逻辑页身份**（`page_path + 前台 + 全量折叠 key + 可交互结构`的 SHA-256）替代整树签名做队列去重与页数预算，信息流/热搜"同页不同内容"的抖动收敛为同一逻辑页；整树签名仍随快照保存作为证据。候选生成时，key/id 内嵌长数字 ID 或标题超长的内容型 click 降级到 input/swipe 之后；此类动作触达的页面不入队，跃迁标记 `replayable=false`。每页动作预算按类型配额（click ≤ max-2、input 1、swipe 1），保证点击富集页面也能覆盖输入与滑动。
+
+候选动作之间的恢复按"落地页身份校验 → 一次 back → 冷启动重放"逐级兜底；`input` 动作因软键盘污染状态强制冷恢复；队列出队时仍冷启动重放路径以验证可回放性。空路径（启动首页）不重放。
+
+`ExplorationAdvisor`（`discovery/advisor.py`）在单次探索内维护一段连续对话：稳定 system prompt + 逐页追加截图与编号候选，模型返回 `{page_summary, recommended, avoid, reason}`，对确定性候选列表重排/过滤（`avoid` 仅剔除内容型 click，input/swipe 不受影响）；同一逻辑身份复用既有建议。历史超过 `advisor_history_turns` 轮保留 system 头裁掉最旧交换，被裁页面的摘要由 payload 中的确定性上下文摘要携带。安全分类器在顾问之后执行，模型无法放行被拦截动作；任何调用失败回退启发式排序并在 `advisor` 事件中留痕（`source: model/reuse/heuristic-fallback`）。
 
 
 ### Profile 发现状态机
 
 顶层 Run 使用 `bootstrap` 与 `task` 两个阶段。`bootstrap` 完成目标消歧、启动交叉校验、有界探索、三轮设备验证、candidate 生成、三次 Hypium Driver 回放和原子晋级；随后将冻结的 verified Profile 交给 `task` 阶段。多候选 Run 保持 `waiting_target_selection`，由 API/Web 继续；受限临时测试标记 `provisional`，禁止生成或执行正式回归用例。停止请求会唤醒候选等待，并在探索、验证和回放边界终止。
+
+无 verified Profile 且探索关闭、或探索/验证失败（候选保存前的阶段）时，运行降级为**实时模式**（`trace.live_mode` + `profile_status_at_start=absent`）：跳过 Profile 引导，用 `LaunchSpec` + 无定位器辅助的 `ToolExecutor` 和 `PlanningContext.from_resolved` 直接执行任务，强制关闭脚本生成/回放；候选已保存后的 Hypium 回放门控失败与晋级失败仍按原语义失败。`bootstrap_only` 运行不降级，失败即失败。

@@ -10,7 +10,9 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from PIL import Image
 
@@ -19,11 +21,21 @@ from ..perception.normalizer import normalize_layout, page_path
 from ..targets.catalog import (
     ForegroundApp,
     InstalledApp,
+    normalize_display_label,
     parse_bundle_list,
     parse_foreground_hierarchy,
     parse_installed_app,
+    parse_launcher_labels,
 )
 from .base import DeviceAdapter, DeviceError
+
+if TYPE_CHECKING:
+    from ..runtime.tools import LaunchSpec
+
+_LAUNCHER_BUNDLES = ("com.ohos.sceneboard", "com.huawei.hmos.launcher", "com.ohos.launcher")
+_LAUNCHER_SCAN_MAX_PAGES = 6
+_LAUNCHER_HOME_SETTLE_SECONDS = 1.0
+_LAUNCHER_PAGE_SWIPE_SLEEP = 1.0
 
 
 class HarmonyDeviceAdapter(DeviceAdapter):
@@ -219,16 +231,94 @@ class HarmonyDeviceAdapter(DeviceAdapter):
             raise DeviceError(f"bm metadata for {bundle_name} is ambiguous: {exc}") from exc
 
     def find_installed_apps(self, label: str) -> list[InstalledApp]:
-        """Use ``bm dump -l`` as an accelerator, then verify every bundle via ``-n``."""
-        result = self._run("shell", "bm", "dump", "-l", label)
-        bundles = parse_bundle_list(result.stdout) if result.ok else []
-        candidates: list[InstalledApp] = []
-        for bundle_name in bundles:
+        """Resolve a display-name query via the desktop launcher, then the full catalog.
+
+        Recent system versions only report resource-reference labels through ``bm``,
+        so the launcher icon scan is the only shell-readable source of real display
+        names. Side effect: the device is returned to the launcher home screen.
+        """
+        apps = self._find_installed_apps_by_launcher(label)
+        if apps:
+            return apps
+        return super().find_installed_apps(label)
+
+    def _find_installed_apps_by_launcher(self, label: str) -> list[InstalledApp]:
+        try:
+            mapping = self.launcher_app_names()
+        except DeviceError:
+            return []
+        needle = normalize_display_label(label)
+        if not needle:
+            return []
+        matched = {
+            bundle: name
+            for bundle, name in mapping.items()
+            if needle == normalize_display_label(name)
+            or needle in normalize_display_label(name)
+            or normalize_display_label(name) in needle
+        }
+        apps: list[InstalledApp] = []
+        for bundle in sorted(matched):
             try:
-                candidates.append(self.inspect_app(bundle_name))
+                inspected = self.inspect_app(bundle)
             except DeviceError:
                 continue
-        return candidates or super().find_installed_apps(label)
+            apps.append(inspected.model_copy(update={"display_name": matched[bundle]}))
+        return apps
+
+    def launcher_app_names(self) -> dict[str, str]:
+        """Map bundles to the display names rendered by the desktop launcher.
+
+        The scan presses the Home key when another application is in the foreground
+        and swipes through the launcher pages; callers must treat it as a
+        state-changing operation.
+        """
+        bundles = parse_bundle_list(self._run("shell", "bm", "dump", "-a").stdout)
+        if not bundles or not self._ensure_on_launcher():
+            return {}
+        mapping: dict[str, str] = {}
+        signature: tuple[str, ...] | None = None
+        for page in range(_LAUNCHER_SCAN_MAX_PAGES):
+            hierarchy = self.collect_ui_hierarchy()
+            page_mapping, page_signature = parse_launcher_labels(hierarchy, bundles)
+            mapping.update(page_mapping)
+            if page_signature == signature or not page_mapping:
+                break
+            signature = page_signature
+            size = self._display_size(hierarchy)
+            if size is None or page + 1 == _LAUNCHER_SCAN_MAX_PAGES:
+                break
+            width, height = size
+            self.swipe((int(width * 0.85), int(height * 0.5)), (int(width * 0.15), int(height * 0.5)), 0.4)
+            time.sleep(_LAUNCHER_PAGE_SWIPE_SLEEP)
+        return mapping
+
+    def _ensure_on_launcher(self) -> bool:
+        def _on_launcher() -> bool | None:
+            try:
+                foreground = self.current_foreground_app()
+            except DeviceError:
+                return None
+            if foreground is None:
+                return None
+            return foreground.bundle_name in _LAUNCHER_BUNDLES
+
+        if _on_launcher():
+            return True
+        self._run("shell", "uitest", "uiInput", "keyEvent", "Home")
+        time.sleep(_LAUNCHER_HOME_SETTLE_SECONDS)
+        return _on_launcher() is not False
+
+    @staticmethod
+    def _display_size(hierarchy: Mapping[str, Any]) -> tuple[int, int] | None:
+        attrs = hierarchy.get("attributes") if isinstance(hierarchy, Mapping) else None
+        bounds = str(attrs.get("bounds", "")) if isinstance(attrs, Mapping) else ""
+        match = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+        if not match:
+            return None
+        width = int(match.group(3)) - int(match.group(1))
+        height = int(match.group(4)) - int(match.group(2))
+        return (width, height) if width > 0 and height > 0 else None
 
     def current_foreground_app(self) -> ForegroundApp | None:
         """Resolve the current foreground Bundle and Ability from the UI hierarchy."""
@@ -250,7 +340,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         """Force-stop an application without deleting its state."""
         return self._run("shell", "aa", "force-stop", bundle_name)
 
-    def open_app(self, profile: TargetAppProfile, reset: bool = False) -> CommandResult:
+    def open_app(self, profile: TargetAppProfile | LaunchSpec, reset: bool = False) -> CommandResult:
         """按目标应用配置启动 Ability，并在要求时先执行受支持的重置策略。"""
         if reset:
             stopped = self.stop_app(profile.bundle_name)

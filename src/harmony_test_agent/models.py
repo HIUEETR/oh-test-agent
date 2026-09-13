@@ -90,6 +90,7 @@ class EventType(StrEnum):
     DISCOVERY_FINISHED = "discovery_finished"
     DISCOVERY_PATH_BLOCKED = "discovery_path_blocked"
     LOCATOR_CANDIDATE_OBSERVED = "locator_candidate_observed"
+    PROFILE_LIVE_MODE = "profile_live_mode"
     PROFILE_DRAFT_SAVED = "profile_draft_saved"
     PROFILE_VERIFICATION_ROUND_FINISHED = "profile_verification_round_finished"
     HYPIUM_REPLAY_FINISHED = "hypium_replay_finished"
@@ -244,6 +245,12 @@ class ExplorationPolicy(BaseModel):
     max_actions_per_page: int = Field(default=8, ge=1, le=8)
     max_duration_seconds: int = Field(default=900, ge=1, le=900)
     fixed_input_text: str = Field(default="OpenHarmony", min_length=1, max_length=200)
+    settle_timeout_seconds: int = Field(default=1, ge=0, le=30)
+    restore_retries: int = Field(default=2, ge=0, le=3)
+    min_interaction_kinds: int = Field(default=2, ge=1, le=3)
+    advisor_enabled: bool = True
+    advisor_max_actions: int = Field(default=4, ge=1, le=8)
+    advisor_history_turns: int = Field(default=8, ge=2, le=30)
     allow_login: bool = False
     allow_permission: bool = False
     allow_submit: bool = False
@@ -275,6 +282,7 @@ class ProfileStatus(StrEnum):
     VERIFIED = "verified"
     SUPERSEDED = "superseded"
     INVALID = "invalid"
+    ABSENT = "absent"
 
 
 class ConfidenceLevel(StrEnum):
@@ -626,6 +634,7 @@ class RunTrace(BaseModel):
     model_mock: bool = True
     phase: Literal["bootstrap", "task"] = "bootstrap"
     provisional: bool = False
+    live_mode: bool = False
     target_query: TargetQuery | None = None
     resolved_target: ResolvedTarget | None = None
     profile_status_at_start: ProfileStatus | None = None
