@@ -215,48 +215,10 @@ class AgentOrchestrator:
                     current_snapshot, current_node = await self._capture(
                         trace, emitter, device, perception, graph, f"step_{index:02d}_before"
                     )
-                try:
-                    decision = await asyncio.wait_for(
-                        self.provider.decide(step, current_snapshot),
-                        timeout=self.settings.agent_model_timeout,
-                    )
-                except TimeoutError as exc:
-                    raise ToolExecutionError(
-                        f"model tool decision timed out after {self.settings.agent_model_timeout} seconds",
-                        RunState.FAILED_MODEL,
-                    ) from exc
-                except Exception as exc:
-                    raise ToolExecutionError(f"model tool decision failed: {exc}", RunState.FAILED_MODEL) from exc
-                decision = self._constrain_finish_decision(step, decision)
-                emitter.emit(
-                    EventType.ACTION_STARTED,
-                    step.instruction,
-                    {"step_id": step.step_id, "decision": decision.model_dump(mode="json")},
+                decision, result, current_snapshot = await self._decide_and_execute(
+                    trace, emitter, executor, perception, graph, device, step, current_snapshot
                 )
-
                 before = current_snapshot
-                action_started_at = utc_now()
-                try:
-                    result = await self._execute_with_retry(executor, step.step_id, decision, before)
-                except (SafetyError, ToolExecutionError) as exc:
-                    failed = ActionResult(
-                        step_id=step.step_id,
-                        tool=decision.tool,
-                        params=decision.model_dump(exclude_none=True),
-                        success=False,
-                        started_at=action_started_at,
-                        ended_at=utc_now(),
-                        before_snapshot_id=before.snapshot_id if before else None,
-                        after_snapshot_id=before.snapshot_id if before else None,
-                        error=str(exc),
-                    )
-                    trace.actions.append(failed)
-                    emitter.emit(
-                        EventType.ACTION_FINISHED,
-                        f"步骤失败：{step.instruction}",
-                        failed.model_dump(mode="json"),
-                    )
-                    raise
                 result.before_snapshot_id = before.snapshot_id if before else None
 
                 if decision.tool == ToolName.FINISH:
@@ -1198,6 +1160,110 @@ class AgentOrchestrator:
             if BoundedExplorer._stability_fingerprint(page_path(hierarchy), elements) == fingerprint:
                 return snapshot
         return device.screenshot(run_dir / "screens", trace.run_id, f"{label}-settled")
+
+    async def _decide_and_execute(
+        self,
+        trace: RunTrace,
+        emitter: RunEventEmitter,
+        executor: ToolExecutor,
+        perception: PerceptionService,
+        graph: PageGraphBuilder,
+        device: DeviceAdapter,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+    ) -> tuple[ToolDecision, ActionResult, ScreenSnapshot | None]:
+        """决策并执行一个计划步骤；语义失败时进入自适应恢复循环（SafetyError 不恢复）。
+
+        恢复尝试把失败反馈交回模型并重新截屏，纠正动作成功不算完成——断言类步骤必须由
+        模型重新发出断言且通过；预算（agent_step_recovery_limit）用尽后按最后失败终止。
+        """
+        feedback: str | None = None
+        last_error: ToolExecutionError | None = None
+        for attempt in range(self.settings.agent_step_recovery_limit + 1):
+            decision = await asyncio.wait_for(
+                self.provider.decide(step, snapshot, feedback=feedback),
+                timeout=self.settings.agent_model_timeout,
+            )
+            decision = self._constrain_finish_decision(step, decision)
+            emitter.emit(
+                EventType.ACTION_STARTED,
+                step.instruction,
+                {"step_id": step.step_id, "decision": decision.model_dump(mode="json"), "recovery_attempt": attempt},
+            )
+            action_started_at = utc_now()
+            try:
+                result = await self._execute_with_retry(executor, step.step_id, decision, snapshot)
+            except SafetyError as exc:
+                self._record_failed_action(trace, emitter, step, decision, snapshot, action_started_at, exc)
+                raise
+            except ToolExecutionError as exc:
+                self._record_failed_action(trace, emitter, step, decision, snapshot, action_started_at, exc)
+                if exc.state not in {RunState.FAILED_ELEMENT, RunState.FAILED_ASSERTION}:
+                    raise
+                if attempt >= self.settings.agent_step_recovery_limit:
+                    raise
+                last_error = exc
+                feedback = (
+                    f"attempt {attempt + 1} failed: {exc}. The attached elements and screenshot are the latest "
+                    "state; you may first perform corrective actions (for example an anchored swipe inside a wheel "
+                    "column or clicking another control) and then re-attempt the planned goal."
+                )
+                trace.state = RunState.VERIFYING
+                snapshot, _ = await self._capture(
+                    trace, emitter, device, perception, graph, f"{step.step_id}_recovery_{attempt + 1:02d}"
+                )
+                continue
+            if self._step_completed(step, decision, result):
+                return decision, result, snapshot
+            # 纠正动作成功但断言类步骤尚未重新完成：继续消耗恢复预算。
+            feedback = (
+                "the corrective action succeeded, but the planned assertion has not been re-issued yet; "
+                "now complete the planned step against the latest state."
+            )
+            trace.state = RunState.VERIFYING
+            snapshot, _ = await self._capture(
+                trace, emitter, device, perception, graph, f"{step.step_id}_recovery_{attempt + 1:02d}"
+            )
+        raise last_error or ToolExecutionError(
+            f"step recovery exhausted without completing: {step.instruction}", RunState.FAILED_ASSERTION
+        )
+
+    @staticmethod
+    def _record_failed_action(
+        trace: RunTrace,
+        emitter: RunEventEmitter,
+        step: PlannedStep,
+        decision: ToolDecision,
+        snapshot: ScreenSnapshot | None,
+        started_at,
+        error: Exception,
+    ) -> None:
+        failed = ActionResult(
+            step_id=step.step_id,
+            tool=decision.tool,
+            params=decision.model_dump(exclude_none=True),
+            success=False,
+            started_at=started_at,
+            ended_at=utc_now(),
+            before_snapshot_id=snapshot.snapshot_id if snapshot else None,
+            after_snapshot_id=snapshot.snapshot_id if snapshot else None,
+            error=str(error),
+        )
+        trace.actions.append(failed)
+        emitter.emit(
+            EventType.ACTION_FINISHED,
+            f"步骤失败：{step.instruction}",
+            failed.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _step_completed(step: PlannedStep, decision: ToolDecision, result: ActionResult) -> bool:
+        """步骤完成判定：断言类计划步骤必须由模型重新发出断言且通过。"""
+        if not result.success:
+            return False
+        if step.tool in {ToolName.ASSERT_VISIBLE, ToolName.ASSERT_NOT_VISIBLE, ToolName.ASSERT_TEXT}:
+            return decision.tool == step.tool and result.assertion is not None and result.assertion.passed
+        return True
 
     async def _capture(self, trace, emitter, device, perception, graph, label):
         run_dir = self.artifacts.run_dir(trace.run_id)
