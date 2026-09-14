@@ -13,8 +13,14 @@ export function useDcRuntime(): void {
 
   useEffect(() => {
     if (!activeSessionId) return;
-    const { appendEvent } = useDcConsole.getState();
-    const stream = new DcEventStream(activeSessionId, appendEvent);
+    const { appendEvent, refreshSession } = useDcConsole.getState();
+    const stream = new DcEventStream(
+      activeSessionId,
+      appendEvent,
+      () => undefined,
+      // 重连成功后对账一次：补齐 SSE buffer 溢出而丢失的历史事件
+      () => void refreshSession(true),
+    );
     streamRef.current = stream;
     stream.start();
     return () => {

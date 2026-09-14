@@ -20,9 +20,11 @@ import type {
   DcScriptArtifact,
   DcSessionSummary,
   DcSessionView,
-  DcToolInvocation,
   DcToolTier,
 } from "../api/dc-types";
+
+/** 去重用的本地事件缓冲上限；后端 bus 自身 buffer 为 500。 */
+const MAX_TRACKED_EVENTS = 500;
 
 interface DcState {
   /* 会话列表与选择 */
@@ -128,18 +130,19 @@ export const useDcConsole = create<DcState>()((set, get) => ({
     if (!activeSessionId) return;
     try {
       const session = await getDcSession(activeSessionId);
-      // 从 turns + invocations 聚合消息
-      const messages = aggregateMessages(session);
-      set({
+      // 进行中轮次由增量事件驱动，全量重建只用于已完成轮次（避免双写冲突）
+      const inFlight = session.status === "thinking" || session.status === "acting";
+      const patch: Partial<DcState> = {
         session,
-        messages,
         status: session.status,
         script: session.script ?? null,
         latestScreenshotUrl: session.latest_snapshot_path
           ? dcArtifactUrl(activeSessionId, session.latest_snapshot_path)
-          : null,
+          : get().latestScreenshotUrl,
         ...(quiet ? {} : { error: "" }),
-      });
+      };
+      if (!inFlight) patch.messages = aggregateMessages(session);
+      set(patch);
     } catch (cause) {
       if (!quiet) set({ error: apiError("刷新 DC 会话失败", cause) });
     }
@@ -221,64 +224,134 @@ export const useDcConsole = create<DcState>()((set, get) => ({
 
   appendEvent: (event: DcEvent) => {
     set((state) => {
-      // 去重
+      // 去重（SSE 重连 replay 可能重复投递）
       if (state.events.some((e) => e.event_id === event.event_id)) return state;
-      const events = [...state.events, event];
+      // 只保留最近 500 条用于去重，避免长会话内存无限增长
+      const events = [...state.events, event].slice(-MAX_TRACKED_EVENTS);
+      const patch: Partial<DcState> = { events };
+      const p = event.payload as Record<string, any>;
 
-      // 根据事件类型更新状态
-      let patch: Partial<DcState> = { events };
-
-      if (event.type === "screenshot_captured") {
-        const snapshotPath = event.payload.snapshot_path as string | undefined;
-        if (snapshotPath && state.activeSessionId) {
-          patch.latestScreenshotUrl = dcArtifactUrl(state.activeSessionId, snapshotPath);
+      switch (event.type) {
+        case "screenshot_captured": {
+          // 后端给的是会话相对 POSIX 路径；失败帧 snapshot_path 为 null，保持上一帧
+          const rel = p.snapshot_path as string | null | undefined;
+          if (rel && state.activeSessionId) {
+            patch.latestScreenshotUrl = dcArtifactUrl(state.activeSessionId, rel);
+          }
+          break;
         }
-      }
-
-      if (event.type === "turn_started") {
-        patch.status = "thinking";
-        patch.sending = true;
-      }
-
-      if (event.type === "turn_finished" || event.type === "assistant_message") {
-        patch.status = "idle";
-        patch.sending = false;
-        // 追加助手消息
-        if (event.type === "assistant_message") {
-          const summary = (event.payload.summary as string) ?? event.message;
-          const assistantMessage: DcChatMessage = {
-            id: `evt-${event.event_id}`,
-            role: "assistant",
-            content: summary,
-            timestamp: event.timestamp,
-            turnId: event.payload.turn_id as string | undefined,
-          };
-          patch.messages = [...state.messages, assistantMessage];
+        case "turn_started":
+          patch.status = "thinking";
+          patch.sending = true;
+          break;
+        case "thinking":
+          patch.messages = [
+            ...state.messages,
+            {
+              id: `think-${event.event_id}`,
+              role: "thinking",
+              content: (p.text as string) ?? event.message,
+              timestamp: event.timestamp,
+              turnId: p.turn_id as string | undefined,
+              step: p.step as number | undefined,
+            },
+          ];
+          break;
+        case "agent_text":
+          patch.messages = [
+            ...state.messages,
+            {
+              id: `text-${event.event_id}`,
+              role: "narration",
+              content: (p.text as string) ?? event.message,
+              timestamp: event.timestamp,
+              turnId: p.turn_id as string | undefined,
+              step: p.step as number | undefined,
+            },
+          ];
+          break;
+        case "tool_call_started":
+          patch.messages = [
+            ...state.messages,
+            {
+              id: p.invocation_id as string,
+              role: "tool",
+              content: `调用 ${p.tool as string}`,
+              timestamp: event.timestamp,
+              turnId: p.turn_id as string | undefined,
+              toolName: p.tool as string,
+              toolArgs: p.args as Record<string, unknown> | undefined,
+              toolStatus: "running",
+            },
+          ];
+          patch.status = "acting";
+          break;
+        case "tool_call_finished": {
+          // 以 invocation_id 就地更新（running → success/failed），不新增消息
+          const invocationId = p.invocation_id as string;
+          const success = Boolean(p.success);
+          const durationMs = p.duration_ms as number | undefined;
+          const known = state.messages.some((m) => m.id === invocationId);
+          if (known) {
+            patch.messages = state.messages.map((message) =>
+              message.id === invocationId
+                ? {
+                    ...message,
+                    content: `${message.toolName ?? (p.tool as string)} ${success ? "✓" : "✗"} (${durationMs ?? 0}ms)`,
+                    toolStatus: success ? "success" : "failed",
+                    toolResult: (p.result_summary as string) ?? (p.error as string) ?? "",
+                    durationMs,
+                  }
+                : message,
+            );
+          } else {
+            // started 事件丢失时兜底建卡（幂等）
+            patch.messages = [
+              ...state.messages,
+              {
+                id: invocationId,
+                role: "tool",
+                content: `${p.tool as string} ${success ? "✓" : "✗"} (${durationMs ?? 0}ms)`,
+                timestamp: event.timestamp,
+                turnId: p.turn_id as string | undefined,
+                toolName: p.tool as string,
+                toolArgs: p.args as Record<string, unknown> | undefined,
+                toolStatus: success ? "success" : "failed",
+                toolResult: (p.result_summary as string) ?? (p.error as string) ?? "",
+                durationMs,
+              },
+            ];
+          }
+          break;
         }
-      }
-
-      if (event.type === "tool_call_finished") {
-        // 追加工具调用消息
-        const toolName = event.payload.tool as string;
-        const success = event.payload.success as boolean;
-        const durationMs = event.payload.duration_ms as number;
-        const toolMessage: DcChatMessage = {
-          id: `tool-${event.event_id}`,
-          role: "tool",
-          content: `${toolName} ${success ? "✓" : "✗"} (${durationMs}ms)`,
-          timestamp: event.timestamp,
-        };
-        patch.messages = [...(patch.messages ?? state.messages), toolMessage];
-      }
-
-      if (event.type === "error") {
-        patch.error = event.message;
-        patch.status = "idle";
-        patch.sending = false;
-      }
-
-      if (event.type === "script_generated") {
-        void get().refreshSession(true);
+        case "assistant_message":
+          patch.status = "idle";
+          patch.sending = false;
+          patch.messages = [
+            ...state.messages,
+            {
+              id: `final-${event.event_id}`,
+              role: "assistant",
+              content: (p.summary as string) ?? event.message,
+              timestamp: event.timestamp,
+              turnId: p.turn_id as string | undefined,
+            },
+          ];
+          break;
+        case "turn_finished":
+          patch.status = "idle";
+          patch.sending = false;
+          break;
+        case "error":
+          patch.error = event.message;
+          patch.status = "idle";
+          patch.sending = false;
+          break;
+        case "script_generated":
+          void get().refreshSession(true);
+          break;
+        default:
+          break;
       }
 
       return { ...state, ...patch };
@@ -318,16 +391,31 @@ function aggregateMessages(session: DcSessionView): DcChatMessage[] {
       timestamp: turn.started_at,
       turnId: turn.turn_id,
     });
+    // 该轮模型侧的思考/叙述（后端 steps 与增量事件一一对应）
+    (turn.steps ?? []).forEach((step, index) => {
+      messages.push({
+        id: `${turn.turn_id}-step-${index}`,
+        role: step.kind === "thinking" ? "thinking" : "narration",
+        content: step.text,
+        timestamp: turn.started_at,
+        turnId: turn.turn_id,
+        step: step.step,
+      });
+    });
     // 该轮的工具调用
     const turnInvocations = session.invocations.filter((inv) => inv.turn_id === turn.turn_id);
     for (const inv of turnInvocations) {
       messages.push({
         id: inv.invocation_id,
         role: "tool",
-        content: formatInvocation(inv),
+        content: `${inv.tool} ${inv.success ? "✓" : "✗"} (${inv.duration_ms ?? 0}ms)`,
         timestamp: inv.started_at,
         turnId: turn.turn_id,
-        invocations: [inv],
+        toolName: inv.tool,
+        toolArgs: inv.args,
+        toolResult: inv.error ? `ERROR: ${inv.error}` : formatInvocationArgs(inv.args),
+        toolStatus: inv.success ? "success" : "failed",
+        durationMs: inv.duration_ms,
       });
     }
     // 助手总结
@@ -344,12 +432,9 @@ function aggregateMessages(session: DcSessionView): DcChatMessage[] {
   return messages;
 }
 
-function formatInvocation(inv: DcToolInvocation): string {
-  const status = inv.success ? "✓" : "✗";
-  const args = Object.entries(inv.args)
+function formatInvocationArgs(args: Record<string, unknown>): string {
+  return Object.entries(args)
     .filter(([, v]) => v != null)
     .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
     .join(", ");
-  const duration = inv.duration_ms ? ` (${inv.duration_ms}ms)` : "";
-  return `${inv.tool} ${status}${duration}${args ? ` · ${args}` : ""}${inv.error ? ` · ${inv.error}` : ""}`;
 }

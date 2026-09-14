@@ -4352,8 +4352,8 @@
       "cross_bundle_recovery_failed": false,
       "quick_verification": {
         "passed": true,
-        "checked_at": "2026-09-14T03:44:55.891625+00:00",
-        "run_id": "run-20260914T034340Z-fde24624"
+        "checked_at": "2026-09-14T11:25:46.251261+00:00",
+        "run_id": "run-20260914T112423Z-e23d7219"
       }
     }
   }

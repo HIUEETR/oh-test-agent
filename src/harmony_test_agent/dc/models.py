@@ -153,6 +153,21 @@ class DcTurnStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class DcStepKind(StrEnum):
+    """一轮执行中模型侧步骤的类型。"""
+
+    THINKING = "thinking"  # 原生推理（reasoning_content / ThinkingPart）
+    AGENT_TEXT = "agent_text"  # 可见叙述文本（工具调用前后的说明）
+
+
+class DcStepRecord(BaseModel):
+    """模型侧的一步（思考或叙述）；用于刷新历史时还原步骤块。"""
+
+    step: int = 0
+    kind: DcStepKind = DcStepKind.AGENT_TEXT
+    text: str = ""
+
+
 class DcTurnRecord(BaseModel):
     """一轮用户消息 → Agent 自主执行的完整记录。"""
 
@@ -163,6 +178,7 @@ class DcTurnRecord(BaseModel):
     started_at: datetime = Field(default_factory=utc_now)
     ended_at: datetime | None = None
     invocation_ids: list[str] = Field(default_factory=list)
+    steps: list[DcStepRecord] = Field(default_factory=list)
     error: str | None = None
 
 
@@ -183,6 +199,8 @@ class DcEventType(StrEnum):
     SCREENSHOT_CAPTURED = "screenshot_captured"
     UI_TREE_CAPTURED = "ui_tree_captured"
     ASSISTANT_MESSAGE = "assistant_message"
+    THINKING = "thinking"  # 模型原生推理（reasoning_content / ThinkingPart）
+    AGENT_TEXT = "agent_text"  # 模型可见叙述文本（每步 TextPart，非最终总结）
     SCRIPT_GENERATED = "script_generated"
     TIER_CHANGED = "tier_changed"
     ERROR = "error"
@@ -249,6 +267,10 @@ class DcChatRequest(BaseModel):
 
     ``tools`` 和 ``tool_context`` 故意使用 ``Any`` 以避免在 ABC 边界泄漏
     pydantic-ai 类型；OpenAI 实现内部做强转。
+
+    ``emit`` 为 Provider 在执行过程中实时回传事件的回调，签名为
+    ``(event_type_value: str, message: str, payload: dict) -> None``；为 ``None``
+    时 Provider 跳过事件发射（单测直接调用 ``chat()`` 时使用）。
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -259,6 +281,7 @@ class DcChatRequest(BaseModel):
     history: list[Any] = Field(default_factory=list)
     tools: list[Any] = Field(default_factory=list)
     tool_context: Any = None
+    emit: Any = None
 
 
 class DcChatResponse(BaseModel):

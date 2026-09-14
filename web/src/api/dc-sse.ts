@@ -9,12 +9,15 @@ export class DcEventStream {
   private source: EventSource | null = null;
   private errorCount = 0;
   private stopped = false;
+  private opened = false;
   private static readonly MAX_CONSECUTIVE_ERRORS = 6;
 
   constructor(
     private readonly sessionId: string,
     private readonly onEvent: (event: DcEvent) => void,
     private readonly onEnd: () => void = () => undefined,
+    /** 断线重连成功后回调：调用方用它做一次 refreshSession 对账（补齐 buffer 溢出丢失的事件）。 */
+    private readonly onReconnect: () => void = () => undefined,
   ) {}
 
   /** 建立连接并开始接收事件；重复调用安全。 */
@@ -37,6 +40,13 @@ export class DcEventStream {
       source.addEventListener(name, handler as EventListener);
     }
     source.addEventListener("error", handler as EventListener);
+
+    // 浏览器 EventSource 会自动重连并携带 Last-Event-ID；首次之外的 open 视为重连
+    source.onopen = () => {
+      this.errorCount = 0;
+      if (this.opened) this.onReconnect();
+      this.opened = true;
+    };
 
     source.onerror = () => {
       this.errorCount += 1;

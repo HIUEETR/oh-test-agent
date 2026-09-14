@@ -66,11 +66,16 @@ class DcChatProvider(OpenAICompatibleProvider):
     """
 
     async def chat(self, request: DcChatRequest) -> DcChatResponse:
-        """执行一轮多步工具对话。
+        """执行一轮多步工具对话，并实时 emit 模型侧的思考/叙述事件。
 
-        pydantic-ai Agent 会自动循环调用 tools 直到模型给出终态回答或超出
-        ``UsageLimits``。每轮构造新 Agent 实例（匹配 ``providers.py`` 风格），
-        但 ``message_history`` 跨轮累积。
+        与 ``agent.run()`` 不同，这里用 ``agent.iter()`` 逐节点遍历：
+        每次被动遍历推进一个节点后，从 ``run.all_messages()`` 差分出新产生的
+        ``ModelResponse``，把其中的 ``thinking`` / ``text`` part 作为
+        ``THINKING`` / ``AGENT_TEXT`` 事件实时发出。工具调用事件由
+        ``DcActionRecorder`` 实时发出，两条流按时间序交错。
+
+        pydantic-ai 的历史管理已保证 ``ThinkingPart`` 正确进出模型请求，
+        这里只读不改（思考内容绝不回喂模型）。
         """
         agent: Agent[Any, str] = Agent(
             self._model(vision=True),
@@ -88,24 +93,37 @@ class DcChatProvider(OpenAICompatibleProvider):
         if request.screenshot_jpeg:
             user_content.append(BinaryContent(data=request.screenshot_jpeg, media_type="image/jpeg"))
 
-        result = await agent.run(
+        emit = request.emit
+        history = list(request.history or [])
+        # all_messages() 为「历史 + 本次新增」，故以历史长度为差分起点，
+        # 避免把上一轮的 text/thinking 重复 emit。
+        seen = len(history)
+        step = 0
+
+        async with agent.iter(
             user_content,
-            message_history=request.history or None,
+            message_history=history or None,
             model_settings=self._model_settings(),
             deps=request.tool_context,
             usage_limits=UsageLimits(
                 request_limit=30,
                 tool_calls_limit=50,
             ),
-        )
+        ) as run:
+            async for _node in run:
+                messages = run.all_messages()
+                if len(messages) <= seen:
+                    continue
+                for message in messages[seen:]:
+                    step = _emit_message_parts(message, step, emit)
+                seen = len(messages)
 
-        # 统计工具调用次数
-        tool_call_count = _count_tool_calls(result)
-
+        messages = run.all_messages()
+        result = run.result
         return DcChatResponse(
-            output_text=result.output,
-            history=result.all_messages(),
-            tool_call_count=tool_call_count,
+            output_text=result.output if result else "",
+            history=messages,
+            tool_call_count=_count_tool_calls_from_messages(messages),
         )
 
 
@@ -122,7 +140,25 @@ class MockDcChatProvider(MockAgentProvider):
     """
 
     async def chat(self, request: DcChatRequest) -> DcChatResponse:
-        """返回固定 Mock 响应；history 原样回传以便测试累积。"""
+        """返回固定 Mock 响应；history 原样回传以便测试累积。
+
+        同时 emit 一条 THINKING + AGENT_TEXT，让无模型配置时前端也能验证
+        「思考/叙述/最终回复」三步渲染链路。
+        """
+        from .models import DcEventType
+
+        emit = request.emit
+        if emit:
+            emit(
+                DcEventType.THINKING.value,
+                "（Mock）分析用户意图与当前屏幕…",
+                {"step": 1, "text": "（Mock 模式）未连接真实模型，跳过实际推理与工具调用。"},
+            )
+            emit(
+                DcEventType.AGENT_TEXT.value,
+                "（Mock）已收到消息",
+                {"step": 2, "text": "当前为 Mock 模式，配置 OPENAI_API_KEY 与 AGENT_MODEL 后启用真实执行。"},
+            )
         return DcChatResponse(
             output_text=(
                 "任务完成（Mock）：已收到用户消息。"
@@ -157,8 +193,13 @@ def create_dc_provider(settings: Settings) -> DcChatProvider | MockDcChatProvide
 
 def _count_tool_calls(result: Any) -> int:
     """从 pydantic-ai AgentRunResult 中统计工具调用次数。"""
+    return _count_tool_calls_from_messages(result.all_messages())
+
+
+def _count_tool_calls_from_messages(messages: list[Any]) -> int:
+    """从 ModelMessage 列表中统计工具调用次数。"""
     count = 0
-    for message in result.all_messages():
+    for message in messages:
         # ModelRequest 中的 ToolReturnPart 表示一次工具调用完成
         parts = getattr(message, "parts", None)
         if parts is None:
@@ -169,3 +210,38 @@ def _count_tool_calls(result: Any) -> int:
                 count += 1
     # 每个工具调用产生一对 (ToolCallPart + ToolReturnPart)，除以 2
     return count // 2 if count >= 2 else count
+
+
+def _part_field(part: Any, name: str, default: Any = None) -> Any:
+    """兼容 dict / dataclass 两种 part 表示读取字段。"""
+    if isinstance(part, dict):
+        return part.get(name, default)
+    return getattr(part, name, default)
+
+
+def _emit_message_parts(
+    message: Any,
+    step: int,
+    emit: Any,
+) -> int:
+    """把一条 ModelMessage 中的 thinking/text part 作为事件 emit。
+
+    Returns:
+        更新后的 step 计数（每个非空 part 递增一次）。
+    """
+    from .models import DcEventType
+
+    if not emit:
+        return step
+    parts = getattr(message, "parts", None) or []
+    for part in parts:
+        kind = _part_field(part, "part_kind")
+        if kind not in ("thinking", "text"):
+            continue
+        content = _part_field(part, "content", "") or ""
+        if not isinstance(content, str) or not content.strip():
+            continue
+        step += 1
+        event_type = DcEventType.THINKING if kind == "thinking" else DcEventType.AGENT_TEXT
+        emit(event_type.value, content[:200], {"step": step, "text": content})
+    return step

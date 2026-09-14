@@ -77,11 +77,26 @@ class DcToolContext:
     safety: DcShellPolicy
     recorder: DcActionRecorder
     artifacts: ArtifactStore
+    session_dir: Path
     snapshot_holder: DcSnapshotHolder
     tier: DcToolTier
     turn_id: str = ""
     ui_tree_top_k: int = 60
     action_timeout: float = 30.0
+
+
+def relative_artifact_path(abs_path: Path | None, base_dir: Path | None) -> str | None:
+    """把绝对产物路径转为会话目录相对 POSIX 路径（供前端 artifact URL 使用）。
+
+    返回 ``None`` 表示路径缺失或不在会话目录内（例如设备侧路径），
+    前端据此保持上一帧截图而不是拼出非法 URL。
+    """
+    if abs_path is None or base_dir is None:
+        return None
+    try:
+        return abs_path.resolve().relative_to(base_dir.resolve()).as_posix()
+    except ValueError, OSError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +196,10 @@ class DcActionRecorder:
             {
                 "invocation_id": invocation_id,
                 "tool": tool.value,
+                "args": args,
                 "success": success,
                 "duration_ms": duration_ms,
+                "result_summary": result_text[:500],
                 "error": error,
             },
         )
@@ -267,21 +284,19 @@ async def tool_screenshot(ctx: RunContext[DcToolContext]) -> str:
     deps = ctx.deps
 
     def _capture() -> str:
+        screens_dir = deps.session_dir / "screens"
         # JPEG 快速路径（用于 LLM 上传）
-        jpeg_path, jpeg_bytes, width, height = deps.hdc.screenshot_jpeg(
-            deps.artifacts.run_dir(deps.session_id) / "screens", f"dc_{int(time.time())}"
-        )
+        jpeg_path, jpeg_bytes, width, height = deps.hdc.screenshot_jpeg(screens_dir, f"dc_{int(time.time())}")
         changed = deps.snapshot_holder.update_jpeg(jpeg_path, jpeg_bytes, width, height)
         # PNG 存档（用于产物）
-        snapshot = deps.device.screenshot(
-            deps.artifacts.run_dir(deps.session_id) / "screens", deps.session_id, f"dc_{int(time.time())}"
-        )
+        snapshot = deps.device.screenshot(screens_dir, deps.session_id, f"dc_{int(time.time())}")
         deps.snapshot_holder.latest = snapshot
-        # 发射截图事件
+        # 发射截图事件（snapshot_path 为会话相对 POSIX 路径，供前端拼 artifact URL）
         deps.recorder._emit_event(
             DcEventType.SCREENSHOT_CAPTURED,
             "已采集设备截图",
             {
+                "snapshot_path": relative_artifact_path(jpeg_path, deps.session_dir),
                 "snapshot_id": snapshot.snapshot_id,
                 "width": width,
                 "height": height,
@@ -289,6 +304,7 @@ async def tool_screenshot(ctx: RunContext[DcToolContext]) -> str:
                 "changed": changed,
                 "element_count": len(snapshot.elements),
                 "page_path": snapshot.page_path,
+                "source": "tool",
             },
         )
         # 返回 top-K 元素摘要
