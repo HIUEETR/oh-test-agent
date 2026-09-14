@@ -887,8 +887,11 @@ button.icon-button {
 .dc-script-warnings { padding: 0 16px 10px; display: flex; flex-direction: column; gap: 2px; }
 .dc-script-warnings small { font-size: 11px; color: var(--warn); }
 .dc-script-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 1000;
+  /* 弹窗经 createPortal 挂到 body：.panel 的 backdrop-filter 会让面板成为
+     position:fixed 的包含块，留在面板内会被相邻面板遮挡（见 DcScriptDialog.tsx）。 */
+  position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000;
   display: flex; align-items: center; justify-content: center; padding: 20px;
+  overflow-y: auto;
 }
 .dc-script-dialog {
   background: var(--surface); border-radius: var(--radius-l); border: 1px solid var(--glass-line);
