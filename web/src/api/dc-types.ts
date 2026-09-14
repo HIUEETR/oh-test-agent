@@ -31,6 +31,16 @@ export interface DcToolInvocation {
 /** 对话轮次状态 */
 export type DcTurnStatus = "running" | "completed" | "blocked" | "needs_user" | "failed" | "cancelled";
 
+/** 模型侧步骤类型：原生推理 / 可见叙述 */
+export type DcStepKind = "thinking" | "agent_text";
+
+/** 模型侧单步记录（刷新历史时用于还原思考/叙述块） */
+export interface DcStepRecord {
+  step: number;
+  kind: DcStepKind;
+  text: string;
+}
+
 /** 对话轮次记录 */
 export interface DcTurnRecord {
   turn_id: string;
@@ -40,6 +50,7 @@ export interface DcTurnRecord {
   started_at: string;
   ended_at?: string | null;
   invocation_ids: string[];
+  steps?: DcStepRecord[];
   error?: string | null;
 }
 
@@ -49,8 +60,8 @@ export type DcEventType =
   | "turn_started" | "turn_finished"
   | "tool_call_started" | "tool_call_finished"
   | "screenshot_captured" | "ui_tree_captured"
-  | "assistant_message" | "script_generated"
-  | "tier_changed" | "error";
+  | "assistant_message" | "thinking" | "agent_text"
+  | "script_generated" | "tier_changed" | "error";
 
 /** DC 事件类型列表（用于 SSE 订阅） */
 export const DC_EVENT_TYPES: DcEventType[] = [
@@ -58,8 +69,8 @@ export const DC_EVENT_TYPES: DcEventType[] = [
   "turn_started", "turn_finished",
   "tool_call_started", "tool_call_finished",
   "screenshot_captured", "ui_tree_captured",
-  "assistant_message", "script_generated",
-  "tier_changed", "error",
+  "assistant_message", "thinking", "agent_text",
+  "script_generated", "tier_changed", "error",
 ];
 
 /** DC 事件 */
@@ -120,14 +131,23 @@ export interface SendMessageResponse {
   status: string;
 }
 
-/** 聊天消息（前端聚合用） */
+/** 聊天消息角色：用户 / 助手最终回复 / 模型思考 / 模型叙述 / 工具卡 */
+export type DcMessageRole = "user" | "assistant" | "thinking" | "narration" | "tool";
+
+/** 聊天消息（前端聚合用；工具消息以 invocation_id 作 id 以便就地更新） */
 export interface DcChatMessage {
   id: string;
-  role: "user" | "assistant" | "tool";
+  role: DcMessageRole;
   content: string;
   timestamp: string;
   turnId?: string;
-  invocations?: DcToolInvocation[];
+  step?: number;
+  /* 工具卡专属字段 */
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  toolResult?: string;
+  toolStatus?: "running" | "success" | "failed";
+  durationMs?: number;
 }
 
 /** 层级描述（用于 TierPicker） */

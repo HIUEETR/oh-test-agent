@@ -29,6 +29,8 @@ from .models import (
     DcScriptArtifact,
     DcSessionNotFound,
     DcSessionView,
+    DcStepKind,
+    DcStepRecord,
     DcToolInvocation,
     DcToolTier,
     DcTurnBudgetExceeded,
@@ -37,7 +39,7 @@ from .models import (
 )
 from .provider import DcChatProvider, MockDcChatProvider, create_dc_provider
 from .safety import DcShellPolicy
-from .tools import DcActionRecorder, DcSnapshotHolder, DcToolContext, build_tools
+from .tools import DcActionRecorder, DcSnapshotHolder, DcToolContext, build_tools, relative_artifact_path
 
 # ---------------------------------------------------------------------------
 # 事件总线（push-based，非轮询）
@@ -216,6 +218,10 @@ class DcSession:
         """发射事件到总线。"""
         self.bus.emit(self.session_id, event_type, message, payload)
 
+    def _rel_artifact(self, abs_path: Path | None) -> str | None:
+        """把绝对产物路径转为会话目录相对 POSIX 路径（供前端 artifact URL 使用）。"""
+        return relative_artifact_path(abs_path, self.dir)
+
     async def start(self) -> None:
         """连接设备并发射 SESSION_CREATED 事件。"""
         await asyncio.to_thread(self.device.connect)
@@ -269,6 +275,7 @@ class DcSession:
                     safety=self.safety,
                     recorder=self.recorder,
                     artifacts=self.artifacts,
+                    session_dir=self.dir,
                     snapshot_holder=self.snapshot_holder,
                     tier=self.tier,
                     turn_id=turn_id,
@@ -279,7 +286,8 @@ class DcSession:
                 # 构造工具列表
                 tools = build_tools(self.tier)
 
-                # 构造请求
+                # 构造请求；emit 回调让 provider 在执行的每一步实时回传
+                # thinking/agent_text 事件，并附加 turn_id 供前端按轮分组。
                 request = DcChatRequest(
                     user_prompt=text,
                     screenshot_jpeg=jpeg_bytes,
@@ -287,6 +295,7 @@ class DcSession:
                     history=pruned_history,
                     tools=tools,
                     tool_context=tool_context,
+                    emit=lambda etype, msg, payload: self._emit_from_provider(turn, etype, msg, payload),
                 )
 
                 # 调用 provider
@@ -350,6 +359,22 @@ class DcSession:
 
             return turn
 
+    def _emit_from_provider(self, turn: DcTurnRecord, event_type: str, message: str, payload: dict[str, Any]) -> None:
+        """Provider 执行期回调：附加 turn_id 后发射，并把步骤记入 turn。
+
+        ``THINKING`` / ``AGENT_TEXT`` 同时写入 ``turn.steps``，使刷新历史
+        （``to_view`` + 前端全量重建）后仍能还原思考/叙述块。
+        """
+        try:
+            resolved = DcEventType(event_type)
+        except ValueError:
+            return
+        text = str(payload.get("text", ""))
+        if resolved in (DcEventType.THINKING, DcEventType.AGENT_TEXT):
+            kind = DcStepKind.THINKING if resolved == DcEventType.THINKING else DcStepKind.AGENT_TEXT
+            turn.steps.append(DcStepRecord(step=int(payload.get("step", 0) or 0), kind=kind, text=text))
+        self._emit(resolved, message, {**payload, "turn_id": turn.turn_id})
+
     async def _capture_context(self) -> tuple[bytes, str]:
         """采集当前截图(JPEG)和 UI 树摘要。
 
@@ -360,6 +385,8 @@ class DcSession:
         screens_dir.mkdir(parents=True, exist_ok=True)
 
         # JPEG 快速路径
+        width = 0
+        height = 0
         try:
             jpeg_path, jpeg_bytes, width, height = await asyncio.to_thread(
                 self.hdc.screenshot_jpeg, screens_dir, f"dc_{int(time.time())}"
@@ -368,10 +395,26 @@ class DcSession:
             self._emit(
                 DcEventType.SCREENSHOT_CAPTURED,
                 "已采集设备截图",
-                {"width": width, "height": height, "sha256": self.snapshot_holder.latest_sha256},
+                {
+                    "snapshot_path": self._rel_artifact(jpeg_path),
+                    "width": width,
+                    "height": height,
+                    "sha256": self.snapshot_holder.latest_sha256,
+                    "source": "context",
+                },
             )
-        except Exception:
+        except Exception as exc:
             jpeg_bytes = self.snapshot_holder.latest_jpeg or b""
+            # 失败时明确告知前端：保持上一帧，不要拼出非法 URL
+            self._emit(
+                DcEventType.SCREENSHOT_CAPTURED,
+                "截图采集失败",
+                {
+                    "snapshot_path": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "source": "context",
+                },
+            )
 
         # UI 树摘要
         ui_tree_digest = ""
@@ -379,7 +422,9 @@ class DcSession:
             hierarchy = await asyncio.to_thread(self.device.collect_ui_hierarchy)
             from ..perception.normalizer import normalize_layout, page_path
 
-            elements = normalize_layout(hierarchy, width if jpeg_bytes else 1080, height if jpeg_bytes else 2232)
+            fallback_width = width or 1080
+            fallback_height = height or 2232
+            elements = normalize_layout(hierarchy, fallback_width, fallback_height)
             pp = page_path(hierarchy)
             top_k = self.settings.dc_ui_tree_top_k
             lines = [f"page={pp}, {len(elements)} elements (top {min(top_k, len(elements))})"]
@@ -441,7 +486,7 @@ class DcSession:
             created_at=self.created_at,
             turns=list(self.turns),
             invocations=list(self.recorder.invocations),
-            latest_snapshot_path=str(self.snapshot_holder.latest_path) if self.snapshot_holder.latest_path else None,
+            latest_snapshot_path=self._rel_artifact(self.snapshot_holder.latest_path),
             script=self.script,
         )
 

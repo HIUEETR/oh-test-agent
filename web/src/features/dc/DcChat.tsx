@@ -1,12 +1,16 @@
 // DC 模式聊天界面：消息流 + 输入框。
-// 用户气泡/助手气泡/工具调用块三种消息类型。
-// status=thinking/acting 时禁用输入并显示"Agent 正在自主执行..."。
+// 消息按角色渲染：user（右对齐气泡）/ thinking（可折叠思考块）/ narration（模型叙述）/
+// tool（工具卡，running → success/failed 就地更新）/ assistant（最终回复）。
+// status=thinking/acting 时禁用输入并按阶段显示文案。
 
 import { useEffect, useRef, useState } from "react";
 import { Send, Square } from "lucide-react";
 import { useDcConsole } from "../../stores/dc-console";
 import type { DcChatMessage } from "../../api/dc-types";
 import { Markdown } from "../../components/ui/primitives";
+
+/** 一次渲染的消息上限：超出时默认只渲染最近 N 条，可手动展开更早内容。 */
+const RENDER_WINDOW = 200;
 
 export function DcChat() {
   const messages = useDcConsole((state) => state.messages);
@@ -16,6 +20,7 @@ export function DcChat() {
   const stopTurn = useDcConsole((state) => state.stopTurn);
 
   const [draft, setDraft] = useState("");
+  const [showAll, setShowAll] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const busy = status === "thinking" || status === "acting";
 
@@ -40,6 +45,9 @@ export function DcChat() {
     }
   };
 
+  const hiddenCount = showAll ? 0 : Math.max(0, messages.length - RENDER_WINDOW);
+  const visibleMessages = hiddenCount > 0 ? messages.slice(hiddenCount) : messages;
+
   return (
     <section className="panel dc-chat">
       <div className="card-heading">
@@ -55,15 +63,20 @@ export function DcChat() {
             <p className="dc-chat-hint">Agent 会自主调用 HDC 工具操作设备，直到任务完成</p>
           </div>
         )}
-        {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} />
+        {hiddenCount > 0 && (
+          <button type="button" className="dc-message-more" onClick={() => setShowAll(true)}>
+            加载更早的 {hiddenCount} 条消息
+          </button>
+        )}
+        {visibleMessages.map((message) => (
+          <MessageBubble key={message.id} message={message} busy={busy} />
         ))}
         {busy && (
           <div className="dc-message dc-message-assistant dc-thinking">
             <div className="dc-thinking-dots">
               <span /><span /><span />
             </div>
-            <small>Agent 正在自主执行...</small>
+            <small>{status === "acting" ? "Agent 正在执行工具..." : "Agent 正在思考..."}</small>
           </div>
         )}
       </div>
@@ -104,10 +117,8 @@ export function DcChat() {
   );
 }
 
-/** 单条消息气泡 */
-function MessageBubble({ message }: { message: DcChatMessage }) {
-  const [expanded, setExpanded] = useState(false);
-
+/** 单条消息：按角色分派渲染 */
+function MessageBubble({ message, busy }: { message: DcChatMessage; busy: boolean }) {
   if (message.role === "user") {
     return (
       <div className="dc-message dc-message-user">
@@ -119,31 +130,23 @@ function MessageBubble({ message }: { message: DcChatMessage }) {
     );
   }
 
-  if (message.role === "tool") {
+  if (message.role === "thinking") {
+    return <ThinkingBlock message={message} busy={busy} />;
+  }
+
+  if (message.role === "narration") {
     return (
-      <div className="dc-message dc-message-tool">
-        <button
-          type="button"
-          className="dc-tool-call"
-          onClick={() => setExpanded(!expanded)}
-          aria-expanded={expanded}
-        >
-          <span className="dc-tool-icon">⚙</span>
-          <span className="dc-tool-text">{message.content}</span>
-          <span className="dc-tool-toggle">{expanded ? "▾" : "▸"}</span>
-        </button>
-        {expanded && message.invocations && (
-          <div className="dc-tool-detail">
-            {message.invocations.map((inv) => (
-              <pre key={inv.invocation_id}>
-                {JSON.stringify(inv.args, null, 2)}
-                {inv.error ? `\nERROR: ${inv.error}` : ""}
-              </pre>
-            ))}
-          </div>
-        )}
+      <div className="dc-message dc-message-narration">
+        <div className="dc-message-content">
+          <Markdown text={message.content} />
+        </div>
+        <small className="dc-message-time">{formatTime(message.timestamp)}</small>
       </div>
     );
+  }
+
+  if (message.role === "tool") {
+    return <ToolCard message={message} />;
   }
 
   // assistant
@@ -153,6 +156,62 @@ function MessageBubble({ message }: { message: DcChatMessage }) {
         <Markdown text={message.content} />
       </div>
       <small className="dc-message-time">{formatTime(message.timestamp)}</small>
+    </div>
+  );
+}
+
+/** 思考块：默认展开，轮次结束后自动折叠 */
+function ThinkingBlock({ message, busy }: { message: DcChatMessage; busy: boolean }) {
+  const [expanded, setExpanded] = useState(true);
+
+  useEffect(() => {
+    if (!busy) setExpanded(false);
+  }, [busy]);
+
+  return (
+    <div className="dc-message dc-message-thinking">
+      <button
+        type="button"
+        className="dc-thinking-head"
+        onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
+      >
+        <span>💭 思考</span>
+        <span className="dc-tool-toggle">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded && <div className="dc-thinking-body">{message.content}</div>}
+      <small className="dc-message-time">{formatTime(message.timestamp)}</small>
+    </div>
+  );
+}
+
+/** 工具卡：running 显示 spinner，完成显示 ✓/✗ + 参数 + 结果 + 耗时 */
+function ToolCard({ message }: { message: DcChatMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const running = message.toolStatus === "running";
+  const failed = message.toolStatus === "failed";
+  const args = message.toolArgs ? JSON.stringify(message.toolArgs, null, 2) : "";
+
+  return (
+    <div className={`dc-message dc-message-tool${failed ? " failed" : ""}`}>
+      <button
+        type="button"
+        className="dc-tool-call"
+        onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
+      >
+        <span className="dc-tool-icon">
+          {running ? <span className="dc-tool-spinner" aria-hidden="true" /> : failed ? "✗" : "✓"}
+        </span>
+        <span className="dc-tool-text">{message.content}</span>
+        <span className="dc-tool-toggle">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded && (
+        <div className="dc-tool-detail">
+          {args && <pre>{args}</pre>}
+          {message.toolResult && <pre>{message.toolResult}</pre>}
+        </div>
+      )}
     </div>
   );
 }
