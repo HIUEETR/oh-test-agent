@@ -1,7 +1,7 @@
 // 深链管理：?run_id= 与 ?tab= 的读取与写回。
 // 旧版 tab 值（live/graph/script/profiles/report）全部兼容，新增 advisor 与 runs。
 
-export const TAB_KEYS = ["live", "graph", "advisor", "script", "profiles", "report", "runs"] as const;
+export const TAB_KEYS = ["live", "graph", "advisor", "script", "profiles", "report", "runs", "dc"] as const;
 export type TabKey = (typeof TAB_KEYS)[number];
 
 /** 从当前地址读取深链参数；非法 tab 回退为 live。 */

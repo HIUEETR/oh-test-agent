@@ -222,13 +222,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     manager = RunManager(settings)
 
+    # 直流模式（DC Mode）：与 Live Mode 完全隔离的会话管理器
+    from ..dc import DcSessionManager, create_dc_router
+
+    dc_manager = DcSessionManager(settings, manager.artifacts)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        dc_manager.start_reaper()
         yield
         await manager.shutdown()
+        await dc_manager.shutdown()
 
     app = FastAPI(title="OpenHarmony Multimodal Test Agent", version="0.2.0", lifespan=lifespan)
     app.state.manager = manager
+    app.state.dc_manager = dc_manager
+    app.include_router(create_dc_router(settings, dc_manager))
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.harmony_cors_origins,

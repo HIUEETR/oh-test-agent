@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  Activity, Bot, Braces, BrainCircuit, FileCode2, GitBranch, History, RotateCcw, ShieldCheck,
+  Activity, Bot, Braces, BrainCircuit, FileCode2, GitBranch, History, RotateCcw, ShieldCheck, Zap,
 } from "lucide-react";
 import clsx from "clsx";
 import { apiDisplay } from "../api/client";
@@ -23,8 +23,9 @@ import { ScriptPanel } from "../features/script/ScriptPanel";
 import { ProfilesPanel } from "../features/profiles/ProfilesPanel";
 import { ReportPanel } from "../features/report/ReportPanel";
 import { RunsView } from "../features/runs/RunsView";
+import { DcPanel } from "../features/dc/DcPanel";
 
-type TabKey = "live" | "graph" | "advisor" | "script" | "profiles" | "report" | "runs";
+type TabKey = "live" | "graph" | "advisor" | "script" | "profiles" | "report" | "runs" | "dc";
 
 const TABS: Array<{ key: TabKey; label: string; icon: ReactNode }> = [
   { key: "live", label: "实时执行", icon: <Activity size={15} /> },
@@ -34,6 +35,7 @@ const TABS: Array<{ key: TabKey; label: string; icon: ReactNode }> = [
   { key: "profiles", label: "Profile 资产", icon: <ShieldCheck size={15} /> },
   { key: "report", label: "报告", icon: <Braces size={15} /> },
   { key: "runs", label: "历史运行", icon: <History size={15} /> },
+  { key: "dc", label: "直流模式", icon: <Zap size={15} /> },
 ];
 
 export default function App() {
@@ -171,6 +173,8 @@ export default function App() {
           {tab === "report" && <ReportPanel />}
 
           {tab === "runs" && <RunsView />}
+
+          {tab === "dc" && <DcPanel />}
         </section>
       </main>
     </div>
