@@ -52,6 +52,9 @@ DC_TURN_TEMPLATE = """\
 用户消息：{prompt}
 """
 
+# 视为「工具调用」的 part_kind（含 pydantic-ai 内建工具）
+_TOOL_CALL_PART_KINDS = frozenset({"tool-call", "builtin-tool-call"})
+
 
 # ---------------------------------------------------------------------------
 # DcChatProvider — OpenAICompatibleProvider 子类
@@ -73,6 +76,8 @@ class DcChatProvider(OpenAICompatibleProvider):
         ``ModelResponse``，把其中的 ``thinking`` / ``text`` part 作为
         ``THINKING`` / ``AGENT_TEXT`` 事件实时发出。工具调用事件由
         ``DcActionRecorder`` 实时发出，两条流按时间序交错。
+        **终态回答的文本不发 ``AGENT_TEXT``**（避免与 ``ASSISTANT_MESSAGE`` 重复），
+        详见 ``_emit_message_parts``。
 
         pydantic-ai 的历史管理已保证 ``ThinkingPart`` 正确进出模型请求，
         这里只读不改（思考内容绝不回喂模型）。
@@ -99,6 +104,8 @@ class DcChatProvider(OpenAICompatibleProvider):
         # 避免把上一轮的 text/thinking 重复 emit。
         seen = len(history)
         step = 0
+        # retries/重放可能产生完全相同的 part，按 (kind, text) 去重
+        emitted: set[tuple[str, str]] = set()
 
         async with agent.iter(
             user_content,
@@ -115,7 +122,7 @@ class DcChatProvider(OpenAICompatibleProvider):
                 if len(messages) <= seen:
                     continue
                 for message in messages[seen:]:
-                    step = _emit_message_parts(message, step, emit)
+                    step = _emit_message_parts(message, step, emit, emitted)
                 seen = len(messages)
 
         messages = run.all_messages()
@@ -223,24 +230,38 @@ def _emit_message_parts(
     message: Any,
     step: int,
     emit: Any,
+    emitted: set[tuple[str, str]] | None = None,
 ) -> int:
     """把一条 ModelMessage 中的 thinking/text part 作为事件 emit。
 
+    关键规则：**只有伴随工具调用的文本才是「中途叙述」**（``AGENT_TEXT``）。
+    不含工具调用的文本属于本轮终态回答，会由 ``handle_user_message`` 以
+    ``ASSISTANT_MESSAGE`` 呈现；若在此处也 emit，前端会同时渲染出叙述气泡与
+    助手气泡，出现两条内容相同的「任务完成」。
+
     Returns:
-        更新后的 step 计数（每个非空 part 递增一次）。
+        更新后的 step 计数（每个实际发出的 part 递增一次）。
     """
     from .models import DcEventType
 
     if not emit:
         return step
     parts = getattr(message, "parts", None) or []
+    has_tool_call = any(_part_field(part, "part_kind") in _TOOL_CALL_PART_KINDS for part in parts)
     for part in parts:
         kind = _part_field(part, "part_kind")
         if kind not in ("thinking", "text"):
             continue
+        if kind == "text" and not has_tool_call:
+            continue
         content = _part_field(part, "content", "") or ""
         if not isinstance(content, str) or not content.strip():
             continue
+        if emitted is not None:
+            key = (str(kind), content.strip())
+            if key in emitted:
+                continue
+            emitted.add(key)
         step += 1
         event_type = DcEventType.THINKING if kind == "thinking" else DcEventType.AGENT_TEXT
         emit(event_type.value, content[:200], {"step": step, "text": content})

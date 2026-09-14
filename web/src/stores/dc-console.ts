@@ -324,20 +324,33 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           }
           break;
         }
-        case "assistant_message":
+        case "assistant_message": {
           patch.status = "idle";
           patch.sending = false;
-          patch.messages = [
-            ...state.messages,
-            {
-              id: `final-${event.event_id}`,
-              role: "assistant",
-              content: (p.summary as string) ?? event.message,
-              timestamp: event.timestamp,
-              turnId: p.turn_id as string | undefined,
-            },
-          ];
+          const summary = (p.summary as string) ?? event.message;
+          // 终态回答可能已作为 narration（agent_text）渲染过（历史记录或 Mock 场景）：
+          // 同一轮中文本相同的叙述就地升级为助手消息，避免出现两条「任务完成」。
+          const last = state.messages[state.messages.length - 1];
+          const sameTurn = last && (p.turn_id == null || last.turnId === p.turn_id);
+          if (last && sameTurn && last.role === "narration" && normalizeText(last.content) === normalizeText(summary)) {
+            patch.messages = [
+              ...state.messages.slice(0, -1),
+              { ...last, id: `final-${event.event_id}`, role: "assistant", content: summary, timestamp: event.timestamp },
+            ];
+          } else {
+            patch.messages = [
+              ...state.messages,
+              {
+                id: `final-${event.event_id}`,
+                role: "assistant",
+                content: summary,
+                timestamp: event.timestamp,
+                turnId: p.turn_id as string | undefined,
+              },
+            ];
+          }
           break;
+        }
         case "turn_finished":
           patch.status = "idle";
           patch.sending = false;
@@ -393,6 +406,8 @@ function aggregateMessages(session: DcSessionView): DcChatMessage[] {
     });
     // 该轮模型侧的思考/叙述（后端 steps 与增量事件一一对应）
     (turn.steps ?? []).forEach((step, index) => {
+      // 终态回答已由 agent_summary 渲染：跳过与之重复的叙述步骤（历史记录兼容）
+      if (step.kind === "agent_text" && normalizeText(step.text) === normalizeText(turn.agent_summary)) return;
       messages.push({
         id: `${turn.turn_id}-step-${index}`,
         role: step.kind === "thinking" ? "thinking" : "narration",
@@ -437,4 +452,9 @@ function formatInvocationArgs(args: Record<string, unknown>): string {
     .filter(([, v]) => v != null)
     .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
     .join(", ");
+}
+
+/** 文本规范化：用于判断终态回答与叙述步骤是否重复（忽略首尾空白差异）。 */
+function normalizeText(text: string): string {
+  return (text ?? "").trim();
 }

@@ -174,6 +174,28 @@ describe("dc-console store appendEvent", () => {
     expect(useDcConsole.getState().messages).toHaveLength(1);
     expect(useDcConsole.getState().events).toHaveLength(1);
   });
+
+  it("叙述与终态回答文本相同时就地升级，只保留一条消息", () => {
+    const { appendEvent } = useDcConsole.getState();
+    appendEvent(event("agent_text", { text: "任务完成", step: 1, turn_id: "turn-1" }));
+    expect(useDcConsole.getState().messages.map((m) => m.role)).toEqual(["narration"]);
+
+    appendEvent(event("assistant_message", { summary: "任务完成", turn_id: "turn-1" }, "任务完成"));
+
+    const messages = useDcConsole.getState().messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+    expect(messages[0].content).toBe("任务完成");
+  });
+
+  it("不同轮的叙述不会被终态回答吞掉", () => {
+    const { appendEvent } = useDcConsole.getState();
+    appendEvent(event("agent_text", { text: "任务完成", step: 1, turn_id: "turn-1" }));
+    appendEvent(event("assistant_message", { summary: "任务完成", turn_id: "turn-2" }, "任务完成"));
+
+    const messages = useDcConsole.getState().messages;
+    expect(messages.map((m) => m.role)).toEqual(["narration", "assistant"]);
+  });
 });
 
 describe("dc-console store refreshSession", () => {
@@ -213,5 +235,17 @@ describe("dc-console store refreshSession", () => {
     expect(useDcConsole.getState().latestScreenshotUrl).toBe(
       "/api/dc/sessions/dc-test/artifacts/screens/dc_test.jpeg",
     );
+  });
+
+  it("重建时跳过与终态回答重复的叙述步骤（历史记录兼容）", async () => {
+    const session = visitSession();
+    session.turns[0].agent_summary = "我来截图";
+    getDcSession.mockResolvedValue(session);
+
+    await useDcConsole.getState().refreshSession();
+
+    const roles = useDcConsole.getState().messages.map((m) => m.role);
+    expect(roles).toEqual(["user", "thinking", "tool", "assistant"]);
+    expect(useDcConsole.getState().messages.filter((m) => m.content === "我来截图")).toHaveLength(1);
   });
 });
