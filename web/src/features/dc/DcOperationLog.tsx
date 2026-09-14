@@ -5,8 +5,12 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { useDcConsole } from "../../stores/dc-console";
 import type { DcToolInvocation } from "../../api/dc-types";
 
+// 稳定空数组引用：session 为 null 时返回同一引用，避免 zustand selector
+// 每次产生新 [] 触发 useSyncExternalStore 无限重渲染（白屏）。
+const NO_INVOCATIONS: DcToolInvocation[] = [];
+
 export function DcOperationLog() {
-  const invocations = useDcConsole((state) => state.session?.invocations ?? []);
+  const invocations = useDcConsole((state) => state.session?.invocations ?? NO_INVOCATIONS);
   const [expanded, setExpanded] = useState(true);
 
   return (

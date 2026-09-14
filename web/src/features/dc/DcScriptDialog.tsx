@@ -7,7 +7,8 @@ import { useDcConsole } from "../../stores/dc-console";
 export function DcScriptDialog() {
   const script = useDcConsole((state) => state.script);
   const generateScript = useDcConsole((state) => state.generateScript);
-  const invocations = useDcConsole((state) => state.session?.invocations ?? []);
+  // 只选原始数值 length（按值比较），避免 selector 返回新数组引用导致无限重渲染。
+  const invocationCount = useDcConsole((state) => state.session?.invocations.length ?? 0);
   const [showDialog, setShowDialog] = useState(false);
   const [generating, setGenerating] = useState(false);
 
@@ -49,7 +50,7 @@ export function DcScriptDialog() {
           type="button"
           className="primary compact"
           onClick={() => void handleGenerate()}
-          disabled={invocations.length === 0 || generating}
+          disabled={invocationCount === 0 || generating}
         >
           <FileCode2 size={14} />
           {generating ? "生成中..." : "生成脚本"}
