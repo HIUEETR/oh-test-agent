@@ -124,6 +124,11 @@ export function DcScriptDialog() {
           ))}
         </div>
       )}
+      {script && (
+        <div className="dc-script-hint">
+          <small>全部脚本（含本会话录制）可在顶部「Hypium 脚本」Tab 中查看与启动。</small>
+        </div>
+      )}
 
       {overlay}
     </section>

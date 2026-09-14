@@ -1,140 +1,366 @@
-// Hypium 脚本面板：脚本生成/重新生成、验收回放控制与回放进度。
+// Hypium 脚本库：统一列出 Live 运行与直流会话生成的脚本，选中即展示源码，
+// 并可按来源启动：Live 可回放脚本走验收回放，直流脚本走设备诊断执行。
 
-import { useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink, FileCode2, Play, RefreshCw } from "lucide-react";
-import { Badge } from "../../components/ui/primitives";
+import clsx from "clsx";
+import { Badge, EmptyState } from "../../components/ui/primitives";
+import { apiError } from "../../api/client";
+import { dcArtifactUrl } from "../../api/dc-client";
+import { getRun, getScript, listScripts, runDcScript, startRunReplay } from "../../api/scripts";
+import type { ScriptCatalogEntry, ScriptDetail } from "../../api/scripts";
+import type { ReplayResult, RunTrace } from "../../api/types";
 import { useConsole } from "../../stores/console";
 import { artifactUrl } from "../../utils/artifact";
 import { evidenceLabel, formatDuration, replayStatus, statusLabel } from "../../utils/format";
-import type { ReplayResult } from "../../api/types";
+
+/** 验收回放结果（含轮询到的 trace） */
+type ReplayOutcome = { kind: "run"; runId: string; attempts: number; replays: ReplayResult[] };
+/** 直流脚本诊断执行结果 */
+type DiagnosticOutcome = { kind: "dc"; sessionId: string; results: ReplayResult[] };
+type Outcome = ReplayOutcome | DiagnosticOutcome;
 
 export function ScriptPanel() {
   const runId = useConsole((state) => state.runId);
-  const trace = useConsole((state) => state.trace);
-  const script = useConsole((state) => state.script);
+  const generate = useConsole((state) => state.generate);
   const operation = useConsole((state) => state.operation);
   const attemptCount = useConsole((state) => state.attemptCount);
   const patchForm = useConsole((state) => state.patchForm);
-  const loadScript = useConsole((state) => state.loadScript);
-  const generate = useConsole((state) => state.generate);
-  const execute = useConsole((state) => state.execute);
 
-  // 每次进入脚本页或运行切换时静默刷新脚本内容。
-  useEffect(() => { void loadScript(true); }, [loadScript, runId]);
+  const [entries, setEntries] = useState<ScriptCatalogEntry[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [detail, setDetail] = useState<ScriptDetail | null>(null);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const [launching, setLaunching] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  const scriptDiagnostic = script?.diagnostic
-    ?? (script?.purpose ? script.purpose === "diagnostic" : !["regression", "stability"].includes(trace?.mode ?? "regression"));
-  const replayAllowed = (script?.acceptance_replay_enabled ?? !scriptDiagnostic) && !trace?.provisional && !trace?.live_mode;
-  const scriptStatus = operation === "generating" ? "生成中"
-    : script ? (scriptDiagnostic ? "诊断脚本" : "已生成")
-    : trace?.generated ? "正在读取" : "待自动生成";
-  const operationBusy = operation !== "idle";
-  const completedAttempts = trace?.replay_completed
-    ?? trace?.replays.filter((item) => ["passed", "failed", "timed_out", "ineligible", "invalid_result"].includes(replayStatus(item))).length
-    ?? 0;
-  const progress = operation === "executing"
-    ? Math.min(95, Math.max(8, (completedAttempts / attemptCount) * 100))
-    : trace?.replays.length ? 100 : 0;
+  const refreshList = useCallback(async () => {
+    try {
+      const next = await listScripts();
+      setEntries(next);
+      setError("");
+      return next;
+    } catch (cause) {
+      setError(apiError("读取脚本列表失败", cause));
+      return [];
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshList();
+  }, [refreshList]);
+
+  // 选中项：保留仍然存在的选择，否则优先当前运行的脚本，最后取最新一条
+  useEffect(() => {
+    if (entries.length === 0) {
+      if (selectedId) setSelectedId("");
+      return;
+    }
+    if (selectedId && entries.some((entry) => entry.script_id === selectedId)) return;
+    const currentRun = runId ? entries.find((entry) => entry.run_id === runId) : undefined;
+    setSelectedId((currentRun ?? entries[0]).script_id);
+  }, [entries, runId, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setDetail(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      try {
+        const next = await getScript(selectedId);
+        if (!cancelled) {
+          setDetail(next);
+          setError("");
+        }
+      } catch (cause) {
+        if (!cancelled) {
+          setDetail(null);
+          setError(apiError("读取脚本内容失败", cause));
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId]);
+
+  const entry = detail?.entry;
+  const launchable = Boolean(entry) && (entry!.source === "dc" || entry!.replay_eligible);
+  const blockers = useMemo(() => entry?.incomplete_reasons ?? [], [entry]);
+
+  const handleCopy = () => {
+    if (detail?.python) void navigator.clipboard.writeText(detail.python);
+  };
+
+  const handleDownload = () => {
+    if (!detail?.python || !entry) return;
+    const blob = new Blob([detail.python], { type: "text/x-python" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = entry.filename || "test.py";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleLaunch = async () => {
+    if (!entry) return;
+    setLaunching(true);
+    setError("");
+    setOutcome(null);
+    try {
+      if (entry.source === "dc") {
+        const response = await runDcScript(entry.script_id, 1);
+        setOutcome({ kind: "dc", sessionId: response.session_id, results: response.results });
+      } else {
+        await startRunReplay(entry.run_id, attemptCount);
+        const trace = await pollReplay(entry.run_id);
+        setOutcome({ kind: "run", runId: entry.run_id, attempts: attemptCount, replays: trace?.replays ?? [] });
+      }
+    } catch (cause) {
+      setError(apiError("启动脚本失败", cause));
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  const handleGenerate = async () => {
+    await generate();
+    await refreshList();
+  };
+
+  const busy = launching || operation !== "idle";
 
   return (
-    <section className="panel">
-      <div className="card-heading">
-        <span>Hypium Python 脚本</span>
-        <Badge tone={scriptDiagnostic ? "warn" : "ok"}>{scriptStatus}</Badge>
-      </div>
-      <div className="script-toolbar">
-        <button type="button" className="secondary" onClick={generate} disabled={!runId || operationBusy}>
-          <FileCode2 size={15} />{script ? "重新生成" : "生成脚本"}
-        </button>
-        <label className="attempt-select" htmlFor="attempts">回放次数
-          <select
-            id="attempts"
-            value={attemptCount}
-            onChange={(event) => patchForm({ attemptCount: Number(event.target.value) as 1 | 3 })}
-            disabled={operationBusy}
+    <section className="panel script-library">
+      <div className="script-library-head">
+        <div className="card-heading">
+          <span>Hypium Python 脚本</span>
+          <small>{entries.length} 个脚本 · 共 {entries.filter((item) => item.source === "dc").length} 个直流录制</small>
+        </div>
+        <div className="script-library-actions">
+          <button
+            type="button"
+            className="secondary compact"
+            onClick={() => void refreshList()}
+            disabled={loading}
           >
-            <option value={1}>1 次</option>
-            <option value={3}>3 次</option>
-          </select>
-        </label>
-        <button
-          type="button"
-          className="primary compact"
-          onClick={execute}
-          disabled={!script || operationBusy || !replayAllowed}
-          title={!replayAllowed ? "诊断或临时 Profile 脚本不能用于验收回放" : undefined}
-        >
-          <Play size={15} />验收回放 {attemptCount} 次
-        </button>
-        <span className="spacer" />
-        <span className="badge">Agent 运行成功后自动生成，也可手动重新生成</span>
+            <RefreshCw size={14} />刷新
+          </button>
+          <button type="button" className="secondary compact" onClick={() => void handleGenerate()} disabled={!runId || busy}>
+            <FileCode2 size={14} />重新生成当前运行脚本
+          </button>
+        </div>
       </div>
 
-      {!replayAllowed && (
-        <div className="warning-list" role="alert">当前脚本或 Profile 不具备正式 Hypium 验收回放资格。</div>
-      )}
-      {script?.warnings.length ? (
-        <div className="warning-list" role="alert">{script.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>
-      ) : null}
+      {error && <div className="banner error-banner" role="alert">{error}</div>}
 
-      {(operation === "executing" || Boolean(trace?.replays.length)) && (
-        <ReplayProgress
-          replays={trace?.replays ?? []}
-          attempts={attemptCount}
-          running={operation === "executing"}
-          progress={progress}
-          runId={runId}
-        />
-      )}
+      <div className="script-library-body">
+        <div className="script-list" role="listbox" aria-label="脚本列表">
+          {entries.length === 0 && (
+            <p className="script-list-empty">尚无生成的脚本。运行 Agent 或使用直流模式录制后，脚本会出现在这里。</p>
+          )}
+          {entries.map((item) => (
+            <button
+              type="button"
+              key={item.script_id}
+              role="option"
+              aria-selected={item.script_id === selectedId}
+              className={clsx("script-item", item.script_id === selectedId && "active")}
+              onClick={() => setSelectedId(item.script_id)}
+            >
+              <span className="script-item-top">
+                <strong title={item.case_id ?? item.filename}>{item.case_id ?? item.filename}</strong>
+                <Badge tone={item.source === "dc" ? "brand" : "neutral"}>{item.source === "dc" ? "直流" : "Live"}</Badge>
+                <Badge tone={item.replay_eligible ? "ok" : "warn"}>{item.replay_eligible ? "可回放" : "诊断"}</Badge>
+              </span>
+              <small>
+                {item.run_id}
+                {item.run_id === runId ? " · 当前运行" : ""}
+              </small>
+              <small>
+                {item.included_actions != null ? `${item.included_actions} 步` : "步数未知"}
+                {item.omitted_actions ? ` · 省略 ${item.omitted_actions}` : ""}
+                {item.modified_at ? ` · ${formatStamp(item.modified_at)}` : ""}
+              </small>
+            </button>
+          ))}
+        </div>
 
-      <pre className="code-view"><code>{script?.python ?? "运行 Agent 后将在这里展示自动生成的 Hypium Python 用例。"}</code></pre>
+        <div className="script-detail">
+          {!entry && (
+            <EmptyState
+              title="选择一个脚本"
+              hint="左侧列表包含 Live 运行与直流模式生成的 Hypium 脚本"
+              icon={<FileCode2 size={34} />}
+            />
+          )}
+          {entry && (
+            <>
+              <div className="script-detail-head">
+                <div>
+                  <strong>{entry.case_id ?? entry.filename}</strong>
+                  <small>{entry.script_id}</small>
+                </div>
+                <div className="script-detail-badges">
+                  <Badge tone={entry.source === "dc" ? "brand" : "neutral"}>
+                    {entry.source === "dc" ? "直流录制" : "Live 运行"}
+                  </Badge>
+                  <Badge tone={entry.replay_eligible ? "ok" : "warn"}>
+                    {entry.replay_eligible ? "验收可回放" : "诊断脚本"}
+                  </Badge>
+                </div>
+              </div>
+
+              <div className="script-toolbar">
+                <span className="script-stat">
+                  可回放操作：{entry.included_actions ?? "—"}
+                  {entry.omitted_actions ? ` · 省略：${entry.omitted_actions}` : ""}
+                </span>
+                {entry.source === "run" && (
+                  <label className="attempt-select" htmlFor="attempts">回放次数
+                    <select
+                      id="attempts"
+                      value={attemptCount}
+                      onChange={(event) => patchForm({ attemptCount: Number(event.target.value) as 1 | 3 })}
+                      disabled={busy}
+                    >
+                      <option value={1}>1 次</option>
+                      <option value={3}>3 次</option>
+                    </select>
+                  </label>
+                )}
+                <span className="spacer" />
+                <button type="button" className="secondary compact" onClick={handleCopy}>复制</button>
+                <button type="button" className="secondary compact" onClick={handleDownload}>下载</button>
+                <button
+                  type="button"
+                  className="primary compact"
+                  onClick={() => void handleLaunch()}
+                  disabled={!launchable || busy}
+                  title={
+                    launchable
+                      ? entry.source === "dc"
+                        ? "在设备上诊断执行该直流录制脚本（不计入验收结论）"
+                        : `对该运行执行验收回放 ${attemptCount} 次`
+                      : "诊断脚本或不合格脚本不能用于验收回放"
+                  }
+                >
+                  <Play size={14} />
+                  {launching
+                    ? "启动中..."
+                    : entry.source === "dc"
+                      ? "诊断启动"
+                      : `验收回放 ${attemptCount} 次`}
+                </button>
+              </div>
+
+              {!launchable && (
+                <div className="warning-list" role="alert">
+                  <p>该脚本为诊断产物（replay_eligible=false），不参与正式 Hypium 验收回放。</p>
+                  {blockers.map((reason) => <p key={reason}>{reason}</p>)}
+                </div>
+              )}
+              {entry.warnings.length > 0 && (
+                <div className="warning-list" role="alert">
+                  {entry.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                </div>
+              )}
+
+              {outcome && <OutcomeView outcome={outcome} />}
+
+              <pre className="code-view">
+                <code>{loading && !detail.python ? "读取中..." : detail.python}</code>
+              </pre>
+            </>
+          )}
+        </div>
+      </div>
     </section>
   );
 }
 
-function ReplayProgress({ replays, attempts, running, progress, runId }: {
-  replays: ReplayResult[]; attempts: 1 | 3; running: boolean; progress: number; runId: string;
-}) {
+/** 启动结果：Live 走验收回放语义，直流走诊断执行语义，两者证据链接前缀不同。 */
+function OutcomeView({ outcome }: { outcome: Outcome }) {
+  const results = outcome.kind === "run" ? outcome.replays : outcome.results;
+  const running = outcome.kind === "run" && results.length < outcome.attempts;
   return (
     <section className="replay-progress" aria-live="polite" aria-busy={running}>
       <div className="progress-heading">
-        异步回放进度
-        <span>{running ? "执行中" : `${replays.filter((item) => item.passed).length}/${replays.length || attempts} 通过`}</span>
+        {outcome.kind === "run" ? "验收回放结果" : "诊断执行结果"}
+        <span>
+          {running ? "执行中" : `${results.filter((item) => item.passed).length}/${results.length || 1} 通过`}
+        </span>
       </div>
-      <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
       <div className="attempt-grid">
-        {Array.from({ length: attempts }, (_, index) => {
-          const attempt = replays.find((item) => item.attempt === index + 1);
-          const status = attempt ? replayStatus(attempt) : running && index === replays.length ? "running" : "queued";
-          const duration = attempt?.command.duration_ms;
-          const exitCode = attempt?.exit_code ?? attempt?.command.returncode;
-          const failure = attempt?.error?.message || attempt?.command.stderr || (attempt?.timed_out ? "执行超时" : "");
-          return (
-            <article className="attempt-card" key={index}>
-              <div className="attempt-top">
-                Attempt {index + 1}
-                <Badge tone={status === "passed" ? "ok" : ["failed", "timed_out", "invalid_result"].includes(status) ? "danger" : "warn"}>
-                  {statusLabel(status)}
-                </Badge>
+        {results.map((attempt) => (
+          <article className="attempt-card" key={attempt.attempt}>
+            <div className="attempt-top">
+              Attempt {attempt.attempt}
+              <Badge
+                tone={
+                  attempt.passed
+                    ? "ok"
+                    : ["failed", "timed_out", "invalid_result"].includes(replayStatus(attempt))
+                      ? "danger"
+                      : "warn"
+                }
+              >
+                {statusLabel(replayStatus(attempt))}
+              </Badge>
+            </div>
+            <dl>
+              <div><dt>耗时</dt><dd>{formatDuration(attempt.command.duration_ms)}</dd></div>
+              <div><dt>退出码</dt><dd>{attempt.exit_code ?? attempt.command.returncode ?? "—"}</dd></div>
+            </dl>
+            {attempt.error?.message && <p className="attempt-error" role="alert">{attempt.error.message}</p>}
+            {attempt.evidence_paths.length > 0 && (
+              <div className="evidence-links">
+                {attempt.evidence_paths.map((path) => (
+                  <a
+                    key={path}
+                    href={
+                      outcome.kind === "dc"
+                        ? dcArtifactUrl(outcome.sessionId, path)
+                        : artifactUrl(outcome.runId, path)
+                    }
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <ExternalLink size={11} />{evidenceLabel(path)}
+                  </a>
+                ))}
               </div>
-              <dl>
-                <div><dt>耗时</dt><dd>{duration === undefined ? "—" : formatDuration(duration)}</dd></div>
-                <div><dt>退出码</dt><dd>{exitCode ?? "—"}</dd></div>
-              </dl>
-              {failure && <p className="attempt-error" role="alert">{failure}</p>}
-              {attempt && attempt.evidence_paths.length > 0 && (
-                <div className="evidence-links">
-                  {attempt.evidence_paths.map((path, evidenceIndex) => (
-                    <a href={artifactUrl(runId, path)} target="_blank" rel="noreferrer" key={`${path}-${evidenceIndex}`}>
-                      <ExternalLink size={11} />{evidenceLabel(path)}
-                    </a>
-                  ))}
-                </div>
-              )}
-            </article>
-          );
-        })}
+            )}
+          </article>
+        ))}
+        {!running && results.length === 0 && <p className="script-list-empty">未产生回放结果。</p>}
       </div>
     </section>
   );
+}
+
+/** 轮询运行轨迹直到验收回放离开 pending（上限约 7.5 分钟防呆）。 */
+async function pollReplay(runId: string): Promise<RunTrace | null> {
+  let trace = await getRun(runId);
+  let ticks = 0;
+  while (trace?.replay_status === "pending" && ticks < 500) {
+    await new Promise((resolve) => window.setTimeout(resolve, 900));
+    trace = await getRun(runId);
+    ticks += 1;
+  }
+  return trace;
+}
+
+function formatStamp(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
