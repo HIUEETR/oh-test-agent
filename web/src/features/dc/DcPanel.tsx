@@ -11,6 +11,7 @@ import { DcOperationLog } from "./DcOperationLog";
 import { DcScriptDialog } from "./DcScriptDialog";
 import { DcTierPicker } from "./DcTierPicker";
 import { Badge, StatusDot } from "../../components/ui/primitives";
+import type { DcSessionSummary } from "../../api/dc-types";
 
 export function DcPanel() {
   useDcRuntime();
@@ -30,6 +31,9 @@ export function DcPanel() {
   }, [loadSessions]);
 
   const busy = status === "thinking" || status === "acting";
+  const activeSessions = sessions.filter((item) => item.active !== false);
+  const historySessions = sessions.filter((item) => item.active === false);
+  const isActiveSession = sessions.some((item) => item.session_id === activeSessionId && item.active !== false);
 
   return (
     <div className="dc-grid">
@@ -47,7 +51,7 @@ export function DcPanel() {
           )}
         </div>
         <div className="dc-toolbar-right">
-          {/* 会话选择器 */}
+          {/* 会话选择器：活跃会话 + 可恢复的历史会话 */}
           <select
             value={activeSessionId}
             onChange={(event) => selectSession(event.target.value)}
@@ -55,11 +59,24 @@ export function DcPanel() {
             disabled={sessions.length === 0}
           >
             <option value="">选择会话</option>
-            {sessions.map((s) => (
-              <option key={s.session_id} value={s.session_id}>
-                {s.session_id.slice(0, 20)}… · L{s.tier} · {s.turn_count} 轮
-              </option>
-            ))}
+            {activeSessions.length > 0 && (
+              <optgroup label="活跃会话">
+                {activeSessions.map((s) => (
+                  <option key={s.session_id} value={s.session_id}>
+                    {sessionLabel(s)} · {s.turn_count} 轮
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {historySessions.length > 0 && (
+              <optgroup label="历史会话（可恢复）">
+                {historySessions.map((s) => (
+                  <option key={s.session_id} value={s.session_id}>
+                    {sessionLabel(s)} · {s.turn_count} 轮
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
           <button
             type="button"
@@ -69,7 +86,7 @@ export function DcPanel() {
           >
             <Plus size={14} />新建会话
           </button>
-          {activeSessionId && (
+          {activeSessionId && isActiveSession && (
             <button
               type="button"
               className="secondary compact danger"
@@ -83,6 +100,21 @@ export function DcPanel() {
       </div>
 
       {error && <div className="banner error-banner dc-error" role="alert">{error}</div>}
+
+      {session?.restored && (
+        <div className="banner info-banner dc-restored" role="status">
+          <div className="banner-body">
+            <strong>已恢复历史会话</strong>
+            <span>
+              {session.restored_context === "text"
+                ? "模型上下文按历史轮次重建（截图与工具原始输出不重放），可继续对话。"
+                : session.restored_context === "full"
+                  ? "已还原完整对话上下文，可继续对话。"
+                  : "该会话没有可还原的模型上下文，仅保留消息与工具记录。"}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* 主内容区：中=聊天，右=截图+日志 */}
       <div className="dc-main">
@@ -106,4 +138,17 @@ export function DcPanel() {
       </div>
     </div>
   );
+}
+
+/** 会话下拉标签：短 id + 层级 + 最近活跃时间。 */
+function sessionLabel(summary: DcSessionSummary): string {
+  const stamp = summary.last_active_at ?? summary.created_at;
+  let time = "";
+  try {
+    time = new Date(stamp).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    time = "";
+  }
+  const id = summary.session_id.replace(/^dc-/, "").slice(0, 22);
+  return `${id} · L${summary.tier}${time ? ` · ${time}` : ""}`;
 }

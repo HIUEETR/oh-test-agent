@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import IntEnum, StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -255,6 +255,66 @@ class DcSessionView(BaseModel):
     invocations: list[DcToolInvocation] = Field(default_factory=list)
     latest_snapshot_path: str | None = None
     script: DcScriptArtifact | None = None
+    # 历史会话恢复标记：restored_context 表示模型上下文还原的完整度
+    restored: bool = False
+    restored_context: Literal["none", "full", "text"] = "none"
+
+
+class DcSessionSummary(BaseModel):
+    """GET /api/dc/sessions 列表项；active=False 表示可从磁盘恢复的历史会话。"""
+
+    session_id: str
+    device_id: str
+    tier: int
+    status: str = "idle"
+    created_at: datetime = Field(default_factory=utc_now)
+    last_active_at: datetime = Field(default_factory=utc_now)
+    turn_count: int = 0
+    invocation_count: int = 0
+    active: bool = False
+    script_available: bool = False
+    restorable: bool = True
+
+
+class DcSessionSnapshot(BaseModel):
+    """落盘到 ``<session_dir>/dc_session.json`` 的会话状态。
+
+    用于历史会话列表与恢复：turns/invocations/script 直接复用会话投影模型，
+    ``history`` 为已剥离图片与 thinking 的 pydantic-ai 消息 JSON。
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    schema_version: int = 1
+    session_id: str
+    device_id: str = ""
+    tier: DcToolTier = DcToolTier.L2
+    status: str = "idle"
+    created_at: datetime = Field(default_factory=utc_now)
+    last_active_at: datetime = Field(default_factory=utc_now)
+    turns: list[DcTurnRecord] = Field(default_factory=list)
+    invocations: list[DcToolInvocation] = Field(default_factory=list)
+    script: DcScriptArtifact | None = None
+    latest_snapshot_path: str | None = None
+    history: list[Any] = Field(default_factory=list)
+    history_kind: Literal["none", "model_messages"] = "none"
+    has_snapshot: bool = True
+
+    def summary(self, *, active: bool) -> DcSessionSummary:
+        """投影为列表项。"""
+        return DcSessionSummary(
+            session_id=self.session_id,
+            device_id=self.device_id,
+            tier=self.tier.value,
+            status=self.status,
+            created_at=self.created_at,
+            last_active_at=self.last_active_at,
+            turn_count=len(self.turns),
+            invocation_count=len(self.invocations),
+            active=active,
+            script_available=self.script is not None,
+            restorable=True,
+        )
 
 
 # ---------------------------------------------------------------------------

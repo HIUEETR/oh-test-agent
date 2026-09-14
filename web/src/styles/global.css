@@ -741,6 +741,7 @@ button.icon-button {
 .dc-toolbar-right { display: flex; align-items: center; gap: 8px; }
 .dc-toolbar-right select { min-width: 180px; }
 .dc-error { margin: 0; }
+.dc-restored { margin: 0; }
 .dc-main {
   display: grid;
   grid-template-columns: minmax(360px, 1fr) 340px;

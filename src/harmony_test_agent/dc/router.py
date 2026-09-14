@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..config import Settings
+from ..devices.base import DeviceError
 from .models import (
     DcDeviceBusy,
     DcEventType,
@@ -103,7 +104,7 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
 
     @router.get("/sessions")
     async def list_sessions():
-        """列出活跃会话摘要。"""
+        """列出活跃会话与可恢复的历史会话（active=False 表示在磁盘上）。"""
         return manager.list_sessions()
 
     @router.get("/sessions/{session_id}", response_model=DcSessionView)
@@ -113,6 +114,17 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
             session = manager.get(session_id)
         except DcSessionNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return session.to_view()
+
+    @router.post("/sessions/{session_id}/resume", response_model=DcSessionView)
+    async def resume_session(session_id: str):
+        """从磁盘快照恢复历史会话（服务重启、空闲淘汰或已关闭后仍可继续对话）。"""
+        try:
+            session = await manager.resume(session_id)
+        except DcSessionNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (DeviceError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=f"cannot resume session: {exc}") from exc
         return session.to_view()
 
     @router.delete("/sessions/{session_id}")
