@@ -46,6 +46,18 @@ class Settings(BaseSettings):
         ]
     )
 
+    # ------------------------------------------------------------------
+    # 直流模式（DC Mode）配置
+    # ------------------------------------------------------------------
+    dc_max_sessions: int = Field(default=8, ge=1, le=64)
+    dc_idle_ttl_seconds: int = Field(default=1800, ge=60, le=86400)
+    dc_history_turns: int = Field(default=12, ge=2, le=50)
+    dc_max_turn_steps: int = Field(default=30, ge=1, le=100)
+    dc_event_buffer_size: int = Field(default=500, ge=50, le=5000)
+    dc_default_tier: int = Field(default=2, ge=1, le=5)
+    dc_ui_tree_top_k: int = Field(default=60, ge=10, le=200)
+    dc_screenshot_cache_frames: int = Field(default=3, ge=1, le=10)
+
     @field_validator("harmony_cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: object) -> object:

@@ -210,6 +210,10 @@ class AgentProvider(ABC):
         """探索顾问单轮对话：把当前页追加进连续会话并返回结构化建议；默认不支持。"""
         return None
 
+    async def chat(self, request: Any) -> Any | None:
+        """DC 模式多轮工具对话；默认不支持。"""
+        return None
+
 
 class MockAgentProvider(AgentProvider):
     """提供确定性离线计划和决策，用于不调用真实模型的开发流程。"""
@@ -299,6 +303,16 @@ class MockAgentProvider(AgentProvider):
             direction=step.direction,
             wait_seconds=step.wait_seconds,
             reasoning="deterministic mock decision",
+        )
+
+    async def chat(self, request: Any) -> Any | None:
+        """DC 模式 Mock 对话：返回固定单轮响应，不调用工具。"""
+        from ..dc.models import DcChatResponse
+
+        return DcChatResponse(
+            output_text="Mock DC response: task acknowledged (no real model configured).",
+            history=list(getattr(request, "history", []) or []),
+            tool_call_count=0,
         )
 
 
