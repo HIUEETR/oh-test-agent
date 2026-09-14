@@ -152,8 +152,17 @@ class DcHdcExecutor:
         return self._run("shell", *argv)
 
     # ------------------------------------------------------------------
-    # L2 补充：memory_dump
+    # L2 补充：应用目录 / memory_dump
     # ------------------------------------------------------------------
+
+    def list_bundle_names(self, timeout: float = 20) -> CommandResult:
+        """列出设备已安装的 bundle 名（仅一次 ``bm dump -a``）。
+
+        对比 ``HarmonyDeviceAdapter.list_installed_apps``：后者对每个 bundle 追加
+        一次 ``bm dump -n``，实测 66 个包约 86s，必然撞上 DC 工具 30s 超时。
+        这里只做单次调用（实测 ≈0.7s），需要的元数据由 ``inspect_app`` 按需获取。
+        """
+        return self._run("shell", "bm", "dump", "-a", timeout=timeout)
 
     def memory_dump(self, bundle_name: str, output_path: Path) -> CommandResult:
         """采集指定应用的内存转储并写入本地文件。"""

@@ -36,6 +36,8 @@ _LAUNCHER_BUNDLES = ("com.ohos.sceneboard", "com.huawei.hmos.launcher", "com.oho
 _LAUNCHER_SCAN_MAX_PAGES = 6
 _LAUNCHER_HOME_SETTLE_SECONDS = 1.0
 _LAUNCHER_PAGE_SWIPE_SLEEP = 1.0
+# `bm dump -n <missing>` 退出码为 0，仅在输出中给出该提示
+_MISSING_BUNDLE_HINT = "failed to get information"
 
 
 class HarmonyDeviceAdapter(DeviceAdapter):
@@ -225,6 +227,10 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         result = self._run("shell", "bm", "dump", "-n", bundle_name)
         if not result.ok:
             raise DeviceError(f"bm dump -n {bundle_name} failed: {result.stderr or result.stdout}")
+        # bm 对不存在的包仍以 0 退出，只在 stdout 打印错误：此时解析会误报为
+        # "ambiguous metadata"，掩盖真正原因。
+        if _MISSING_BUNDLE_HINT in f"{result.stdout}\n{result.stderr}".casefold():
+            raise DeviceError(f"bundle {bundle_name} is not installed")
         try:
             return parse_installed_app(result.stdout, expected_bundle=bundle_name)
         except ValueError as exc:

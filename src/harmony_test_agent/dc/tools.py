@@ -20,10 +20,12 @@ from typing import Any
 
 from pydantic_ai import RunContext, Tool
 
+from ..devices.base import DeviceError
 from ..devices.harmony import HarmonyDeviceAdapter
 from ..models import CommandResult, ScreenSnapshot, utc_now
 from ..perception.normalizer import normalize_layout, page_path
 from ..storage.artifacts import ArtifactStore
+from ..targets.catalog import parse_bundle_list
 from .hdc import DcHdcExecutor
 from .models import (
     TOOL_TIER,
@@ -392,16 +394,39 @@ async def tool_foreground_app(ctx: RunContext[DcToolContext]) -> str:
     return await deps.recorder.run(ctx, DcToolName.FOREGROUND_APP, {}, _fg)
 
 
-async def tool_list_apps(ctx: RunContext[DcToolContext]) -> str:
-    """List all installed applications on the device."""
+# 单次 list_apps 返回的 bundle 上限（防止超长输出吃满 prompt token）
+_MAX_LISTED_APPS = 80
+
+
+async def tool_list_apps(ctx: RunContext[DcToolContext], query: str | None = None) -> str:
+    """List installed application bundle names, optionally filtered by a substring.
+
+    Only one ``bm dump -a`` call is made: enumerating metadata for every installed
+    bundle (``list_installed_apps``) costs one ``bm dump -n`` per bundle and blows
+    through the tool timeout on real devices.
+    """
     deps = ctx.deps
+    args: dict[str, Any] = {"query": query} if query else {}
 
     def _list() -> str:
-        apps = deps.device.list_installed_apps()
-        lines = [f"{app.bundle_name}: {app.display_name}" for app in apps[:50]]
-        return f"{len(apps)} apps installed:\n" + "\n".join(lines)
+        result = deps.hdc.list_bundle_names()
+        if not result.ok:
+            raise DeviceError(f"bm dump -a failed: {result.stderr or result.stdout or result.returncode}")
+        bundles = parse_bundle_list(result.stdout)
+        if query:
+            needle = query.strip().casefold()
+            bundles = [bundle for bundle in bundles if needle in bundle.casefold()]
+        if not bundles:
+            return f"0 apps installed matching {query!r}" if query else "0 apps installed"
+        shown = bundles[:_MAX_LISTED_APPS]
+        header = f"{len(bundles)} apps installed"
+        if query:
+            header += f" matching {query!r}"
+        if len(shown) < len(bundles):
+            header += f" (showing first {len(shown)})"
+        return header + ":\n" + "\n".join(shown)
 
-    return await deps.recorder.run(ctx, DcToolName.LIST_APPS, {}, _list)
+    return await deps.recorder.run(ctx, DcToolName.LIST_APPS, args, _list)
 
 
 async def tool_inspect_app(ctx: RunContext[DcToolContext], bundle_name: str) -> str:
@@ -548,7 +573,10 @@ _TOOL_REGISTRY: dict[DcToolName, tuple[Callable[..., Any], str]] = {
     DcToolName.DUMP_UI_HIERARCHY: (tool_dump_ui_hierarchy, "Dump UI hierarchy and return top-K interactive elements."),
     DcToolName.COLLECT_LOGS: (tool_collect_logs, "Collect device hilog and save to artifacts."),
     DcToolName.FOREGROUND_APP: (tool_foreground_app, "Return current foreground app bundle and ability."),
-    DcToolName.LIST_APPS: (tool_list_apps, "List all installed applications on device."),
+    DcToolName.LIST_APPS: (
+        tool_list_apps,
+        "List installed application bundle names (single bm dump call; optional case-insensitive query).",
+    ),
     DcToolName.INSPECT_APP: (tool_inspect_app, "Inspect a specific installed app's metadata."),
     DcToolName.MEMORY_DUMP: (tool_memory_dump, "Dump memory usage for a specific application."),
     DcToolName.START_APP: (tool_start_app, "Start an application's ability."),

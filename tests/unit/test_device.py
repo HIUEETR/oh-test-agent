@@ -43,3 +43,36 @@ def test_ensure_on_launcher_always_presses_home(monkeypatch: pytest.MonkeyPatch)
 
     assert adapter._ensure_on_launcher() is True
     assert ("shell", "uitest", "uiInput", "keyEvent", "Home") in commands
+
+
+def test_inspect_app_reports_missing_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`bm dump -n` 对不存在的包仍以 0 退出，只打印提示：必须报「未安装」而不是「ambiguous」。"""
+    from harmony_test_agent.models import CommandResult
+
+    adapter = HarmonyDeviceAdapter("127.0.0.1:5555", "hdc.exe")
+    monkeypatch.setattr(
+        adapter,
+        "_run",
+        lambda *args, **kwargs: CommandResult(
+            command=" ".join(args),
+            returncode=0,
+            stdout="error: failed to get information and the parameters may be wrong.\n",
+        ),
+    )
+
+    with pytest.raises(DeviceError, match="is not installed"):
+        adapter.inspect_app("com.absent.bundle")
+
+
+def test_inspect_app_reports_failed_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harmony_test_agent.models import CommandResult
+
+    adapter = HarmonyDeviceAdapter("127.0.0.1:5555", "hdc.exe")
+    monkeypatch.setattr(
+        adapter,
+        "_run",
+        lambda *args, **kwargs: CommandResult(command=" ".join(args), returncode=1, stderr="hdc: device offline"),
+    )
+
+    with pytest.raises(DeviceError, match="bm dump -n com.example.app failed"):
+        adapter.inspect_app("com.example.app")
