@@ -1,7 +1,8 @@
 """DC Provider 实时步骤流测试：``agent.iter()`` + emit 回调解剖。
 
 覆盖方案 §2.2 / §2.3：THINKING / AGENT_TEXT 事件按序产生、历史不重复 emit、
-工具调用轮次的事件交错、emit 为 None 时不崩溃。
+工具调用轮次的事件交错、emit 为 None 时不崩溃；并锁定「终态回答文本不发
+AGENT_TEXT」这一修复（否则前端会重复显示最终回复）。
 """
 
 from __future__ import annotations
@@ -65,20 +66,30 @@ def ping_registry() -> list[Tool]:
 
 
 class TestIterEmitsSteps:
-    """逐节点差分 all_messages()，实时 emit 思考与叙述。"""
+    """逐节点差分 all_messages()，实时 emit 思考与叙述。
 
-    async def test_emits_thinking_then_agent_text(self) -> None:
+    终态回答的文本只通过 ``ASSISTANT_MESSAGE`` 呈现，不在此处 emit：
+    否则前端会出现两条内容相同的「任务完成」（叙述气泡 + 助手气泡）。
+    """
+
+    async def test_thinking_and_narration_emitted_before_tool_call(self) -> None:
+        calls = {"count": 0}
+
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            return ModelResponse(
-                parts=[
-                    ThinkingPart(content="先看看当前界面有哪些元素"),
-                    TextPart(content="我来点击搜索框"),
-                ]
-            )
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return ModelResponse(
+                    parts=[
+                        ThinkingPart(content="先看看当前界面有哪些元素"),
+                        TextPart(content="我来点击搜索框"),
+                        ToolCallPart(tool_name="ping", args={}),
+                    ]
+                )
+            return ModelResponse(parts=[TextPart(content="任务完成")])
 
         provider = make_provider(FunctionModel(model_fn))
         events: list[tuple[str, str, dict[str, Any]]] = []
-        request = DcChatRequest(user_prompt="搜索 OpenHarmony", emit=collect(events))
+        request = DcChatRequest(user_prompt="搜索 OpenHarmony", tools=ping_registry(), emit=collect(events))
 
         response = await provider.chat(request)
 
@@ -90,8 +101,23 @@ class TestIterEmitsSteps:
         assert events[0][2]["step"] == 1
         assert events[1][2]["text"] == "我来点击搜索框"
         assert events[1][2]["step"] == 2
-        assert response.output_text == "我来点击搜索框"
-        assert response.tool_call_count == 0
+        assert response.output_text == "任务完成"
+        assert response.tool_call_count == 1
+
+    async def test_terminal_text_is_not_emitted_as_narration(self) -> None:
+        """纯文本回答（无工具调用）只属于 ASSISTANT_MESSAGE。"""
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ThinkingPart(content="想一下"), TextPart(content="任务完成")])
+
+        provider = make_provider(FunctionModel(model_fn))
+        events: list[tuple[str, str, dict[str, Any]]] = []
+
+        response = await provider.chat(DcChatRequest(user_prompt="你好", emit=collect(events)))
+
+        assert [event[0] for event in events] == [DcEventType.THINKING.value]
+        assert "任务完成" not in [event[2]["text"] for event in events]
+        assert response.output_text == "任务完成"
 
     async def test_multi_step_tool_loop_emits_in_order(self) -> None:
         calls = {"count": 0}
@@ -113,14 +139,33 @@ class TestIterEmitsSteps:
 
         response = await provider.chat(request)
 
-        assert [event[0] for event in events] == [
-            DcEventType.AGENT_TEXT.value,
-            DcEventType.AGENT_TEXT.value,
-        ]
+        assert [event[0] for event in events] == [DcEventType.AGENT_TEXT.value]
         assert events[0][2]["text"] == "先探测设备状态"
-        assert events[1][2]["text"] == "任务完成"
         assert response.output_text == "任务完成"
         assert response.tool_call_count == 1
+
+    async def test_identical_narration_is_emitted_once(self) -> None:
+        """retries/重放可能重复产生同一 part，按 (kind, text) 去重。"""
+        calls = {"count": 0}
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            calls["count"] += 1
+            if calls["count"] <= 2:
+                return ModelResponse(
+                    parts=[
+                        TextPart(content="再次探测"),
+                        ToolCallPart(tool_name="ping", args={}),
+                    ]
+                )
+            return ModelResponse(parts=[TextPart(content="任务完成")])
+
+        provider = make_provider(FunctionModel(model_fn))
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        request = DcChatRequest(user_prompt="探测", tools=ping_registry(), emit=collect(events))
+
+        await provider.chat(request)
+
+        assert [event[2]["text"] for event in events] == ["再次探测"]
 
     async def test_history_text_is_not_re_emitted(self) -> None:
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -136,19 +181,30 @@ class TestIterEmitsSteps:
 
         await provider.chat(request)
 
-        texts = [event[2]["text"] for event in events]
-        assert texts == ["本轮新叙述"]
+        assert events == []
 
     async def test_blank_parts_are_skipped(self) -> None:
+        calls = {"count": 0}
+
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            return ModelResponse(parts=[ThinkingPart(content="   "), TextPart(content="有内容")])
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return ModelResponse(
+                    parts=[
+                        ThinkingPart(content="   "),
+                        TextPart(content="有内容"),
+                        ToolCallPart(tool_name="ping", args={}),
+                    ]
+                )
+            return ModelResponse(parts=[TextPart(content="完成")])
 
         provider = make_provider(FunctionModel(model_fn))
         events: list[tuple[str, str, dict[str, Any]]] = []
 
-        await provider.chat(DcChatRequest(user_prompt="hi", emit=collect(events)))
+        await provider.chat(DcChatRequest(user_prompt="hi", tools=ping_registry(), emit=collect(events)))
 
         assert [event[0] for event in events] == [DcEventType.AGENT_TEXT.value]
+        assert events[0][2]["text"] == "有内容"
 
     async def test_emit_none_does_not_crash(self) -> None:
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

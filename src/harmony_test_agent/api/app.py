@@ -41,7 +41,7 @@ from ..profiles import (
 )
 from ..reporting import ReportBuilder
 from ..runner import HypiumRunner
-from ..storage import ArtifactStore, RunRepository
+from ..storage import ArtifactStore, RunRepository, ScriptCatalog
 from ..targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
 
 _SMOKE_TASK = "启动应用，探索可达页面，验证返回和重启恢复。"
@@ -646,6 +646,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not requested.is_relative_to(run_dir) or not requested.is_file():
             raise HTTPException(status_code=404, detail="artifact not found")
         return FileResponse(requested)
+
+    # ------------------------------------------------------------------
+    # 统一脚本目录（Live 运行 + 直流会话）
+    # ------------------------------------------------------------------
+
+    @app.get("/api/scripts")
+    async def list_scripts():
+        """列出全部已生成的 Hypium 脚本（最新在前）。"""
+        return ScriptCatalog(manager.artifacts.runtime_dir).list_entries()
+
+    @app.get("/api/scripts/{script_id:path}")
+    async def get_script_detail(script_id: str):
+        """返回单个脚本的源码、config 与目录项。"""
+        catalog = ScriptCatalog(manager.artifacts.runtime_dir)
+        try:
+            entry, python_text, config = catalog.read(script_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"entry": entry, "python": python_text, "config": config}
 
     return app
 

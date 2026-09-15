@@ -34,6 +34,29 @@ class HypiumRunner:
 
     def execute(self, generated: GeneratedArtifact, attempt: int = 1) -> ReplayResult:
         """执行一次回放，并结构化保留资格、进程和 generated_result 错误。"""
+        return self._execute(generated, attempt, enforce_eligibility=True)
+
+    def execute_diagnostic(self, python_path: Path, attempt: int = 1) -> ReplayResult:
+        """诊断执行一个脚本，跳过 ``replay_eligible`` 门禁。
+
+        用于直流模式录制的脚本（``purpose=dc_recording`` / ``replay_eligible=False``）：
+        证据仍按 ``<产物目录>/hypium/attempt-XX/`` 落盘，但**不**写入任何 Run 的
+        trace/report，因此不会影响验收结论。
+        """
+        script = Path(python_path).resolve()
+        if not script.is_file():
+            raise ValueError(f"script not found: {script}")
+        generated = GeneratedArtifact(
+            python_path=script,
+            config_path=script.with_suffix(".json"),
+            metadata_path=script.with_suffix(".json"),
+            purpose="diagnostic",
+            replay_eligible=False,
+        )
+        return self._execute(generated, attempt, enforce_eligibility=False)
+
+    def _execute(self, generated: GeneratedArtifact, attempt: int, *, enforce_eligibility: bool) -> ReplayResult:
+        """执行一次回放；``enforce_eligibility`` 决定是否拦截不合格产物。"""
         run_dir = generated.python_path.parent.parent.resolve()
         hypium_dir = (run_dir / "hypium").resolve()
         attempt_dir = (hypium_dir / f"attempt-{attempt:02d}").resolve()
@@ -44,7 +67,7 @@ class HypiumRunner:
         attempt_dir.mkdir(parents=True)
         command_args = [sys.executable, str(generated.python_path)]
         command_text = subprocess.list2cmdline(command_args)
-        if not generated.replay_eligible:
+        if enforce_eligibility and not generated.replay_eligible:
             command = CommandResult(command=command_text, args=command_args, returncode=None)
             error = ReplayError(
                 kind="ineligible",

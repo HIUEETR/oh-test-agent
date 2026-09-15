@@ -104,17 +104,25 @@ export interface DcSessionView {
   invocations: DcToolInvocation[];
   latest_snapshot_path?: string | null;
   script?: DcScriptArtifact | null;
+  /** 是否为从磁盘快照恢复的历史会话 */
+  restored?: boolean;
+  /** 模型上下文还原方式：full=完整消息历史，text=按轮次重建，none=无 */
+  restored_context?: "none" | "full" | "text";
 }
 
-/** 会话摘要（GET /api/dc/sessions 列表项） */
+/** 会话摘要（GET /api/dc/sessions 列表项；active=false 表示可从磁盘恢复） */
 export interface DcSessionSummary {
   session_id: string;
   device_id: string;
   tier: number;
   status: string;
   created_at: string;
+  last_active_at?: string;
   turn_count: number;
   invocation_count: number;
+  active?: boolean;
+  script_available?: boolean;
+  restorable?: boolean;
 }
 
 /** 创建会话响应 */

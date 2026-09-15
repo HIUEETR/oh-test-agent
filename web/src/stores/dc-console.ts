@@ -10,6 +10,7 @@ import {
   generateDcScript,
   getDcSession,
   listDcSessions,
+  resumeDcSession,
   sendDcMessage,
   setDcTier,
   stopDcTurn,
@@ -95,8 +96,11 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           tier: result.tier,
           status: result.status,
           created_at: new Date().toISOString(),
+          last_active_at: new Date().toISOString(),
           turn_count: 0,
           invocation_count: 0,
+          active: true,
+          script_available: false,
         }],
         events: [],
         messages: [],
@@ -106,6 +110,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
         status: "idle",
       }));
       await get().refreshSession();
+      void get().loadSessions();
     } catch (cause) {
       set({ error: apiError("创建 DC 会话失败", cause) });
     }
@@ -122,6 +127,29 @@ export const useDcConsole = create<DcState>()((set, get) => ({
       status: "idle",
       error: "",
     });
+    if (!sessionId) return;
+    const summary = get().sessions.find((item) => item.session_id === sessionId);
+    if (summary && summary.active === false) {
+      // 历史会话：先从磁盘快照恢复，再展示（恢复后可直接继续对话）
+      void (async () => {
+        try {
+          const view = await resumeDcSession(sessionId);
+          set((state) => ({
+            session: view,
+            status: view.status,
+            script: view.script ?? null,
+            messages: aggregateMessages(view),
+            latestScreenshotUrl: view.latest_snapshot_path
+              ? dcArtifactUrl(sessionId, view.latest_snapshot_path)
+              : state.latestScreenshotUrl,
+          }));
+          await get().loadSessions();
+        } catch (cause) {
+          set({ error: apiError("恢复历史会话失败", cause) });
+        }
+      })();
+      return;
+    }
     void get().refreshSession();
   },
 
@@ -207,8 +235,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
     if (!activeSessionId) return;
     try {
       await closeDcSession(activeSessionId);
-      set((state) => ({
-        sessions: state.sessions.filter((s) => s.session_id !== activeSessionId),
+      set({
         activeSessionId: "",
         session: null,
         events: [],
@@ -216,7 +243,9 @@ export const useDcConsole = create<DcState>()((set, get) => ({
         script: null,
         latestScreenshotUrl: null,
         status: "idle",
-      }));
+      });
+      // 会话仍在磁盘快照中：刷新列表使其以「历史会话」出现，可随时恢复
+      await get().loadSessions();
     } catch (cause) {
       set({ error: apiError("关闭会话失败", cause) });
     }
@@ -324,20 +353,33 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           }
           break;
         }
-        case "assistant_message":
+        case "assistant_message": {
           patch.status = "idle";
           patch.sending = false;
-          patch.messages = [
-            ...state.messages,
-            {
-              id: `final-${event.event_id}`,
-              role: "assistant",
-              content: (p.summary as string) ?? event.message,
-              timestamp: event.timestamp,
-              turnId: p.turn_id as string | undefined,
-            },
-          ];
+          const summary = (p.summary as string) ?? event.message;
+          // 终态回答可能已作为 narration（agent_text）渲染过（历史记录或 Mock 场景）：
+          // 同一轮中文本相同的叙述就地升级为助手消息，避免出现两条「任务完成」。
+          const last = state.messages[state.messages.length - 1];
+          const sameTurn = last && (p.turn_id == null || last.turnId === p.turn_id);
+          if (last && sameTurn && last.role === "narration" && normalizeText(last.content) === normalizeText(summary)) {
+            patch.messages = [
+              ...state.messages.slice(0, -1),
+              { ...last, id: `final-${event.event_id}`, role: "assistant", content: summary, timestamp: event.timestamp },
+            ];
+          } else {
+            patch.messages = [
+              ...state.messages,
+              {
+                id: `final-${event.event_id}`,
+                role: "assistant",
+                content: summary,
+                timestamp: event.timestamp,
+                turnId: p.turn_id as string | undefined,
+              },
+            ];
+          }
           break;
+        }
         case "turn_finished":
           patch.status = "idle";
           patch.sending = false;
@@ -393,6 +435,8 @@ function aggregateMessages(session: DcSessionView): DcChatMessage[] {
     });
     // 该轮模型侧的思考/叙述（后端 steps 与增量事件一一对应）
     (turn.steps ?? []).forEach((step, index) => {
+      // 终态回答已由 agent_summary 渲染：跳过与之重复的叙述步骤（历史记录兼容）
+      if (step.kind === "agent_text" && normalizeText(step.text) === normalizeText(turn.agent_summary)) return;
       messages.push({
         id: `${turn.turn_id}-step-${index}`,
         role: step.kind === "thinking" ? "thinking" : "narration",
@@ -437,4 +481,9 @@ function formatInvocationArgs(args: Record<string, unknown>): string {
     .filter(([, v]) => v != null)
     .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
     .join(", ");
+}
+
+/** 文本规范化：用于判断终态回答与叙述步骤是否重复（忽略首尾空白差异）。 */
+function normalizeText(text: string): string {
+  return (text ?? "").trim();
 }

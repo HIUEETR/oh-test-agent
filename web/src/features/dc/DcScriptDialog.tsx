@@ -1,6 +1,11 @@
 // DC 模式脚本生成对话框：触发 Hypium 脚本生成并预览 Python 源码。
+//
+// 弹窗必须用 createPortal 挂到 document.body：.panel 的 backdrop-filter 会让
+// 该面板成为后代 position:fixed 元素的包含块，弹窗若留在面板内，z-index 只在
+// 面板的层叠上下文里生效，会被右侧「操作日志」等相邻面板压在下面。
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { FileCode2, X } from "lucide-react";
 import { useDcConsole } from "../../stores/dc-console";
 
@@ -11,6 +16,23 @@ export function DcScriptDialog() {
   const invocationCount = useDcConsole((state) => state.session?.invocations.length ?? 0);
   const [showDialog, setShowDialog] = useState(false);
   const [generating, setGenerating] = useState(false);
+
+  const closeDialog = useCallback(() => setShowDialog(false), []);
+
+  // 打开期间：Esc 关闭 + 锁定页面滚动
+  useEffect(() => {
+    if (!showDialog) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeDialog();
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showDialog, closeDialog]);
 
   const handleGenerate = async () => {
     setGenerating(true);
@@ -38,6 +60,40 @@ export function DcScriptDialog() {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const overlay =
+    showDialog && script
+      ? createPortal(
+          <div className="dc-script-overlay" onClick={closeDialog} role="presentation">
+            <div
+              className="dc-script-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-label="生成的 Hypium 脚本"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="dc-script-dialog-header">
+                <strong>生成的 Hypium 脚本</strong>
+                <small>诊断回放专用 · replay_eligible=False</small>
+                <button type="button" className="secondary compact" onClick={closeDialog} aria-label="关闭">
+                  <X size={14} />
+                </button>
+              </div>
+              <div className="dc-script-dialog-stats">
+                <span>可回放操作：{script.included_operations}</span>
+                <span>省略操作：{script.omitted_operations.length}</span>
+                <span>警告：{script.warnings.length}</span>
+              </div>
+              <pre className="dc-script-code">{script.python_text}</pre>
+              <div className="dc-script-dialog-footer">
+                <button type="button" className="secondary compact" onClick={handleCopy}>复制</button>
+                <button type="button" className="secondary compact" onClick={handleDownload}>下载</button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
 
   return (
     <section className="panel dc-script">
@@ -68,31 +124,13 @@ export function DcScriptDialog() {
           ))}
         </div>
       )}
-
-      {/* 模态框 */}
-      {showDialog && script && (
-        <div className="dc-script-overlay" onClick={() => setShowDialog(false)}>
-          <div className="dc-script-dialog" onClick={(event) => event.stopPropagation()}>
-            <div className="dc-script-dialog-header">
-              <strong>生成的 Hypium 脚本</strong>
-              <small>诊断回放专用 · replay_eligible=False</small>
-              <button type="button" className="secondary compact" onClick={() => setShowDialog(false)} aria-label="关闭">
-                <X size={14} />
-              </button>
-            </div>
-            <div className="dc-script-dialog-stats">
-              <span>可回放操作：{script.included_operations}</span>
-              <span>省略操作：{script.omitted_operations.length}</span>
-              <span>警告：{script.warnings.length}</span>
-            </div>
-            <pre className="dc-script-code">{script.python_text}</pre>
-            <div className="dc-script-dialog-footer">
-              <button type="button" className="secondary compact" onClick={handleCopy}>复制</button>
-              <button type="button" className="secondary compact" onClick={handleDownload}>下载</button>
-            </div>
-          </div>
+      {script && (
+        <div className="dc-script-hint">
+          <small>全部脚本（含本会话录制）可在顶部「Hypium 脚本」Tab 中查看与启动。</small>
         </div>
       )}
+
+      {overlay}
     </section>
   );
 }

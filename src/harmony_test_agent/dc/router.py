@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -15,6 +16,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..config import Settings
+from ..devices.base import DeviceError
+from ..runner import HypiumRunner
 from .models import (
     DcDeviceBusy,
     DcEventType,
@@ -60,6 +63,13 @@ class GenerateScriptRequest(BaseModel):
     main_ability: str = "EntryAbility"
 
 
+class RunScriptRequest(BaseModel):
+    """直流脚本诊断启动请求。"""
+
+    script_id: str = Field(min_length=1, max_length=500)
+    attempts: int = Field(default=1, ge=1, le=3)
+
+
 # ---------------------------------------------------------------------------
 # SSE 格式化
 # ---------------------------------------------------------------------------
@@ -103,7 +113,7 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
 
     @router.get("/sessions")
     async def list_sessions():
-        """列出活跃会话摘要。"""
+        """列出活跃会话与可恢复的历史会话（active=False 表示在磁盘上）。"""
         return manager.list_sessions()
 
     @router.get("/sessions/{session_id}", response_model=DcSessionView)
@@ -113,6 +123,17 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
             session = manager.get(session_id)
         except DcSessionNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return session.to_view()
+
+    @router.post("/sessions/{session_id}/resume", response_model=DcSessionView)
+    async def resume_session(session_id: str):
+        """从磁盘快照恢复历史会话（服务重启、空闲淘汰或已关闭后仍可继续对话）。"""
+        try:
+            session = await manager.resume(session_id)
+        except DcSessionNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (DeviceError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=f"cannot resume session: {exc}") from exc
         return session.to_view()
 
     @router.delete("/sessions/{session_id}")
@@ -292,6 +313,45 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
             headers["Cache-Control"] = "public, max-age=3600, immutable"
 
         return FileResponse(requested, headers=headers)
+
+    # ------------------------------------------------------------------
+    # 直流脚本诊断启动
+    # ------------------------------------------------------------------
+
+    script_locks: dict[str, asyncio.Lock] = {}
+
+    @router.post("/scripts/run")
+    async def run_diagnostic_script(body: RunScriptRequest):
+        """在设备上诊断执行一个直流录制脚本（不做验收资格门禁）。
+
+        仅允许 ``dc-*/generated/*.py``；证据写入该会话的
+        ``hypium/attempt-XX/``，不写入任何 Run 的 trace/report。
+        """
+        runtime_dir = settings.resolved_runtime_dir.resolve()
+        if not body.script_id.startswith(("dc-",)) or ".." in Path(body.script_id).parts:
+            raise HTTPException(status_code=400, detail="only DC recording scripts can be launched here")
+        candidate = (runtime_dir / body.script_id).resolve()
+        if not candidate.is_relative_to(runtime_dir) or candidate.suffix != ".py" or not candidate.is_file():
+            raise HTTPException(status_code=404, detail=f"script not found: {body.script_id}")
+        relative = candidate.relative_to(runtime_dir)
+        if len(relative.parts) < 3 or not relative.parts[0].startswith("dc-") or relative.parts[1] != "generated":
+            raise HTTPException(status_code=400, detail="only DC recording scripts can be launched here")
+
+        key = candidate.as_posix()
+        lock = script_locks.setdefault(key, asyncio.Lock())
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="script is already running")
+        runner = HypiumRunner(settings.resolved_runtime_home)
+        results = []
+        async with lock:
+            for attempt in range(1, body.attempts + 1):
+                result = await asyncio.to_thread(runner.execute_diagnostic, candidate, attempt)
+                results.append(result)
+        return {
+            "script_id": body.script_id,
+            "session_id": relative.parts[0],
+            "results": [result.model_dump(mode="json") for result in results],
+        }
 
     return router
 

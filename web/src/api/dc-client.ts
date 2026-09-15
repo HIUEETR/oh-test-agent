@@ -29,6 +29,13 @@ export function getDcSession(sessionId: string): Promise<DcSessionView> {
   return apiJson<DcSessionView>(`/api/dc/sessions/${encodeURIComponent(sessionId)}`);
 }
 
+/** 从磁盘快照恢复历史会话（服务重启/空闲淘汰/已关闭后仍可继续对话） */
+export function resumeDcSession(sessionId: string): Promise<DcSessionView> {
+  return apiJson<DcSessionView>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    method: "POST",
+  });
+}
+
 /** 发送用户消息 */
 export function sendDcMessage(sessionId: string, text: string): Promise<SendMessageResponse> {
   return apiJson<SendMessageResponse>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/messages`, {

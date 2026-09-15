@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from collections import deque
@@ -17,17 +18,18 @@ from ..config import Settings
 from ..devices.harmony import HarmonyDeviceAdapter
 from ..models import ScreenSnapshot, utc_now
 from ..storage.artifacts import ArtifactStore
-from .generator import DcHypiumGenerator
+from .generator import DcHypiumGenerator, _format_args
 from .hdc import DcHdcExecutor
 from .models import (
     DcChatRequest,
     DcChatResponse,
-    DcDeviceBusy,
     DcEvent,
     DcEventType,
     DcProviderUnsupported,
     DcScriptArtifact,
     DcSessionNotFound,
+    DcSessionSnapshot,
+    DcSessionSummary,
     DcSessionView,
     DcStepKind,
     DcStepRecord,
@@ -39,7 +41,16 @@ from .models import (
 )
 from .provider import DcChatProvider, MockDcChatProvider, create_dc_provider
 from .safety import DcShellPolicy
-from .tools import DcActionRecorder, DcSnapshotHolder, DcToolContext, build_tools, relative_artifact_path
+from .store import DcSessionStore, copy_message_with_parts
+from .tools import (
+    DcActionRecorder,
+    DcSnapshotHolder,
+    DcToolContext,
+    build_tools,
+    relative_artifact_path,
+)
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 事件总线（push-based，非轮询）
@@ -149,11 +160,7 @@ def _replace_images_with_placeholder(message: Any) -> Any:
             new_parts.append(part)
     if not changed:
         return message
-    # 创建消息副本（不修改原始消息）
-    try:
-        return message.model_copy(update={"parts": new_parts})
-    except Exception:
-        return message
+    return copy_message_with_parts(message, new_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -165,8 +172,11 @@ class DcSession:
     """一个 DC 模式会话的完整生命周期。
 
     - 内存态：history、turns、invocations、events 全部在内存中
+    - 持久化：``store`` 存在时把状态写入 ``<session_dir>/dc_session.json``，
+      服务重启/空闲淘汰后仍可从历史会话列表恢复
     - 隔离：不触碰 RunRepository、RunEventEmitter、AgentOrchestrator
-    - 并发：同一 session 同时只有一个 turn（asyncio.Lock）
+    - 并发：同一 session 同时只有一个 turn（``lock``）；同一设备同时只允许
+      一个会话的 turn（``device_lock``，由 DcSessionManager 注入）
     """
 
     def __init__(
@@ -177,6 +187,7 @@ class DcSession:
         settings: Settings,
         artifacts: ArtifactStore,
         provider: DcChatProvider | MockDcChatProvider,
+        store: DcSessionStore | None = None,
     ):
         self.session_id = session_id
         self.device_id = device_id
@@ -184,6 +195,7 @@ class DcSession:
         self.settings = settings
         self.artifacts = artifacts
         self.provider = provider
+        self.store = store
         self.created_at = utc_now()
         self.last_active_at = utc_now()
 
@@ -205,11 +217,17 @@ class DcSession:
         self.snapshot_holder = DcSnapshotHolder()
         self.script: DcScriptArtifact | None = None
 
+        # 历史恢复标记（供前端提示上下文还原方式）
+        self._restored = False
+        self._restored_context: Literal["none", "full", "text"] = "none"
+
         # 并发控制
         self.status: Literal["idle", "thinking", "acting", "closed"] = "idle"
         self.lock = asyncio.Lock()
         self.cancel_event = asyncio.Event()
         self._current_task: asyncio.Task | None = None
+        # 同一设备的轮次互斥锁（DcSessionManager 注入；None 表示不做设备级互斥）
+        self.device_lock: asyncio.Lock | None = None
 
         # 产物目录（dc- 前缀与 run- 天然分离）
         self.dir: Path = artifacts.run_dir(session_id)
@@ -235,129 +253,154 @@ class DcSession:
     async def handle_user_message(self, text: str) -> DcTurnRecord:
         """处理一条用户消息：自主多步执行工具直到完成或阻塞。
 
-        1. 加锁；status=thinking；emit TURN_STARTED
-        2. 采集当前截图(JPEG)+UI树(top-K摘要)
-        3. 历史裁剪
-        4. 构造 DcChatRequest，调用 provider.chat()
-        5. pydantic-ai 自动多轮调用 tools
-        6. history = response.history；emit ASSISTANT_MESSAGE + TURN_FINISHED
-        7. status=idle
+        1. 加锁；检查设备是否被其他会话的轮次占用（占用则明确失败，不排队）
+        2. 取设备轮次锁；status=thinking；emit TURN_STARTED
+        3. 采集当前截图(JPEG)+UI树(top-K摘要)
+        4. 历史裁剪
+        5. 构造 DcChatRequest，调用 provider.chat()
+        6. pydantic-ai 自动多轮调用 tools
+        7. history = response.history；emit ASSISTANT_MESSAGE + TURN_FINISHED
+        8. status=idle；落盘会话快照
         """
         async with self.lock:
             if self.status == "closed":
                 raise DcSessionNotFound(f"session {self.session_id} is closed")
+            device_lock = self.device_lock
+            if device_lock is not None and device_lock.locked():
+                return self._reject_busy_device(text)
+            if device_lock is None:
+                return await self._execute_turn(text)
+            async with device_lock:
+                return await self._execute_turn(text)
 
-            turn_id = f"turn-{uuid.uuid4().hex[:8]}"
-            turn = DcTurnRecord(turn_id=turn_id, user_message=text, status=DcTurnStatus.RUNNING)
-            self.turns.append(turn)
-            self.status = "thinking"
-            self.last_active_at = utc_now()
-            self.cancel_event.clear()
+    def _reject_busy_device(self, text: str) -> DcTurnRecord:
+        """设备已被其他会话的轮次占用：记录并发出可读错误，不排队。"""
+        turn = DcTurnRecord(
+            turn_id=f"turn-{uuid.uuid4().hex[:8]}",
+            user_message=text,
+            status=DcTurnStatus.BLOCKED,
+            ended_at=utc_now(),
+        )
+        turn.error = f"device {self.device_id} is busy with another DC session"
+        self.turns.append(turn)
+        self._emit(DcEventType.ERROR, turn.error, {"turn_id": turn.turn_id, "status": "blocked"})
+        self.save_state()
+        return turn
 
-            self._emit(
-                DcEventType.TURN_STARTED,
-                f"用户消息：{text[:100]}",
-                {"turn_id": turn_id, "user_message": text},
+    async def _execute_turn(self, text: str) -> DcTurnRecord:
+        """执行一轮对话（调用方已持有会话锁与设备轮次锁）。"""
+        turn_id = f"turn-{uuid.uuid4().hex[:8]}"
+        turn = DcTurnRecord(turn_id=turn_id, user_message=text, status=DcTurnStatus.RUNNING)
+        self.turns.append(turn)
+        self.status = "thinking"
+        self.last_active_at = utc_now()
+        self.cancel_event.clear()
+
+        self._emit(
+            DcEventType.TURN_STARTED,
+            f"用户消息：{text[:100]}",
+            {"turn_id": turn_id, "user_message": text},
+        )
+
+        try:
+            # 采集当前截图和 UI 树
+            jpeg_bytes, ui_tree_digest = await self._capture_context()
+
+            # 历史裁剪
+            pruned_history = _prune_history(self.history, self.settings.dc_history_turns)
+
+            # 构造工具上下文
+            tool_context = DcToolContext(
+                session_id=self.session_id,
+                device=self.device,
+                hdc=self.hdc,
+                safety=self.safety,
+                recorder=self.recorder,
+                artifacts=self.artifacts,
+                session_dir=self.dir,
+                snapshot_holder=self.snapshot_holder,
+                tier=self.tier,
+                turn_id=turn_id,
+                ui_tree_top_k=self.settings.dc_ui_tree_top_k,
+                action_timeout=self.settings.agent_action_timeout,
             )
 
-            try:
-                # 采集当前截图和 UI 树
-                jpeg_bytes, ui_tree_digest = await self._capture_context()
+            # 构造工具列表
+            tools = build_tools(self.tier)
 
-                # 历史裁剪
-                pruned_history = _prune_history(self.history, self.settings.dc_history_turns)
+            # 构造请求；emit 回调让 provider 在执行的每一步实时回传
+            # thinking/agent_text 事件，并附加 turn_id 供前端按轮分组。
+            request = DcChatRequest(
+                user_prompt=text,
+                screenshot_jpeg=jpeg_bytes,
+                ui_tree_digest=ui_tree_digest,
+                history=pruned_history,
+                tools=tools,
+                tool_context=tool_context,
+                emit=lambda etype, msg, payload: self._emit_from_provider(turn, etype, msg, payload),
+            )
 
-                # 构造工具上下文
-                tool_context = DcToolContext(
-                    session_id=self.session_id,
-                    device=self.device,
-                    hdc=self.hdc,
-                    safety=self.safety,
-                    recorder=self.recorder,
-                    artifacts=self.artifacts,
-                    session_dir=self.dir,
-                    snapshot_holder=self.snapshot_holder,
-                    tier=self.tier,
-                    turn_id=turn_id,
-                    ui_tree_top_k=self.settings.dc_ui_tree_top_k,
-                    action_timeout=self.settings.agent_action_timeout,
+            # 调用 provider
+            self.status = "acting"
+            response: DcChatResponse | None = await self.provider.chat(request)
+
+            if response is None:
+                raise DcProviderUnsupported(
+                    f"provider {self.provider.name} does not support DC chat; "
+                    "configure OPENAI_API_KEY and AGENT_MODEL or use mock provider"
                 )
 
-                # 构造工具列表
-                tools = build_tools(self.tier)
+            # 更新历史
+            self.history = response.history
 
-                # 构造请求；emit 回调让 provider 在执行的每一步实时回传
-                # thinking/agent_text 事件，并附加 turn_id 供前端按轮分组。
-                request = DcChatRequest(
-                    user_prompt=text,
-                    screenshot_jpeg=jpeg_bytes,
-                    ui_tree_digest=ui_tree_digest,
-                    history=pruned_history,
-                    tools=tools,
-                    tool_context=tool_context,
-                    emit=lambda etype, msg, payload: self._emit_from_provider(turn, etype, msg, payload),
-                )
+            # 更新 turn 记录
+            turn.status = DcTurnStatus.COMPLETED
+            turn.agent_summary = response.output_text
+            turn.ended_at = utc_now()
+            turn.invocation_ids = [inv.invocation_id for inv in self.recorder.invocations if inv.turn_id == turn_id]
 
-                # 调用 provider
-                self.status = "acting"
-                response: DcChatResponse | None = await self.provider.chat(request)
+            self._emit(
+                DcEventType.ASSISTANT_MESSAGE,
+                response.output_text[:200],
+                {"turn_id": turn_id, "summary": response.output_text, "tool_calls": response.tool_call_count},
+            )
+            self._emit(
+                DcEventType.TURN_FINISHED,
+                f"轮次完成：{response.tool_call_count} 次工具调用",
+                {"turn_id": turn_id, "status": turn.status.value, "tool_calls": response.tool_call_count},
+            )
 
-                if response is None:
-                    raise DcProviderUnsupported(
-                        f"provider {self.provider.name} does not support DC chat; "
-                        "configure OPENAI_API_KEY and AGENT_MODEL or use mock provider"
-                    )
+        except DcProviderUnsupported:
+            turn.status = DcTurnStatus.FAILED
+            turn.error = "provider does not support DC chat"
+            turn.ended_at = utc_now()
+            self._emit(DcEventType.ERROR, turn.error, {"turn_id": turn_id})
+            raise
 
-                # 更新历史
-                self.history = response.history
+        except DcTurnBudgetExceeded as exc:
+            turn.status = DcTurnStatus.BLOCKED
+            turn.error = str(exc)
+            turn.ended_at = utc_now()
+            self._emit(DcEventType.ERROR, str(exc), {"turn_id": turn_id})
 
-                # 更新 turn 记录
-                turn.status = DcTurnStatus.COMPLETED
-                turn.agent_summary = response.output_text
-                turn.ended_at = utc_now()
-                turn.invocation_ids = [inv.invocation_id for inv in self.recorder.invocations if inv.turn_id == turn_id]
+        except asyncio.CancelledError:
+            turn.status = DcTurnStatus.CANCELLED
+            turn.ended_at = utc_now()
+            self._emit(DcEventType.TURN_FINISHED, "轮次已取消", {"turn_id": turn_id, "status": "cancelled"})
+            raise
 
-                self._emit(
-                    DcEventType.ASSISTANT_MESSAGE,
-                    response.output_text[:200],
-                    {"turn_id": turn_id, "summary": response.output_text, "tool_calls": response.tool_call_count},
-                )
-                self._emit(
-                    DcEventType.TURN_FINISHED,
-                    f"轮次完成：{response.tool_call_count} 次工具调用",
-                    {"turn_id": turn_id, "status": turn.status.value, "tool_calls": response.tool_call_count},
-                )
+        except Exception as exc:
+            turn.status = DcTurnStatus.FAILED
+            turn.error = f"{type(exc).__name__}: {exc}"
+            turn.ended_at = utc_now()
+            self._emit(DcEventType.ERROR, turn.error, {"turn_id": turn_id})
 
-            except DcProviderUnsupported:
-                turn.status = DcTurnStatus.FAILED
-                turn.error = "provider does not support DC chat"
-                turn.ended_at = utc_now()
-                self._emit(DcEventType.ERROR, turn.error, {"turn_id": turn_id})
-                raise
+        finally:
+            self.status = "idle"
+            self.last_active_at = utc_now()
+            self.save_state()
 
-            except DcTurnBudgetExceeded as exc:
-                turn.status = DcTurnStatus.BLOCKED
-                turn.error = str(exc)
-                turn.ended_at = utc_now()
-                self._emit(DcEventType.ERROR, str(exc), {"turn_id": turn_id})
-
-            except asyncio.CancelledError:
-                turn.status = DcTurnStatus.CANCELLED
-                turn.ended_at = utc_now()
-                self._emit(DcEventType.TURN_FINISHED, "轮次已取消", {"turn_id": turn_id, "status": "cancelled"})
-                raise
-
-            except Exception as exc:
-                turn.status = DcTurnStatus.FAILED
-                turn.error = f"{type(exc).__name__}: {exc}"
-                turn.ended_at = utc_now()
-                self._emit(DcEventType.ERROR, turn.error, {"turn_id": turn_id})
-
-            finally:
-                self.status = "idle"
-                self.last_active_at = utc_now()
-
-            return turn
+        return turn
 
     def _emit_from_provider(self, turn: DcTurnRecord, event_type: str, message: str, payload: dict[str, Any]) -> None:
         """Provider 执行期回调：附加 turn_id 后发射，并把步骤记入 turn。
@@ -464,6 +507,7 @@ class DcSession:
             "已生成 Hypium 脚本",
             {"included": self.script.included_operations, "omitted": len(self.script.omitted_operations)},
         )
+        self.save_state()
         return self.script
 
     def change_tier(self, tier: DcToolTier) -> None:
@@ -475,6 +519,7 @@ class DcSession:
             f"工具层级从 L{old.value} 变更为 L{tier.value}",
             {"old_tier": old.value, "new_tier": tier.value},
         )
+        self.save_state()
 
     def to_view(self) -> DcSessionView:
         """返回公开投影。"""
@@ -488,10 +533,108 @@ class DcSession:
             invocations=list(self.recorder.invocations),
             latest_snapshot_path=self._rel_artifact(self.snapshot_holder.latest_path),
             script=self.script,
+            restored=self._restored,
+            restored_context=self._restored_context,
         )
 
+    # ------------------------------------------------------------------
+    # 会话快照：落盘 / 恢复
+    # ------------------------------------------------------------------
+
+    def snapshot(self) -> DcSessionSnapshot:
+        """构造可落盘的会话快照（history 已剥离图片与 thinking）。"""
+        history = self._history_payload()
+        return DcSessionSnapshot(
+            session_id=self.session_id,
+            device_id=self.device_id,
+            tier=self.tier,
+            status=self.status,
+            created_at=self.created_at,
+            last_active_at=self.last_active_at,
+            turns=list(self.turns),
+            invocations=list(self.recorder.invocations),
+            script=self.script,
+            latest_snapshot_path=self._rel_artifact(self.snapshot_holder.latest_path),
+            history=history,
+            history_kind="model_messages" if history else "none",
+        )
+
+    def _history_payload(self) -> list[Any]:
+        """按 history 上限裁剪并序列化模型上下文；无 store 时返回空。"""
+        if self.store is None or not self.history:
+            return []
+        limit = self.settings.dc_history_turns * 2 + 1
+        history = self.history[-limit:] if len(self.history) > limit else self.history
+        return self.store.dump_history(history)
+
+    def save_state(self) -> None:
+        """把当前会话状态写入磁盘快照；失败只记日志，绝不影响对话主流程。"""
+        if self.store is None:
+            return
+        try:
+            self.store.save(self.snapshot())
+        except (OSError, ValueError) as exc:
+            logger.warning("failed to persist DC session %s: %s", self.session_id, exc)
+
+    def apply_snapshot(self, snapshot: DcSessionSnapshot) -> None:
+        """从磁盘快照恢复历史会话状态（turns / 工具记录 / 脚本 / 模型上下文）。"""
+        self.created_at = snapshot.created_at
+        self.last_active_at = utc_now()
+        self.status = "idle"
+        self.turns = list(snapshot.turns)
+        self.recorder.invocations = list(snapshot.invocations)
+        self.script = snapshot.script
+        self.history = self._restore_history(snapshot)
+        self._restored = True
+        # 恢复最近一帧截图：相对路径 → 会话目录内的绝对路径（供 to_view 复用）
+        self.snapshot_holder.latest = None
+        self.snapshot_holder.latest_path = self._restore_snapshot_path(snapshot.latest_snapshot_path)
+
+    def _restore_snapshot_path(self, relative_path: str | None) -> Path | None:
+        if not relative_path or self.store is None:
+            return None
+        candidate = (self.dir / relative_path).resolve()
+        return candidate if candidate.is_file() and candidate.is_relative_to(self.dir.resolve()) else None
+
+    def _restore_history(self, snapshot: DcSessionSnapshot) -> list[Any]:
+        """优先还原完整模型上下文，失败时按 turns 重建纯文本上下文。"""
+        if self.store is not None and snapshot.history_kind == "model_messages":
+            restored = self.store.load_history(snapshot.history)
+            if restored:
+                self._restored_context = "full"
+                return restored
+        rebuilt = self._rebuild_history_from_turns()
+        self._restored_context = "text" if rebuilt else "none"
+        return rebuilt
+
+    def _rebuild_history_from_turns(self) -> list[Any]:
+        """用录制的轮次重建纯文本上下文（图片与工具原始输出不重放）。"""
+        from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+        rebuilt: list[Any] = []
+        for turn in self.turns:
+            if not turn.user_message:
+                continue
+            rebuilt.append(ModelRequest(parts=[UserPromptPart(content=turn.user_message)]))
+            summary = turn.agent_summary or self._turn_digest(turn)
+            if summary:
+                rebuilt.append(ModelResponse(parts=[TextPart(content=summary)]))
+        return rebuilt
+
+    def _turn_digest(self, turn: DcTurnRecord) -> str:
+        """把一轮的工具调用压缩成一行摘要，作为缺失总结时的上下文替身。"""
+        lines: list[str] = []
+        for inv in self.recorder.invocations:
+            if inv.turn_id != turn.turn_id:
+                continue
+            outcome = "ok" if inv.success else f"failed: {inv.error or ''}"
+            lines.append(f"{inv.tool.value}({_format_args(inv.args)}) -> {outcome}")
+        if not lines:
+            return ""
+        return "工具调用记录：\n" + "\n".join(lines)
+
     async def close(self) -> None:
-        """关闭会话：释放设备、发射事件。"""
+        """关闭会话：释放设备、落盘快照、发射事件。"""
         if self.status == "closed":
             return
         self.status = "closed"
@@ -505,6 +648,8 @@ class DcSession:
             await asyncio.to_thread(self.device.close)
         except Exception:
             pass
+        # 保留磁盘快照：关闭后仍可从历史会话列表选择并恢复
+        self.save_state()
         self._emit(DcEventType.SESSION_CLOSED, "DC 会话已关闭", {"session_id": self.session_id})
 
 
@@ -514,31 +659,38 @@ class DcSession:
 
 
 class DcSessionManager:
-    """管理 DC 会话的内存字典、设备争用检查和 LRU 淘汰。
+    """管理 DC 会话的内存字典、磁盘快照、设备轮次互斥与 LRU 淘汰。
 
     与 ``RunManager`` 完全隔离：不共享 tasks/orchestrators/repository。
+
+    设备互斥从「创建期独占」放宽为「轮次期互斥」：同一设备可以存在多个会话
+    （否则下拉列表永远只有 1 条、关闭即彻底消失），但同一时刻只允许一个会话
+    真正驱动设备，冲突方会收到明确的 BLOCKED 轮次而不是排队。
     """
 
     def __init__(self, settings: Settings, artifacts: ArtifactStore):
         self.settings = settings
         self.artifacts = artifacts
         self.sessions: dict[str, DcSession] = {}
-        self._device_lock: dict[str, str] = {}  # device_id → session_id
+        self.store = DcSessionStore(artifacts.runtime_dir, DcToolTier(settings.dc_default_tier))
+        self._device_locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task | None = None
+
+    def device_turn_lock(self, device_id: str) -> asyncio.Lock:
+        """返回设备级轮次互斥锁（同设备的所有会话共享）。"""
+        lock = self._device_locks.get(device_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._device_locks[device_id] = lock
+        return lock
 
     def create(self, device_id: str | None = None, tier: DcToolTier | None = None) -> DcSession:
         """创建新会话。
 
-        Raises:
-            DcDeviceBusy: 设备已被其他会话占用。
+        同一设备可以创建多个会话（仅轮次期互斥），因此不再因设备占用而拒绝。
         """
         resolved_device = device_id or self.settings.harmony_device
         resolved_tier = tier or DcToolTier(self.settings.dc_default_tier)
-
-        # 设备争用检查
-        existing = self._device_lock.get(resolved_device)
-        if existing and existing in self.sessions:
-            raise DcDeviceBusy(f"device {resolved_device} is already in use by session {existing}")
 
         # LRU 淘汰
         if len(self.sessions) >= self.settings.dc_max_sessions:
@@ -546,16 +698,58 @@ class DcSessionManager:
 
         session_id = f"dc-{utc_now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
         provider = create_dc_provider(self.settings)
-        session = DcSession(
+        session = self._build_session(
             session_id=session_id,
             device_id=resolved_device,
             tier=resolved_tier,
-            settings=self.settings,
-            artifacts=self.artifacts,
             provider=provider,
         )
         self.sessions[session_id] = session
-        self._device_lock[resolved_device] = session_id
+        return session
+
+    def _build_session(
+        self,
+        *,
+        session_id: str,
+        device_id: str,
+        tier: DcToolTier,
+        provider: DcChatProvider | MockDcChatProvider | None = None,
+    ) -> DcSession:
+        """构造会话并注入共享 store 与设备轮次锁。"""
+        session = DcSession(
+            session_id=session_id,
+            device_id=device_id,
+            tier=tier,
+            settings=self.settings,
+            artifacts=self.artifacts,
+            provider=provider or create_dc_provider(self.settings),
+            store=self.store,
+        )
+        session.device_lock = self.device_turn_lock(device_id)
+        return session
+
+    async def resume(self, session_id: str) -> DcSession:
+        """从磁盘快照恢复历史会话（服务重启、空闲淘汰或已关闭的会话）。
+
+        Raises:
+            DcSessionNotFound: 内存与磁盘都没有该会话。
+        """
+        existing = self.sessions.get(session_id)
+        if existing is not None:
+            return existing
+        snapshot = self.store.load(session_id)
+        if snapshot is None:
+            raise DcSessionNotFound(f"session {session_id} not found")
+        if len(self.sessions) >= self.settings.dc_max_sessions:
+            self._evict_oldest()
+        session = self._build_session(
+            session_id=snapshot.session_id,
+            device_id=snapshot.device_id or self.settings.harmony_device,
+            tier=snapshot.tier,
+        )
+        session.apply_snapshot(snapshot)
+        await session.start()
+        self.sessions[session_id] = session
         return session
 
     def get(self, session_id: str) -> DcSession:
@@ -569,27 +763,33 @@ class DcSessionManager:
         """获取会话；不存在时返回 None。"""
         return self.sessions.get(session_id)
 
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """列出活跃会话摘要。"""
-        return [
-            {
-                "session_id": s.session_id,
-                "device_id": s.device_id,
-                "tier": s.tier.value,
-                "status": s.status,
-                "created_at": s.created_at.isoformat(),
-                "turn_count": len(s.turns),
-                "invocation_count": len(s.recorder.invocations),
-            }
-            for s in self.sessions.values()
-        ]
+    def list_sessions(self) -> list[DcSessionSummary]:
+        """列出活跃会话 + 磁盘历史会话（活跃优先，其次按最近活跃时间倒序）。"""
+        summaries: dict[str, DcSessionSummary] = {}
+        for snapshot in self.store.list_summaries():
+            if snapshot.session_id in self.sessions:
+                continue
+            summaries[snapshot.session_id] = snapshot.summary(active=False)
+        for session in self.sessions.values():
+            summaries[session.session_id] = DcSessionSummary(
+                session_id=session.session_id,
+                device_id=session.device_id,
+                tier=session.tier.value,
+                status=session.status,
+                created_at=session.created_at,
+                last_active_at=session.last_active_at,
+                turn_count=len(session.turns),
+                invocation_count=len(session.recorder.invocations),
+                active=True,
+                script_available=session.script is not None,
+            )
+        return sorted(summaries.values(), key=lambda item: (not item.active, -item.last_active_at.timestamp()))
 
     async def close(self, session_id: str) -> bool:
-        """关闭并移除会话。"""
+        """关闭并移除内存会话（磁盘快照保留，仍可在历史列表中恢复）。"""
         session = self.sessions.pop(session_id, None)
         if session is None:
             return False
-        self._device_lock.pop(session.device_id, None)
         await session.close()
         return True
 
@@ -603,7 +803,6 @@ class DcSessionManager:
                 pass
         sessions = list(self.sessions.values())
         self.sessions.clear()
-        self._device_lock.clear()
         if not sessions:
             return
         await asyncio.wait_for(
@@ -617,7 +816,7 @@ class DcSessionManager:
             self._reaper_task = asyncio.create_task(self._reap_idle_sessions(), name="dc-session-reaper")
 
     async def _reap_idle_sessions(self) -> None:
-        """每 60s 扫描一次，淘汰 idle_ttl 到期的会话。"""
+        """每 60s 扫描一次，淘汰 idle_ttl 到期的会话（快照已在磁盘，可恢复）。"""
         while True:
             await asyncio.sleep(60)
             ttl = self.settings.dc_idle_ttl_seconds
@@ -633,7 +832,7 @@ class DcSessionManager:
                 await self.close(session_id)
 
     def _evict_oldest(self) -> None:
-        """淘汰最旧的 idle 会话以腾出空间。"""
+        """淘汰最旧的 idle 会话以腾出内存空间（磁盘快照保留）。"""
         if not self.sessions:
             return
         oldest_id = min(
@@ -642,7 +841,6 @@ class DcSessionManager:
         )
         oldest = self.sessions.pop(oldest_id, None)
         if oldest:
-            self._device_lock.pop(oldest.device_id, None)
             # 异步关闭（fire-and-forget，reaper 会兜底）
             try:
                 loop = asyncio.get_running_loop()

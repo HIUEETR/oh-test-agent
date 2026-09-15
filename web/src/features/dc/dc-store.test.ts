@@ -3,6 +3,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getDcSession = vi.hoisted(() => vi.fn());
+const resumeDcSession = vi.hoisted(() => vi.fn());
+const listDcSessions = vi.hoisted(() => vi.fn());
 const dcArtifactUrl = vi.hoisted(() =>
   vi.fn((sessionId: string, path: string) => `/api/dc/sessions/${sessionId}/artifacts/${path}`),
 );
@@ -14,14 +16,15 @@ vi.mock("../../api/dc-client", () => ({
   fetchDcScript: vi.fn(),
   generateDcScript: vi.fn(),
   getDcSession,
-  listDcSessions: vi.fn(),
+  listDcSessions,
+  resumeDcSession,
   sendDcMessage: vi.fn(),
   setDcTier: vi.fn(),
   stopDcTurn: vi.fn(),
 }));
 
 import { useDcConsole } from "../../stores/dc-console";
-import type { DcEvent, DcEventType, DcSessionView } from "../../api/dc-types";
+import type { DcEvent, DcEventType, DcSessionSummary, DcSessionView } from "../../api/dc-types";
 
 let nextEventId = 1;
 
@@ -174,6 +177,28 @@ describe("dc-console store appendEvent", () => {
     expect(useDcConsole.getState().messages).toHaveLength(1);
     expect(useDcConsole.getState().events).toHaveLength(1);
   });
+
+  it("叙述与终态回答文本相同时就地升级，只保留一条消息", () => {
+    const { appendEvent } = useDcConsole.getState();
+    appendEvent(event("agent_text", { text: "任务完成", step: 1, turn_id: "turn-1" }));
+    expect(useDcConsole.getState().messages.map((m) => m.role)).toEqual(["narration"]);
+
+    appendEvent(event("assistant_message", { summary: "任务完成", turn_id: "turn-1" }, "任务完成"));
+
+    const messages = useDcConsole.getState().messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+    expect(messages[0].content).toBe("任务完成");
+  });
+
+  it("不同轮的叙述不会被终态回答吞掉", () => {
+    const { appendEvent } = useDcConsole.getState();
+    appendEvent(event("agent_text", { text: "任务完成", step: 1, turn_id: "turn-1" }));
+    appendEvent(event("assistant_message", { summary: "任务完成", turn_id: "turn-2" }, "任务完成"));
+
+    const messages = useDcConsole.getState().messages;
+    expect(messages.map((m) => m.role)).toEqual(["narration", "assistant"]);
+  });
 });
 
 describe("dc-console store refreshSession", () => {
@@ -213,5 +238,89 @@ describe("dc-console store refreshSession", () => {
     expect(useDcConsole.getState().latestScreenshotUrl).toBe(
       "/api/dc/sessions/dc-test/artifacts/screens/dc_test.jpeg",
     );
+  });
+
+  it("重建时跳过与终态回答重复的叙述步骤（历史记录兼容）", async () => {
+    const session = visitSession();
+    session.turns[0].agent_summary = "我来截图";
+    getDcSession.mockResolvedValue(session);
+
+    await useDcConsole.getState().refreshSession();
+
+    const roles = useDcConsole.getState().messages.map((m) => m.role);
+    expect(roles).toEqual(["user", "thinking", "tool", "assistant"]);
+    expect(useDcConsole.getState().messages.filter((m) => m.content === "我来截图")).toHaveLength(1);
+  });
+});
+
+describe("dc-console store 历史会话", () => {
+  beforeEach(() => {
+    nextEventId = 1;
+    getDcSession.mockReset();
+    resumeDcSession.mockReset();
+    listDcSessions.mockReset();
+    listDcSessions.mockResolvedValue([]);
+    useDcConsole.getState().reset();
+  });
+
+  function historySummary(): DcSessionSummary {
+    return {
+      session_id: "dc-old",
+      device_id: "mock-device",
+      tier: 2,
+      status: "closed",
+      created_at: "2026-01-01T08:00:00Z",
+      last_active_at: "2026-01-02T08:00:00Z",
+      turn_count: 1,
+      invocation_count: 1,
+      active: false,
+      script_available: false,
+    };
+  }
+
+  it("选择历史会话时先 resume 再渲染消息与截图", async () => {
+    const view: DcSessionView = { ...visitSession(), session_id: "dc-old", restored: true, restored_context: "text" };
+    resumeDcSession.mockResolvedValue(view);
+    useDcConsole.setState({ sessions: [historySummary()] });
+
+    useDcConsole.getState().selectSession("dc-old");
+    await vi.waitFor(() => expect(useDcConsole.getState().session).not.toBeNull());
+
+    expect(resumeDcSession).toHaveBeenCalledWith("dc-old");
+    expect(getDcSession).not.toHaveBeenCalled();
+    const state = useDcConsole.getState();
+    expect(state.session?.restored).toBe(true);
+    expect(state.messages.map((m) => m.role)).toEqual([
+      "user",
+      "thinking",
+      "narration",
+      "tool",
+      "assistant",
+    ]);
+    expect(state.latestScreenshotUrl).toBe("/api/dc/sessions/dc-old/artifacts/screens/dc_test.jpeg");
+  });
+
+  it("恢复失败时给出可读错误且不抛异常", async () => {
+    resumeDcSession.mockRejectedValue(new Error("409 cannot resume session"));
+    useDcConsole.setState({ sessions: [historySummary()] });
+
+    useDcConsole.getState().selectSession("dc-old");
+    await vi.waitFor(() => expect(useDcConsole.getState().error).not.toBe(""));
+
+    expect(useDcConsole.getState().error).toContain("恢复历史会话失败");
+    expect(useDcConsole.getState().session).toBeNull();
+  });
+
+  it("选择活跃会话走 refreshSession，不触发 resume", async () => {
+    getDcSession.mockResolvedValue(visitSession());
+    useDcConsole.setState({
+      sessions: [{ ...historySummary(), session_id: "dc-test", active: true }],
+    });
+
+    useDcConsole.getState().selectSession("dc-test");
+    await vi.waitFor(() => expect(getDcSession).toHaveBeenCalled());
+
+    expect(resumeDcSession).not.toHaveBeenCalled();
+    expect(useDcConsole.getState().session?.session_id).toBe("dc-test");
   });
 });

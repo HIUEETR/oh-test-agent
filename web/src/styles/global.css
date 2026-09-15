@@ -741,6 +741,7 @@ button.icon-button {
 .dc-toolbar-right { display: flex; align-items: center; gap: 8px; }
 .dc-toolbar-right select { min-width: 180px; }
 .dc-error { margin: 0; }
+.dc-restored { margin: 0; }
 .dc-main {
   display: grid;
   grid-template-columns: minmax(360px, 1fr) 340px;
@@ -883,12 +884,16 @@ button.icon-button {
 .dc-tier-label { color: var(--text-2); }
 
 /* 脚本面板 */
-.dc-script-actions { display: flex; gap: 8px; padding: 8px 16px 12px; }
-.dc-script-warnings { padding: 0 16px 10px; display: flex; flex-direction: column; gap: 2px; }
+.dc-script-actions { display: flex; gap: 8px; padding: 8px 16px 12px; }.dc-script-warnings { padding: 0 16px 10px; display: flex; flex-direction: column; gap: 2px; }
 .dc-script-warnings small { font-size: 11px; color: var(--warn); }
+.dc-script-hint { padding: 0 16px 12px; }
+.dc-script-hint small { font-size: 11px; color: var(--text-3); line-height: 1.5; }
 .dc-script-overlay {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 1000;
+  /* 弹窗经 createPortal 挂到 body：.panel 的 backdrop-filter 会让面板成为
+     position:fixed 的包含块，留在面板内会被相邻面板遮挡（见 DcScriptDialog.tsx）。 */
+  position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000;
   display: flex; align-items: center; justify-content: center; padding: 20px;
+  overflow-y: auto;
 }
 .dc-script-dialog {
   background: var(--surface); border-radius: var(--radius-l); border: 1px solid var(--glass-line);
@@ -916,7 +921,50 @@ button.icon-button {
   border-top: 1px solid var(--glass-line);
 }
 
+/* ---------- 脚本库（Hypium 脚本 Tab） ---------- */
+.script-library { display: flex; flex-direction: column; }
+.script-library-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding-right: 18px; flex-wrap: wrap;
+}
+.script-library-head .card-heading { flex: 1; }
+.script-library-actions { display: flex; align-items: center; gap: 8px; }
+.script-library-body {
+  display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  gap: 14px; padding: 0 18px 18px; align-items: start;
+}
+.script-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: calc(100vh - 300px); overflow-y: auto; padding-right: 4px;
+}
+.script-list-empty { margin: 0; padding: 14px 4px; color: var(--text-3); font-size: 12px; line-height: 1.5; }
+.script-item {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  padding: 8px 10px; border: 1px solid var(--glass-line-soft); border-radius: var(--radius-s);
+  background: var(--glass-softer); cursor: pointer; color: inherit;
+}
+.script-item:hover { background: var(--glass-soft); }
+.script-item.active { border-color: var(--brand); background: var(--brand-softer); }
+.script-item-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.script-item-top strong {
+  font-size: 12.5px; font-family: var(--font-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+.script-item small {
+  color: var(--text-3); font-size: 10.5px; font-family: var(--font-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.script-detail { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.script-detail-head { display: flex; align-items: flex-start; gap: 10px; justify-content: space-between; }
+.script-detail-head strong { font-size: 14px; display: block; }
+.script-detail-head small { color: var(--text-3); font-size: 11px; font-family: var(--font-mono); word-break: break-all; }
+.script-detail-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.script-detail .code-view { max-height: calc(100vh - 420px); overflow: auto; }
+.script-stat { font-size: 12px; color: var(--text-2); }
+
 /* 响应式 */
 @media (max-width: 1100px) {
   .dc-main { grid-template-columns: 1fr; }
+  .script-library-body { grid-template-columns: 1fr; }
+  .script-list { max-height: 240px; }
 }
