@@ -5,6 +5,9 @@
 import { apiUrl } from "./client";
 import { DC_EVENT_TYPES, type DcEvent } from "./dc-types";
 
+/** 连接状态：connecting=首次连接中，open=已连上，reconnecting=断线等待重连，closed=已停止。 */
+export type DcStreamState = "connecting" | "open" | "reconnecting" | "closed";
+
 export class DcEventStream {
   private source: EventSource | null = null;
   private errorCount = 0;
@@ -18,12 +21,15 @@ export class DcEventStream {
     private readonly onEnd: () => void = () => undefined,
     /** 断线重连成功后回调：调用方用它做一次 refreshSession 对账（补齐 buffer 溢出丢失的事件）。 */
     private readonly onReconnect: () => void = () => undefined,
+    /** 连接状态变化回调：用于显示连接/重连状态，避免把同步中显示成「尚无操作记录」。 */
+    private readonly onStateChange: (state: DcStreamState) => void = () => undefined,
   ) {}
 
   /** 建立连接并开始接收事件；重复调用安全。 */
   start(): void {
     if (this.source) return;
     this.stopped = false;
+    this.onStateChange("connecting");
     const source = new EventSource(apiUrl(`/api/dc/sessions/${encodeURIComponent(this.sessionId)}/events`));
     this.source = source;
 
@@ -44,12 +50,15 @@ export class DcEventStream {
     // 浏览器 EventSource 会自动重连并携带 Last-Event-ID；首次之外的 open 视为重连
     source.onopen = () => {
       this.errorCount = 0;
+      this.onStateChange("open");
       if (this.opened) this.onReconnect();
       this.opened = true;
     };
 
     source.onerror = () => {
       this.errorCount += 1;
+      // 断线：保留已有行，只把连接状态标为「重连中」，不关闭流
+      this.onStateChange(this.stopped ? "closed" : "reconnecting");
       if (this.errorCount >= DcEventStream.MAX_CONSECUTIVE_ERRORS) this.close();
     };
   }
@@ -63,6 +72,7 @@ export class DcEventStream {
   private close(): void {
     this.source?.close();
     this.source = null;
+    this.onStateChange("closed");
     if (this.stopped) this.onEnd();
   }
 }

@@ -13,19 +13,22 @@ export function useDcRuntime(): void {
 
   useEffect(() => {
     if (!activeSessionId) return;
-    const { appendEvent, refreshSession } = useDcConsole.getState();
+    const { appendEvent, refreshSession, setConnection } = useDcConsole.getState();
     const stream = new DcEventStream(
       activeSessionId,
       appendEvent,
-      () => undefined,
+      () => setConnection("closed"),
       // 重连成功后对账一次：补齐 SSE buffer 溢出而丢失的历史事件
       () => void refreshSession(true),
+      // 连接状态：connecting/open/reconnecting/closed，供操作日志区分空状态
+      (state) => setConnection(state),
     );
     streamRef.current = stream;
     stream.start();
     return () => {
       stream.stop();
       streamRef.current = null;
+      setConnection("idle");
     };
   }, [activeSessionId]);
 }

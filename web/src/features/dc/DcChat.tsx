@@ -8,6 +8,7 @@ import { Send, Square } from "lucide-react";
 import { useDcConsole } from "../../stores/dc-console";
 import type { DcChatMessage } from "../../api/dc-types";
 import { Markdown } from "../../components/ui/primitives";
+import { DcActivityBar } from "./DcActivityBar";
 
 /** 一次渲染的消息上限：超出时默认只渲染最近 N 条，可手动展开更早内容。 */
 const RENDER_WINDOW = 200;
@@ -16,13 +17,15 @@ export function DcChat() {
   const messages = useDcConsole((state) => state.messages);
   const status = useDcConsole((state) => state.status);
   const sending = useDcConsole((state) => state.sending);
+  const cancelStatus = useDcConsole((state) => state.cancelStatus);
   const sendMessage = useDcConsole((state) => state.sendMessage);
   const stopTurn = useDcConsole((state) => state.stopTurn);
 
   const [draft, setDraft] = useState("");
   const [showAll, setShowAll] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
-  const busy = status === "thinking" || status === "acting";
+  const busy = status === "thinking" || status === "acting" || cancelStatus === "confirming";
+  const stopping = cancelStatus === "confirming";
 
   // 自动滚动到底部
   useEffect(() => {
@@ -55,6 +58,9 @@ export function DcChat() {
         <small>{messages.length} 条消息</small>
       </div>
 
+      {/* 当前活动区：独立于模型文本，始终显示阶段/调用/耗时/超时状态 */}
+      <DcActivityBar />
+
       {/* 消息流 */}
       <div className="dc-message-list" ref={listRef}>
         {messages.length === 0 && (
@@ -76,7 +82,11 @@ export function DcChat() {
             <div className="dc-thinking-dots">
               <span /><span /><span />
             </div>
-            <small>{status === "acting" ? "Agent 正在执行工具..." : "Agent 正在思考..."}</small>
+            <small>
+              {stopping
+                ? "正在确认设备状态..."
+                : status === "acting" ? "Agent 正在执行工具..." : "Agent 正在思考..."}
+            </small>
           </div>
         )}
       </div>
@@ -95,11 +105,16 @@ export function DcChat() {
         {busy ? (
           <button
             type="button"
-            className="secondary compact danger"
+            className="secondary compact danger dc-stop-button"
             onClick={() => void stopTurn()}
-            aria-label="停止执行"
+            disabled={stopping}
+            aria-label={stopping ? "正在确认设备状态" : "停止执行"}
           >
-            <Square size={15} />停止
+            {stopping ? (
+              <><span className="dc-tool-spinner" aria-hidden="true" />正在确认设备状态</>
+            ) : (
+              <><Square size={15} />停止</>
+            )}
           </button>
         ) : (
           <button
@@ -185,15 +200,17 @@ function ThinkingBlock({ message, busy }: { message: DcChatMessage; busy: boolea
   );
 }
 
-/** 工具卡：running 显示 spinner，完成显示 ✓/✗ + 参数 + 结果 + 耗时 */
+/** 工具卡：running 显示 spinner，终态按 succeeded/失败/超时/取消/未知分档显示 */
 function ToolCard({ message }: { message: DcChatMessage }) {
   const [expanded, setExpanded] = useState(false);
   const running = message.toolStatus === "running";
   const failed = message.toolStatus === "failed";
+  const tone = message.toolState ?? (running ? "running" : failed ? "failed" : "succeeded");
+  const toneClass = tone === "running" ? "" : ` state-${tone}`;
   const args = message.toolArgs ? JSON.stringify(message.toolArgs, null, 2) : "";
 
   return (
-    <div className={`dc-message dc-message-tool${failed ? " failed" : ""}`}>
+    <div className={`dc-message dc-message-tool${failed ? " failed" : ""}${toneClass}`}>
       <button
         type="button"
         className="dc-tool-call"
@@ -201,7 +218,7 @@ function ToolCard({ message }: { message: DcChatMessage }) {
         aria-expanded={expanded}
       >
         <span className="dc-tool-icon">
-          {running ? <span className="dc-tool-spinner" aria-hidden="true" /> : failed ? "✗" : "✓"}
+          {running ? <span className="dc-tool-spinner" aria-hidden="true" /> : toolIcon(tone)}
         </span>
         <span className="dc-tool-text">{message.content}</span>
         <span className="dc-tool-toggle">{expanded ? "▾" : "▸"}</span>
@@ -210,10 +227,24 @@ function ToolCard({ message }: { message: DcChatMessage }) {
         <div className="dc-tool-detail">
           {args && <pre>{args}</pre>}
           {message.toolResult && <pre>{message.toolResult}</pre>}
+          {message.toolEffectStatus === "unknown" && (
+            <pre className="dc-tool-effect-warn">副作用未确认：继续前需重新观测设备状态</pre>
+          )}
+          {message.toolErrorCode && <pre className="dc-tool-effect-warn">错误码：{message.toolErrorCode}</pre>}
         </div>
       )}
     </div>
   );
+}
+
+function toolIcon(tone: string): string {
+  switch (tone) {
+    case "succeeded": return "✓";
+    case "failed": return "✗";
+    case "timed_out": return "⏱";
+    case "cancelled": return "⊘";
+    default: return "?";
+  }
 }
 
 function formatTime(iso: string): string {
