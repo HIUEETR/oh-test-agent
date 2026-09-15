@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,14 +29,27 @@ from ..storage.artifacts import ArtifactStore
 from ..targets.catalog import parse_bundle_list
 from .hdc import DcHdcExecutor
 from .models import (
+    SIDE_EFFECT_TOOLS,
     TOOL_TIER,
+    DcEffectStatus,
     DcEventType,
     DcToolInvocation,
     DcToolName,
+    DcToolStatus,
     DcToolTier,
     tools_up_to,
 )
 from .safety import DcShellPolicy
+
+# 终态中文标签（事件 message 用）
+_STATUS_LABEL: dict[DcToolStatus, str] = {
+    DcToolStatus.SUCCEEDED: "成功",
+    DcToolStatus.FAILED: "失败",
+    DcToolStatus.TIMED_OUT: "超时",
+    DcToolStatus.CANCELLED: "已取消",
+    DcToolStatus.UNKNOWN: "状态未知",
+    DcToolStatus.RUNNING: "执行中",
+}
 
 # ---------------------------------------------------------------------------
 # 快照持有器
@@ -85,6 +99,7 @@ class DcToolContext:
     turn_id: str = ""
     ui_tree_top_k: int = 60
     action_timeout: float = 30.0
+    progress_interval: float = 1.0
 
 
 def relative_artifact_path(abs_path: Path | None, base_dir: Path | None) -> str | None:
@@ -107,11 +122,19 @@ def relative_artifact_path(abs_path: Path | None, base_dir: Path | None) -> str 
 
 
 class DcActionRecorder:
-    """所有工具调用的单一 chokepoint：录制 + 计时 + 事件发射 + 错误处理。"""
+    """所有工具调用的单一 chokepoint：录制 + 计时 + 进度 + 事件发射 + 错误处理。
 
-    def __init__(self) -> None:
+    Phase 1 的关键变化：``run()`` **先**把一条 ``running`` 记录加入账本并发
+    ``tool_call_started``，**然后**才执行设备调用；完成后就地更新同一条记录。
+    因此 ``DcSession.to_view()`` 在工具执行期间就能看到该调用，前端不再出现
+    「工具在跑但日志显示 0 步」的时间窗口。
+    """
+
+    def __init__(self, progress_interval: float = 1.0) -> None:
         self.invocations: list[DcToolInvocation] = []
+        self.progress_interval = progress_interval
         self._emit: Callable[[DcEventType, str, dict[str, Any]], None] | None = None
+        self._active: DcToolInvocation | None = None
 
     def set_emitter(self, emit: Callable[[DcEventType, str, dict[str, Any]], None]) -> None:
         """绑定事件发射回调（由 DcSession 在创建时注入）。"""
@@ -121,92 +144,254 @@ class DcActionRecorder:
         if self._emit:
             self._emit(event_type, message, payload or {})
 
+    # ------------------------------------------------------------------
+    # 账本查询
+    # ------------------------------------------------------------------
+
+    def by_id(self, invocation_id: str) -> DcToolInvocation | None:
+        """按 invocation_id 查找账本记录。"""
+        for invocation in self.invocations:
+            if invocation.invocation_id == invocation_id:
+                return invocation
+        return None
+
+    def running(self) -> list[DcToolInvocation]:
+        """返回仍在执行中的调用。"""
+        return [inv for inv in self.invocations if inv.status == DcToolStatus.RUNNING]
+
+    def turn_invocations(self, turn_id: str) -> list[DcToolInvocation]:
+        """返回某一轮次的全部调用（含运行中）。"""
+        return [inv for inv in self.invocations if inv.turn_id == turn_id]
+
+    def note_phase(self, phase: str) -> None:
+        """记录当前调用的阶段变化（截图/UI 层级等内部分步）。"""
+        active = self._active
+        if active is None or active.status != DcToolStatus.RUNNING:
+            return
+        active.phase = phase
+        active.last_progress_at = utc_now()
+        self._emit_event(
+            DcEventType.TOOL_CALL_PROGRESS,
+            f"工具 {active.tool.value} 阶段：{phase}",
+            self._progress_payload(active),
+        )
+
+    def _progress_payload(self, invocation: DcToolInvocation) -> dict[str, Any]:
+        """构造 tool_call_progress 载荷（已耗时/剩余时间/阶段/可取消性）。"""
+        now = utc_now()
+        elapsed_ms = round((now - invocation.started_at).total_seconds() * 1000)
+        remaining_ms: int | None = None
+        if invocation.deadline_at is not None:
+            remaining_ms = round((invocation.deadline_at - now).total_seconds() * 1000)
+        return {
+            "invocation_id": invocation.invocation_id,
+            "turn_id": invocation.turn_id,
+            "tool": invocation.tool.value,
+            "status": invocation.status.value,
+            "phase": invocation.phase,
+            "elapsed_ms": elapsed_ms,
+            "remaining_ms": remaining_ms,
+            "last_progress_at": now.isoformat(),
+            "cancellable": invocation.cancellable,
+        }
+
+    async def _heartbeat(self, invocation: DcToolInvocation) -> None:
+        """工具执行期间按固定间隔发出进度事件，避免长时间静默。"""
+        interval = max(0.2, self.progress_interval)
+        try:
+            while invocation.status == DcToolStatus.RUNNING:
+                await asyncio.sleep(interval)
+                if invocation.status != DcToolStatus.RUNNING:
+                    return
+                invocation.last_progress_at = utc_now()
+                self._emit_event(
+                    DcEventType.TOOL_CALL_PROGRESS,
+                    f"工具 {invocation.tool.value} 仍在执行（{invocation.phase or 'running'}）",
+                    self._progress_payload(invocation),
+                )
+        except asyncio.CancelledError:
+            raise
+
+    # ------------------------------------------------------------------
+    # 执行
+    # ------------------------------------------------------------------
+
     async def run(
         self,
         ctx: RunContext[DcToolContext],
         tool: DcToolName,
         args: dict[str, Any],
         device_fn: Callable[[], CommandResult | Any],
+        *,
+        phase: str = "",
+        cancellable: bool = True,
     ) -> str:
         """执行一次工具调用并完整录制。
 
-        1. emit TOOL_CALL_STARTED
-        2. await asyncio.to_thread(device_fn) with timeout
-        3. append DcToolInvocation
-        4. emit TOOL_CALL_FINISHED
-        5. return short string for LLM (never raw dict — keeps prompt tokens low)
+        1. 创建 running 记录并入账本（``to_view`` 立即可见）
+        2. emit TOOL_CALL_STARTED
+        3. 执行设备调用（带超时与心跳）
+        4. 就地更新同一记录（不新增第二条）
+        5. emit TOOL_CALL_FINISHED
+        6. 返回 LLM 可读短字符串
         """
         deps = ctx.deps
         invocation_id = f"inv-{uuid.uuid4().hex[:10]}"
         started_at = utc_now()
         started_mono = time.monotonic()
-
-        self._emit_event(
-            DcEventType.TOOL_CALL_STARTED,
-            f"调用工具 {tool.value}",
-            {"invocation_id": invocation_id, "tool": tool.value, "args": args},
-        )
-
-        success = True
-        error: str | None = None
-        command: CommandResult | None = None
-        result_text = ""
-
-        try:
-            raw = await asyncio.wait_for(
-                asyncio.to_thread(device_fn),
-                timeout=deps.action_timeout,
-            )
-            if isinstance(raw, CommandResult):
-                command = raw
-                success = raw.ok
-                if not success:
-                    error = raw.stderr or raw.stdout or f"returncode={raw.returncode}"
-                result_text = self._summarize_command(tool, raw)
-            else:
-                result_text = str(raw) if raw is not None else "ok"
-        except TimeoutError:
-            success = False
-            error = f"tool {tool.value} timed out after {deps.action_timeout}s"
-            result_text = error
-        except Exception as exc:
-            success = False
-            error = f"{type(exc).__name__}: {exc}"
-            result_text = error
-
-        ended_at = utc_now()
-        duration_ms = round((time.monotonic() - started_mono) * 1000)
-
+        timeout = float(deps.action_timeout)
+        has_side_effect = tool in SIDE_EFFECT_TOOLS
         invocation = DcToolInvocation(
             invocation_id=invocation_id,
             turn_id=deps.turn_id,
             tool=tool,
             tier=TOOL_TIER.get(tool, DcToolTier.L1),
             args=args,
-            success=success,
+            success=False,
+            status=DcToolStatus.RUNNING,
             started_at=started_at,
-            ended_at=ended_at,
-            duration_ms=duration_ms,
-            command=command,
-            error=error,
+            ended_at=None,
+            duration_ms=0,
+            last_progress_at=started_at,
+            deadline_at=started_at + timedelta(seconds=timeout),
+            effect_status=DcEffectStatus.UNKNOWN if has_side_effect else DcEffectStatus.NONE,
+            command_id=f"cmd-{invocation_id}",
+            phase=phase or tool.value,
+            cancellable=cancellable,
         )
         self.invocations.append(invocation)
+        self._active = invocation
 
         self._emit_event(
-            DcEventType.TOOL_CALL_FINISHED,
-            f"工具 {tool.value} {'成功' if success else '失败'}",
+            DcEventType.TOOL_CALL_STARTED,
+            f"调用工具 {tool.value}",
             {
                 "invocation_id": invocation_id,
+                "turn_id": deps.turn_id,
                 "tool": tool.value,
                 "args": args,
-                "success": success,
-                "duration_ms": duration_ms,
-                "result_summary": result_text[:500],
-                "error": error,
+                "status": DcToolStatus.RUNNING.value,
+                "phase": invocation.phase,
+                "started_at": started_at.isoformat(),
+                "deadline_at": invocation.deadline_at.isoformat() if invocation.deadline_at else None,
+                "command_id": invocation.command_id,
+                "cancellable": cancellable,
             },
         )
 
+        heartbeat = asyncio.create_task(self._heartbeat(invocation), name=f"dc-tool-progress-{invocation_id}")
+        status = DcToolStatus.UNKNOWN
+        error: str | None = None
+        error_code: str | None = None
+        command: CommandResult | None = None
+        result_text = ""
+
+        try:
+            raw = await asyncio.wait_for(asyncio.to_thread(device_fn), timeout=timeout)
+            if isinstance(raw, CommandResult):
+                command = raw
+                if raw.timed_out:
+                    status = DcToolStatus.TIMED_OUT
+                    error_code = "tool_timeout"
+                    error = f"tool {tool.value} timed out after {timeout}s"
+                elif raw.ok:
+                    status = DcToolStatus.SUCCEEDED
+                else:
+                    status = DcToolStatus.FAILED
+                    error_code = "device_error"
+                    error = raw.stderr or raw.stdout or f"returncode={raw.returncode}"
+                result_text = self._summarize_command(tool, raw)
+            else:
+                status = DcToolStatus.SUCCEEDED
+                result_text = str(raw) if raw is not None else "ok"
+        except TimeoutError:
+            status = DcToolStatus.TIMED_OUT
+            error_code = "tool_timeout"
+            error = f"tool {tool.value} timed out after {timeout}s"
+            result_text = error
+        except asyncio.CancelledError:
+            status = DcToolStatus.CANCELLED
+            error_code = "cancelled"
+            error = f"tool {tool.value} cancelled"
+            result_text = error
+            self._finalize(
+                invocation,
+                status=status,
+                started_mono=started_mono,
+                command=command,
+                error=error,
+                error_code=error_code,
+                result_text=result_text,
+            )
+            heartbeat.cancel()
+            self._active = None
+            raise
+        except Exception as exc:
+            status = DcToolStatus.FAILED
+            error_code = "tool_error"
+            error = f"{type(exc).__name__}: {exc}"
+            result_text = error
+
+        heartbeat.cancel()
+        self._finalize(
+            invocation,
+            status=status,
+            started_mono=started_mono,
+            command=command,
+            error=error,
+            error_code=error_code,
+            result_text=result_text,
+        )
+        self._active = None
         return result_text
+
+    def _finalize(
+        self,
+        invocation: DcToolInvocation,
+        *,
+        status: DcToolStatus,
+        started_mono: float,
+        command: CommandResult | None,
+        error: str | None,
+        error_code: str | None,
+        result_text: str,
+    ) -> None:
+        """就地写入终态并发射 tool_call_finished（同一调用只能有一个终态）。"""
+        if invocation.status != DcToolStatus.RUNNING:
+            return
+        ended_at = utc_now()
+        invocation.status = status
+        invocation.success = status == DcToolStatus.SUCCEEDED
+        invocation.ended_at = ended_at
+        invocation.duration_ms = round((time.monotonic() - started_mono) * 1000)
+        invocation.last_progress_at = ended_at
+        invocation.phase = "finished"
+        invocation.command = command
+        invocation.error = error
+        invocation.error_code = error_code
+        invocation.result_summary = result_text[:500]
+        if invocation.tool in SIDE_EFFECT_TOOLS:
+            invocation.effect_status = (
+                DcEffectStatus.CONFIRMED if status == DcToolStatus.SUCCEEDED else DcEffectStatus.UNKNOWN
+            )
+        self._emit_event(
+            DcEventType.TOOL_CALL_FINISHED,
+            f"工具 {invocation.tool.value} {_STATUS_LABEL[status]}",
+            {
+                "invocation_id": invocation.invocation_id,
+                "turn_id": invocation.turn_id,
+                "tool": invocation.tool.value,
+                "args": invocation.args,
+                "success": invocation.success,
+                "status": status.value,
+                "duration_ms": invocation.duration_ms,
+                "result_summary": invocation.result_summary,
+                "error": error,
+                "error_code": error_code,
+                "effect_status": invocation.effect_status.value,
+                "ended_at": ended_at.isoformat(),
+            },
+        )
 
     @staticmethod
     def _summarize_command(tool: DcToolName, result: CommandResult) -> str:
@@ -287,10 +472,15 @@ async def tool_screenshot(ctx: RunContext[DcToolContext]) -> str:
 
     def _capture() -> str:
         screens_dir = deps.session_dir / "screens"
-        # JPEG 快速路径（用于 LLM 上传）
-        jpeg_path, jpeg_bytes, width, height = deps.hdc.screenshot_jpeg(screens_dir, f"dc_{int(time.time())}")
+        # JPEG 快速路径（用于 LLM 上传）；分步上报阶段，定位慢在 snapshot/recv/decode
+        jpeg_path, jpeg_bytes, width, height = deps.hdc.screenshot_jpeg(
+            screens_dir,
+            f"dc_{int(time.time())}",
+            on_phase=deps.recorder.note_phase,
+        )
         changed = deps.snapshot_holder.update_jpeg(jpeg_path, jpeg_bytes, width, height)
         # PNG 存档（用于产物）
+        deps.recorder.note_phase("archive_png")
         snapshot = deps.device.screenshot(screens_dir, deps.session_id, f"dc_{int(time.time())}")
         deps.snapshot_holder.latest = snapshot
         # 发射截图事件（snapshot_path 为会话相对 POSIX 路径，供前端拼 artifact URL）
@@ -343,8 +533,10 @@ async def tool_dump_ui_hierarchy(ctx: RunContext[DcToolContext]) -> str:
     deps = ctx.deps
 
     def _dump() -> str:
+        deps.recorder.note_phase("ui_hierarchy")
         hierarchy = deps.device.collect_ui_hierarchy()
         # 落盘完整 JSON
+        deps.recorder.note_phase("persist_layout")
         layout_dir = deps.artifacts.run_dir(deps.session_id) / "layouts"
         layout_dir.mkdir(parents=True, exist_ok=True)
         layout_path = layout_dir / f"dc_{int(time.time())}.json"
