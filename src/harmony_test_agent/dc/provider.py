@@ -6,13 +6,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+import uuid
+from datetime import timedelta
 from typing import Any
 
 from pydantic_ai import Agent, BinaryContent, UsageLimits
 
 from ..agents.providers import MockAgentProvider, OpenAICompatibleProvider
 from ..config import Settings
-from .models import DcChatRequest, DcChatResponse
+from ..models import utc_now
+from .models import DcChatRequest, DcChatResponse, DcEventType, DcModelTimeout, DcTurnTimeout
 
 # ---------------------------------------------------------------------------
 # 系统提示词
@@ -46,6 +51,7 @@ DC_SYSTEM_PROMPT = """\
 """
 
 DC_TURN_TEMPLATE = """\
+{continuation}
 当前 UI 控件树摘要：
 {ui_tree}
 
@@ -79,6 +85,12 @@ class DcChatProvider(OpenAICompatibleProvider):
         **终态回答的文本不发 ``AGENT_TEXT``**（避免与 ``ASSISTANT_MESSAGE`` 重复），
         详见 ``_emit_message_parts``。
 
+        Phase 2 关键变化：**每一次迭代推进都包在剩余 deadline 内**，并发出
+        ``model_call_started`` / ``model_call_progress`` / ``model_call_finished``
+        / ``model_call_failed``。没有 token streaming 也不再等于「没有任何进度」：
+        等待期间按 ``progress_interval`` 发心跳，超时后抛出 ``DcModelTimeout``
+        或 ``DcTurnTimeout``，绝不无限等待。
+
         pydantic-ai 的历史管理已保证 ``ThinkingPart`` 正确进出模型请求，
         这里只读不改（思考内容绝不回喂模型）。
         """
@@ -89,8 +101,9 @@ class DcChatProvider(OpenAICompatibleProvider):
             retries=1,
         )
 
-        # 构造用户 prompt：UI 树摘要 + 用户消息 + 截图
+        # 构造用户 prompt：公开连续性摘要 + UI 树摘要 + 用户消息 + 截图
         user_prompt = DC_TURN_TEMPLATE.format(
+            continuation=_render_continuation(request.continuation_prompt),
             ui_tree=request.ui_tree_digest or "(no UI tree available)",
             prompt=request.user_prompt,
         )
@@ -107,6 +120,7 @@ class DcChatProvider(OpenAICompatibleProvider):
         # retries/重放可能产生完全相同的 part，按 (kind, text) 去重
         emitted: set[tuple[str, str]] = set()
 
+        attempt = 0
         async with agent.iter(
             user_content,
             message_history=history or None,
@@ -117,7 +131,17 @@ class DcChatProvider(OpenAICompatibleProvider):
                 tool_calls_limit=50,
             ),
         ) as run:
-            async for _node in run:
+            iterator = run.__aiter__()
+            while True:
+                attempt += 1
+                timeout = _advance_timeout(request)
+                if timeout <= 0:
+                    raise DcTurnTimeout(
+                        f"DC turn budget exhausted before model call {attempt} (dc_turn_timeout reached)"
+                    )
+                node = await _advance_with_progress(iterator, request, attempt, timeout, emit)
+                if node is _EXHAUSTED:
+                    break
                 messages = run.all_messages()
                 if len(messages) <= seen:
                     continue
@@ -150,12 +174,26 @@ class MockDcChatProvider(MockAgentProvider):
         """返回固定 Mock 响应；history 原样回传以便测试累积。
 
         同时 emit 一条 THINKING + AGENT_TEXT，让无模型配置时前端也能验证
-        「思考/叙述/最终回复」三步渲染链路。
+        「思考/叙述/最终回复」三步渲染链路；并发出 model_call_started/finished，
+        使 Mock 模式也具备「当前活动区」进度事件。
         """
         from .models import DcEventType
 
         emit = request.emit
         if emit:
+            model_call_id = f"model-mock-{uuid.uuid4().hex[:6]}"
+            emit(
+                DcEventType.MODEL_CALL_STARTED.value,
+                "开始等待模型响应（Mock）",
+                {
+                    "model_call_id": model_call_id,
+                    "turn_id": request.turn_id,
+                    "attempt": 1,
+                    "phase": "waiting_model",
+                    "deadline_at": (utc_now() + timedelta(seconds=request.model_timeout)).isoformat(),
+                    "remaining_budget_ms": round(request.model_timeout * 1000),
+                },
+            )
             emit(
                 DcEventType.THINKING.value,
                 "（Mock）分析用户意图与当前屏幕…",
@@ -165,6 +203,11 @@ class MockDcChatProvider(MockAgentProvider):
                 DcEventType.AGENT_TEXT.value,
                 "（Mock）已收到消息",
                 {"step": 2, "text": "当前为 Mock 模式，配置 OPENAI_API_KEY 与 AGENT_MODEL 后启用真实执行。"},
+            )
+            emit(
+                DcEventType.MODEL_CALL_FINISHED.value,
+                "模型调用完成（Mock）",
+                {"model_call_id": model_call_id, "turn_id": request.turn_id, "attempt": 1, "duration_ms": 0},
             )
         return DcChatResponse(
             output_text=(
@@ -217,6 +260,160 @@ def _count_tool_calls_from_messages(messages: list[Any]) -> int:
                 count += 1
     # 每个工具调用产生一对 (ToolCallPart + ToolReturnPart)，除以 2
     return count // 2 if count >= 2 else count
+
+
+# ---------------------------------------------------------------------------
+# 模型调用进度与 deadline（Phase 2）
+# ---------------------------------------------------------------------------
+
+# ``agent.iter()`` 迭代结束的哨兵值
+_EXHAUSTED = object()
+
+
+def _render_continuation(text: str) -> str:
+    """把公开连续性摘要渲染成 prompt 前缀（空摘要返回空串）。"""
+    stripped = (text or "").strip()
+    return f"{stripped}\n" if stripped else ""
+
+
+def _advance_timeout(request: DcChatRequest) -> float:
+    """单次模型调用可用秒数 = min(AGENT_MODEL_TIMEOUT, 轮次剩余预算)。"""
+    remaining = float(request.model_timeout)
+    if request.turn_deadline is not None:
+        remaining = min(remaining, (request.turn_deadline - utc_now()).total_seconds())
+    return remaining
+
+
+def _emit_model_event(emit: Any, event_type: DcEventType, message: str, payload: dict[str, Any]) -> None:
+    """发射模型侧事件（emit 为空时跳过，便于单测直接调用 chat()）。"""
+    if emit:
+        emit(event_type.value, message, payload)
+
+
+async def _advance_with_progress(
+    iterator: Any,
+    request: DcChatRequest,
+    attempt: int,
+    timeout: float,
+    emit: Any,
+) -> Any:
+    """推进一次 ``agent.iter()``，全程发 started/progress，超时发 failed 并抛出。
+
+    ``__anext__()`` 内部包含真实的模型 HTTP 请求，因此把 deadline 放在这一层
+    才能约束「单次模型调用」，而不是只包住整个轮次。
+    """
+    model_call_id = f"model-{uuid.uuid4().hex[:8]}"
+    started_mono = time.monotonic()
+    deadline_at = utc_now() + timedelta(seconds=timeout)
+    base_payload: dict[str, Any] = {
+        "model_call_id": model_call_id,
+        "turn_id": request.turn_id,
+        "attempt": attempt,
+        "phase": "waiting_model",
+    }
+    _emit_model_event(
+        emit,
+        DcEventType.MODEL_CALL_STARTED,
+        f"开始等待模型响应（第 {attempt} 次）",
+        {
+            **base_payload,
+            "started_at": utc_now().isoformat(),
+            "deadline_at": deadline_at.isoformat(),
+            "remaining_budget_ms": round(timeout * 1000),
+        },
+    )
+
+    async def heartbeat() -> None:
+        interval = max(0.2, float(request.progress_interval))
+        while True:
+            await asyncio.sleep(interval)
+            elapsed = time.monotonic() - started_mono
+            _emit_model_event(
+                emit,
+                DcEventType.MODEL_CALL_PROGRESS,
+                "正在等待模型响应",
+                {
+                    **base_payload,
+                    "elapsed_ms": round(elapsed * 1000),
+                    "remaining_ms": round(max(0.0, timeout - elapsed) * 1000),
+                    "last_progress_at": utc_now().isoformat(),
+                },
+            )
+
+    task = asyncio.create_task(heartbeat(), name=f"dc-model-progress-{model_call_id}")
+    # 用 shield + 独立推进任务：deadline 由我们判定，不被 pydantic-ai 内部的
+    # CancelledError 改写影响；同时保证超时后底层推进任务被真正取消。
+    advance_task = asyncio.ensure_future(iterator.__anext__())
+    advance_task.add_done_callback(_consume_task_result)
+    try:
+        node = await asyncio.wait_for(asyncio.shield(advance_task), timeout=timeout)
+    except StopAsyncIteration:
+        return _EXHAUSTED
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        current = asyncio.current_task()
+        deadline_hit = isinstance(exc, TimeoutError) or not (current is not None and current.cancelling())
+        duration_ms = round((time.monotonic() - started_mono) * 1000)
+        if deadline_hit:
+            _emit_model_event(
+                emit,
+                DcEventType.MODEL_CALL_FAILED,
+                "模型调用超时",
+                {
+                    **base_payload,
+                    "error_code": "model_timeout",
+                    "error": f"model call exceeded {timeout:.1f}s",
+                    "duration_ms": duration_ms,
+                },
+            )
+            raise DcModelTimeout(f"model call exceeded {timeout:.1f}s") from exc
+        _emit_model_event(
+            emit,
+            DcEventType.MODEL_CALL_FAILED,
+            "模型调用已取消",
+            {
+                **base_payload,
+                "error_code": "cancelled",
+                "error": "model call cancelled",
+                "duration_ms": duration_ms,
+            },
+        )
+        raise
+    finally:
+        task.cancel()
+        if not advance_task.done():
+            advance_task.cancel()
+
+    _emit_model_event(
+        emit,
+        DcEventType.MODEL_CALL_FINISHED,
+        "模型调用完成",
+        {**base_payload, "duration_ms": round((time.monotonic() - started_mono) * 1000)},
+    )
+    # 收到节点后进入解析/校验阶段：即使 Provider 不支持 token streaming，
+    # 前端也能看到「正在校验结果」而不是直接跳到下一步。
+    _emit_model_event(
+        emit,
+        DcEventType.MODEL_CALL_PROGRESS,
+        "正在校验模型返回结果",
+        {
+            **base_payload,
+            "phase": "validating",
+            "elapsed_ms": round((time.monotonic() - started_mono) * 1000),
+            "remaining_ms": round(max(0.0, timeout - (time.monotonic() - started_mono)) * 1000),
+            "last_progress_at": utc_now().isoformat(),
+        },
+    )
+    return node
+
+
+def _consume_task_result(task: asyncio.Future[Any]) -> None:
+    """消费被放弃的推进任务异常，避免 'exception was never retrieved' 噪音。"""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError, Exception:  # noqa: BLE001 - 仅为回收异常
+        pass
 
 
 def _part_field(part: Any, name: str, default: Any = None) -> Any:
