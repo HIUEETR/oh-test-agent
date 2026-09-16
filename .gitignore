@@ -12,6 +12,7 @@ wheels/
 .coverage.*
 htmlcov/
 .zcode/
+.qoder/
 
 # Virtual environments
 .venv/
