@@ -9,6 +9,7 @@ import { useDcConsole } from "../../stores/dc-console";
 import type { DcChatMessage } from "../../api/dc-types";
 import { Markdown } from "../../components/ui/primitives";
 import { DcActivityBar } from "./DcActivityBar";
+import { DcTokenStatsBar } from "./DcTokenStatsBar";
 
 /** 一次渲染的消息上限：超出时默认只渲染最近 N 条，可手动展开更早内容。 */
 const RENDER_WINDOW = 200;
@@ -128,6 +129,9 @@ export function DcChat() {
           </button>
         )}
       </div>
+
+      {/* 输入框下方：本会话 token 用量与缓存命中率（数据来自 provider 真实响应） */}
+      <DcTokenStatsBar />
     </section>
   );
 }

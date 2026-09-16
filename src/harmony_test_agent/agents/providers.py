@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,9 @@ from ..models import (
     VisionObservation,
 )
 from ..targets import ResolvedTarget
+
+if TYPE_CHECKING:
+    from openai.types import chat
 
 
 class PlanningContext(BaseModel):
@@ -316,6 +319,75 @@ class MockAgentProvider(AgentProvider):
         )
 
 
+def usage_aware_chat_model_class() -> type[Any]:
+    """返回「能正确读取 usage」的 ``OpenAIChatModel`` 子类（惰性定义并缓存）。
+
+    pydantic-ai 体积大（模块级 import 约 4.6s），本模块刻意保持零 pydantic-ai
+    顶层依赖，因此子类在首次真正需要模型时才定义。
+
+    背景（实测，pydantic-ai 1.73.0）：自建 OpenAI 兼容端点返回的 usage 是完整的——
+
+        {"prompt_tokens": 1721, "completion_tokens": 16,
+         "prompt_tokens_details": {"cached_tokens": 1536}, ...}
+
+    但上游 ``_map_usage`` 会把它全部丢掉，原因有两个：
+    1. 它只保留顶层且 ``isinstance(v, int)`` 的字段，``prompt_tokens_details``
+       是嵌套 dict，被直接忽略 —— 于是缓存命中数永远为 0；
+    2. 真正赋值 input/output tokens 的是 ``RequestUsage.extract()``，它依赖
+       genai-prices 的 provider 快照；自建端点（如 commandcode.ai）不在快照里，
+       兜底到 openai 后一个字段都没提取到 —— 于是 token 数永远是 0。
+
+    这里只覆盖上游明确留作扩展点的 ``_map_usage``（``_process_response`` 调用它），
+    直接从响应对象取数字，不再经过 genai-prices；没有 usage 时仍委托 ``super()``。
+    """
+    global _USAGE_AWARE_MODEL_CLASS
+    if _USAGE_AWARE_MODEL_CLASS is not None:
+        return _USAGE_AWARE_MODEL_CLASS
+
+    from pydantic_ai import usage
+    from pydantic_ai.models.openai import OpenAIChatModel
+
+    class UsageAwareOpenAIChatModel(OpenAIChatModel):
+        def _map_usage(self, response: chat.ChatCompletion) -> usage.RequestUsage:
+            raw = getattr(response, "usage", None)
+            prompt_tokens = getattr(raw, "prompt_tokens", None)
+            if raw is None or prompt_tokens is None:
+                # 没有 usage（或字段缺失）时保留上游行为，避免把「无数据」伪装成 0 成本
+                return super()._map_usage(response)
+
+            details: dict[str, int] = {}
+            completion_details = getattr(raw, "completion_tokens_details", None)
+            if completion_details is not None:
+                for key, value in completion_details.model_dump(exclude_none=True).items():
+                    if isinstance(value, int):
+                        details[key] = value
+            prompt_details = getattr(raw, "prompt_tokens_details", None)
+            if prompt_details is not None:
+                for key, value in prompt_details.model_dump(exclude_none=True).items():
+                    if isinstance(value, int):
+                        details[key] = value
+            cache_creation = getattr(raw, "cache_creation_input_tokens", None)
+            if isinstance(cache_creation, int):
+                details["cache_creation_input_tokens"] = cache_creation
+
+            # prompt_tokens 已包含缓存命中部分（实测：共享前缀两次请求均为 1721，
+            # 第二次 cached_tokens=1536），因此 input_tokens 直接取 prompt_tokens，
+            # cache_read_tokens 单独记录，命中率 = cache_read / input。
+            return usage.RequestUsage(
+                input_tokens=int(prompt_tokens),
+                output_tokens=int(getattr(raw, "completion_tokens", 0) or 0),
+                cache_read_tokens=int(getattr(prompt_details, "cached_tokens", 0) or 0),
+                cache_write_tokens=int(cache_creation or 0),
+                details=details,
+            )
+
+    _USAGE_AWARE_MODEL_CLASS = UsageAwareOpenAIChatModel
+    return _USAGE_AWARE_MODEL_CLASS
+
+
+_USAGE_AWARE_MODEL_CLASS: type[Any] | None = None
+
+
 class OpenAICompatibleProvider(AgentProvider):
     """通过 OpenAI 兼容接口完成规划、视觉分析和动作决策。"""
 
@@ -333,7 +405,6 @@ class OpenAICompatibleProvider(AgentProvider):
         return {"extra_body": {"thinking": {"type": "disabled"}}}
 
     def _model(self, vision: bool = False):
-        from pydantic_ai.models.openai import OpenAIChatModel
         from pydantic_ai.providers.openai import OpenAIProvider
 
         configured_name = self.settings.agent_vision_model if vision else self.settings.agent_model
@@ -342,7 +413,7 @@ class OpenAICompatibleProvider(AgentProvider):
             base_url=self.settings.openai_base_url,
             api_key=self.settings.openai_api_key.get_secret_value(),
         )
-        return OpenAIChatModel(model_name, provider=provider)
+        return usage_aware_chat_model_class()(model_name, provider=provider)
 
     async def plan(self, task: str, context: PlanningContext, max_steps: int) -> PlanResult:
         """将用户任务规划为不超过上限的原子步骤。"""

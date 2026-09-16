@@ -37,6 +37,7 @@ from .models import (
     DcSessionView,
     DcStepKind,
     DcStepRecord,
+    DcTokenUsage,
     DcToolInvocation,
     DcToolName,
     DcToolStatus,
@@ -45,6 +46,7 @@ from .models import (
     DcTurnRecord,
     DcTurnStatus,
     DcTurnTimeout,
+    DcUsageLimitReached,
 )
 from .provider import DcChatProvider, MockDcChatProvider, create_dc_provider
 from .safety import DcShellPolicy
@@ -231,6 +233,8 @@ class DcSession:
         self.last_foreground_app: str | None = None
         # 副作用未确认的动作：新轮次必须先对账（Phase 4）
         self.pending_attention: DcToolInvocation | None = None
+        # 会话内累计 token 用量（来自 provider 真实响应；前端输入框下方展示）
+        self.token_usage = DcTokenUsage()
         self.cancel_requested = False
         self._last_checkpoint = 0.0
         self._context_version = 0
@@ -435,6 +439,8 @@ class DcSession:
         )
 
         outcome = DcTurnStatus.FAILED
+        # Provider 每轮的用量增量恰好被消费一次：成功路径立即入账，失败路径走 fallback
+        # 读取尚未被消费的增量；两条路径不会重复计数（见 _account_provider_usage）。
         try:
             # 采集当前截图和 UI 树（恢复/继续时这一步就是「先重新观测」）
             self._emit(
@@ -513,6 +519,9 @@ class DcSession:
             turn.agent_summary = response.output_text
             outcome = DcTurnStatus.COMPLETED
 
+            # 用量事件先于终态回复发出：前端在同一批次里就能刷新输入框下方的统计行
+            self._account_provider_usage(turn_id)
+
             self._emit(
                 DcEventType.ASSISTANT_MESSAGE,
                 response.output_text[:200],
@@ -528,6 +537,30 @@ class DcSession:
             outcome = DcTurnStatus.BLOCKED
             turn.error = str(exc)
             self._emit(DcEventType.ERROR, str(exc), {"turn_id": turn_id})
+
+        except DcUsageLimitReached as exc:
+            # 预算不足不是设备/模型故障：归为 blocked，并在文案里给出可调大的环境变量，
+            # 让用户能把失败原因和下一步动作对应起来（历史事故里这一层只留下英文裸异常）。
+            outcome = DcTurnStatus.BLOCKED
+            # 预算耗尽前已经发生的请求同样要计入用量，否则最需要看数字的场景反而没有数据
+            self._account_provider_usage(turn_id)
+            env_names = []
+            if exc.request_limit is not None:
+                env_names.append("DC_MODEL_REQUEST_LIMIT")
+            if exc.tool_calls_limit is not None:
+                env_names.append("DC_MODEL_TOOL_CALLS_LIMIT")
+            hint = f"，可调大 {' / '.join(env_names)} 后重试，或把任务拆成更小的步骤继续" if env_names else ""
+            turn.error = f"{exc}{hint}"
+            self._emit(
+                DcEventType.ERROR,
+                turn.error,
+                {
+                    "turn_id": turn_id,
+                    "error_code": "usage_limit",
+                    "request_limit": exc.request_limit,
+                    "tool_calls_limit": exc.tool_calls_limit,
+                },
+            )
 
         except (DcModelTimeout, DcTurnTimeout) as exc:
             outcome = DcTurnStatus.FAILED
@@ -559,6 +592,37 @@ class DcSession:
 
         self._finalize_turn(turn, outcome)
         return turn
+
+    def _account_provider_usage(self, turn_id: str) -> DcTokenUsage:
+        """把 provider 的「本轮用量增量」并入会话累计，并发用量更新事件。
+
+        增量恰好被消费一次：成功路径在拿到 response 后立即调用，失败路径
+        （预算耗尽/超时/取消）调用时该增量尚未被消费，因此不会漏记也不会重复。
+        Mock provider（无真实模型）或 provider 未上报时返回全 0，前端据此显示空态。
+
+        Returns:
+            本轮增量（已并入 ``self.token_usage``）。
+        """
+        delta = DcTokenUsage()
+        last_delta = getattr(self.provider, "last_usage_delta", None)
+        delta_turn_id = getattr(self.provider, "usage_delta_turn_id", None)
+        # 仅接受属于本轮的增量：否则「本轮在调用模型前就失败」会把上一轮的增量重复入账
+        if isinstance(last_delta, DcTokenUsage) and last_delta.has_values and delta_turn_id == turn_id:
+            delta = last_delta
+            self.token_usage = self.token_usage.plus(delta)
+        # 无增量时也发一次：让前端拿到权威累计值（幂等覆盖），避免只能靠刷新才能对账
+        self._emit(
+            DcEventType.TOKEN_USAGE_UPDATED,
+            f"本轮用量：{delta.total_tokens} tokens",
+            {
+                "turn_id": turn_id,
+                "session": self.token_usage.model_dump(mode="json"),
+                "turn": delta.model_dump(mode="json"),
+                "context_window": self.settings.dc_model_context_window,
+                "request_limit": self.settings.dc_model_request_limit,
+            },
+        )
+        return delta
 
     def _finalize_turn(self, turn: DcTurnRecord, outcome: DcTurnStatus) -> None:
         """统一收尾：invocation_ids、连续性摘要、终态事件、落盘。
@@ -829,6 +893,7 @@ class DcSession:
             restored_context=self._restored_context,
             active_turn_id=self.active_turn_id,
             continuation=self.continuation,
+            token_usage=self.token_usage,
         )
 
     # ------------------------------------------------------------------
@@ -852,6 +917,7 @@ class DcSession:
             history=history,
             history_kind="model_messages" if history else "none",
             continuation=self._synced_continuation(),
+            token_usage=self.token_usage,
         )
 
     def _synced_continuation(self) -> DcContinuationContext | None:
@@ -893,6 +959,7 @@ class DcSession:
         self.recorder.invocations = list(snapshot.invocations)
         self.script = snapshot.script
         self.continuation = snapshot.continuation
+        self.token_usage = snapshot.token_usage or DcTokenUsage()
         self._context_version = snapshot.continuation.context_version if snapshot.continuation else 0
         self.history = self._restore_history(snapshot)
         self._restored = True

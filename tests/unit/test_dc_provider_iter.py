@@ -25,8 +25,15 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from harmony_test_agent.config import Settings
-from harmony_test_agent.dc.models import DcChatRequest, DcEventType, DcModelTimeout, DcTurnTimeout
-from harmony_test_agent.dc.provider import DcChatProvider, MockDcChatProvider
+from harmony_test_agent.dc.models import (
+    DcChatRequest,
+    DcEventType,
+    DcModelTimeout,
+    DcTokenUsage,
+    DcTurnTimeout,
+    DcUsageLimitReached,
+)
+from harmony_test_agent.dc.provider import DcChatProvider, MockDcChatProvider, _usage_limits
 from harmony_test_agent.models import utc_now
 
 # ---------------------------------------------------------------------------
@@ -34,19 +41,20 @@ from harmony_test_agent.models import utc_now
 # ---------------------------------------------------------------------------
 
 
-def make_settings() -> Settings:
-    return Settings(
-        _env_file=None,
-        openai_api_key="test-key",
-        agent_model="test-model",
-        agent_vision_model="test-vision-model",
-        agent_provider="openai",
-    )
+def make_settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {
+        "openai_api_key": "test-key",
+        "agent_model": "test-model",
+        "agent_vision_model": "test-vision-model",
+        "agent_provider": "openai",
+    }
+    values.update(overrides)
+    return Settings(_env_file=None, **values)
 
 
-def make_provider(model: Any) -> DcChatProvider:
+def make_provider(model: Any, **settings_overrides: Any) -> DcChatProvider:
     """构造 DcChatProvider 并把 ``_model`` 替换为测试模型。"""
-    provider = DcChatProvider(make_settings())
+    provider = DcChatProvider(make_settings(**settings_overrides))
     provider._model = lambda vision=False: model  # type: ignore[method-assign]
     return provider
 
@@ -338,3 +346,159 @@ class TestModelCallProgress:
         await provider.chat(request)
 
         assert any("上一轮公开连续性摘要" in text and "打开日历" in text for text in seen)
+
+
+class TestUsageLimits:
+    """预算上限必须可配置，且耗尽时要变成可读的 DC 领域异常。
+
+    回归背景：``request_limit`` 曾被硬编码为 30（DC 每轮一个工具 ⇒ 30 次请求 ≈ 30 次
+    工具往返），一次真实日历任务在第 31 次模型请求前抛 ``UsageLimitExceeded``，
+    并把英文裸异常直接写进 ``turn.error``。
+    """
+
+    def test_limits_come_from_settings(self) -> None:
+        settings = make_settings()
+
+        limits = _usage_limits(settings)
+
+        assert limits.request_limit == settings.dc_model_request_limit
+        assert limits.tool_calls_limit == settings.dc_model_tool_calls_limit
+
+    def test_default_request_limit_is_relaxed(self) -> None:
+        """默认值必须明显高于历史事故的 30，否则多步任务仍会被提前打断。"""
+        limits = _usage_limits(make_settings())
+
+        assert limits.request_limit is not None and limits.request_limit > 30
+
+    def test_limits_follow_overrides(self) -> None:
+        limits = _usage_limits(make_settings(dc_model_request_limit=7, dc_model_tool_calls_limit=9))
+
+        assert limits.request_limit == 7
+        assert limits.tool_calls_limit == 9
+
+    async def test_exhausted_request_limit_raises_domain_error(self) -> None:
+        """模型持续请求工具时，达到上限必须转为 ``DcUsageLimitReached`` 并发失败事件。"""
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[
+                    TextPart(content="继续探测"),
+                    ToolCallPart(tool_name="ping", args={}),
+                ]
+            )
+
+        provider = make_provider(
+            FunctionModel(model_fn),
+            dc_model_request_limit=3,
+            dc_model_tool_calls_limit=2,
+        )
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        request = DcChatRequest(user_prompt="探测", tools=ping_registry(), emit=collect(events))
+
+        with pytest.raises(DcUsageLimitReached) as excinfo:
+            await provider.chat(request)
+
+        error = excinfo.value
+        assert error.request_limit == 3
+        assert error.tool_calls_limit == 2
+        assert "request_limit=3" in str(error)
+
+        failed = [event for event in events if event[0] == DcEventType.MODEL_CALL_FAILED.value]
+        assert failed, "预算耗尽必须发出 model_call_failed，否则前端看不到失败"
+        assert failed[0][2]["error_code"] == "usage_limit"
+        assert failed[0][2]["request_limit"] == 3
+        assert failed[0][2]["tool_calls_limit"] == 2
+
+    async def test_tool_calls_limit_is_enforced_too(self) -> None:
+        """工具调用上限独立生效（模型一次回复内发多个工具调用时可能先命中）。"""
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(tool_name="ping", args={}),
+                    ToolCallPart(tool_name="ping", args={}),
+                ]
+            )
+
+        provider = make_provider(
+            FunctionModel(model_fn),
+            dc_model_request_limit=10,
+            dc_model_tool_calls_limit=2,
+        )
+        request = DcChatRequest(user_prompt="探测", tools=ping_registry())
+
+        with pytest.raises(DcUsageLimitReached) as excinfo:
+            await provider.chat(request)
+
+        assert excinfo.value.tool_calls_limit == 2
+        # 文案必须说明真正命中的是哪一个上限，而不是笼统地说「请求超限」
+        assert "tool_calls_limit of 2" in str(excinfo.value)
+
+
+class TestTokenUsageCapture:
+    """Token 用量：必须从 provider 真实响应的 RunUsage 取到，并计算本轮增量。"""
+
+    def test_from_run_usage_maps_fields(self) -> None:
+        class FakeRunUsage:
+            requests = 3
+            tool_calls = 2
+            input_tokens = 1721
+            output_tokens = 16
+            cache_read_tokens = 1536
+            cache_write_tokens = 5
+            details = {"reasoning_tokens": 16}
+
+        usage = DcTokenUsage.from_run_usage(FakeRunUsage())
+
+        assert usage.requests == 3
+        assert usage.tool_calls == 2
+        assert usage.input_tokens == 1721
+        assert usage.output_tokens == 16
+        assert usage.cache_read_tokens == 1536
+        assert usage.cache_write_tokens == 5
+        assert usage.details == {"reasoning_tokens": 16}
+        assert usage.total_tokens == 1737
+
+    def test_cache_hit_rate_uses_input_as_denominator(self) -> None:
+        """分母是 input_tokens（含缓存命中）；无输入 token 时返回 None 而非除零。"""
+        assert DcTokenUsage(input_tokens=1721, cache_read_tokens=1536).cache_hit_rate == pytest.approx(0.8925, abs=1e-4)
+        assert DcTokenUsage(input_tokens=0, cache_read_tokens=100).cache_hit_rate is None
+        assert DcTokenUsage().has_values is False
+
+    def test_delta_is_cumulative_difference(self) -> None:
+        """run 的累计值跨轮递增，本轮消耗 = 相邻两次累计之差。"""
+        first = DcTokenUsage(requests=1, input_tokens=100, output_tokens=10, cache_read_tokens=0)
+        second = DcTokenUsage(requests=3, input_tokens=250, output_tokens=25, cache_read_tokens=40)
+
+        delta = second.minus(first)
+
+        assert delta.requests == 2
+        assert delta.input_tokens == 150
+        assert delta.output_tokens == 15
+        assert delta.cache_read_tokens == 40
+
+        # 计数不会回退：负值截断为 0
+        assert first.minus(second).input_tokens == 0
+
+    async def test_chat_reports_usage_and_delta(self) -> None:
+        """chat() 必须回传本次累计用量与本轮增量，并给增量打上轮次标记。"""
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[TextPart(content="完成")])
+
+        provider = make_provider(FunctionModel(model_fn))
+        response = await provider.chat(DcChatRequest(user_prompt="hi", turn_id="turn-1"))
+
+        assert response.usage_delta.tool_calls == 0
+        assert response.usage.has_values is True
+        assert provider.usage_delta_turn_id == "turn-1"
+        assert provider.last_usage_delta == response.usage_delta
+
+    async def test_mock_provider_reports_no_usage(self) -> None:
+        """Mock 不调用真实模型：返回空用量，前端据此显示空态而不是 0%。"""
+        provider = MockDcChatProvider()
+
+        response = await provider.chat(DcChatRequest(user_prompt="hi"))
+
+        assert response.usage.has_values is False
+        assert response.usage_delta.has_values is False

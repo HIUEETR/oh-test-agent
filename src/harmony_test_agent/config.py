@@ -52,10 +52,23 @@ class Settings(BaseSettings):
     dc_max_sessions: int = Field(default=8, ge=1, le=64)
     dc_idle_ttl_seconds: int = Field(default=1800, ge=60, le=86400)
     dc_history_turns: int = Field(default=12, ge=2, le=50)
-    dc_max_turn_steps: int = Field(default=30, ge=1, le=100)
     dc_event_buffer_size: int = Field(default=500, ge=50, le=5000)
     dc_default_tier: int = Field(default=2, ge=1, le=5)
-    dc_ui_tree_top_k: int = Field(default=60, ge=10, le=200)
+    # 注入 prompt 的 UI 树摘要元素上限。默认值必须高到足以覆盖「底部弹窗/表单」类页面：
+    # 105 个元素的页面里导航栏+侧边栏+背景月历就占了前 ~52 个，取 60 会把表单字段全部截断，
+    # 模型因此只能盲点坐标、反复截图（见 docs/analysis/DC_RUN_20260915_FIX_PLAN.md 的
+    # 「dc-20260916T160556Z-d23f9684 归因」一节）。
+    dc_ui_tree_top_k: int = Field(default=200, ge=10, le=500)
+    # 单轮模型请求上限（pydantic-ai 按「模型 HTTP 请求次数」计数，DC 每轮一个工具 ⇒ 约等于工具往返数）。
+    # 与 dc_turn_timeout 的关系：按实测 ~14s/请求，120 次远大于 600s 轮次预算，默认先撞轮次墙钟
+    # （错误码 turn_timeout，语义清晰），请求上限只作为防跑飞兜底。模型更慢时应同步调大
+    # AGENT_MODEL_TIMEOUT / DC_TURN_TIMEOUT。
+    dc_model_request_limit: int = Field(default=120, ge=1, le=1000)
+    # 单轮工具调用上限；正常路径下模型每轮只调一个工具，故应 >= dc_model_request_limit。
+    dc_model_tool_calls_limit: int = Field(default=200, ge=1, le=2000)
+    # 展示用上下文窗口大小（仅用于把「单次请求 input_tokens」换算成占用百分比）。
+    # 不参与任何限额判断：填错只会让百分比不准，不会影响预算与超时。
+    dc_model_context_window: int = Field(default=128000, ge=1024, le=4000000)
     dc_screenshot_cache_frames: int = Field(default=3, ge=1, le=10)
     # 轮次总预算：必须 >= 单次模型超时，超时后轮次进入 failed/needs_attention
     dc_turn_timeout: float = Field(default=600, gt=0, le=3600)
