@@ -1,4 +1,14 @@
-"""Bounded, auditable exploration of a resolved HarmonyOS application."""
+"""Bounded, auditable exploration of a resolved HarmonyOS application.
+
+INTERNAL CAPABILITY (2026-09-17 重构后): 不再通过 CLI/API/Web 直接暴露。
+
+消费方：
+- agents/orchestrator.py（资产流水线状态机内部调用）
+- dc/distill.py::DcProfileDistiller（DC 会话蒸馏 Profile 时复用结构身份重建核心流）
+- dc/tools.py（复用 ``_structural_identity``/``_page`` 等静态能力）
+
+禁止从 cli.py 或 web/ 反向依赖本模块。
+"""
 
 from __future__ import annotations
 
@@ -23,6 +33,18 @@ from .advisor import AdvisorTurnRecord
 
 if TYPE_CHECKING:
     from .advisor import AdvisorVerdict, ExplorationAdvisor
+
+# 显式导出：只有这些符号是 orchestration / dc 蒸馏依赖的公开能力，
+# 其余模块级辅助函数与私有方法视为实现细节（2026-09-17 重构 §8.7）。
+__all__ = [
+    "ActionRisk",
+    "ActionRiskClassifier",
+    "BoundedExplorer",
+    "DiscoveryPage",
+    "DiscoveryResult",
+    "DiscoveryTransition",
+    "ExplorationAction",
+]
 
 
 class ActionRisk(StrEnum):

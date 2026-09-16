@@ -49,6 +49,7 @@
 - 不预先绑定任何第三方应用；先通过目标应用准入门禁选定一个可安装、可重置、可离线验证的 OpenHarmony 应用。
 - 实现偏差（2026-09-12）：面向信息流类应用的探索治理改造后，Profile 准入的交互类型门槛由固定 3 类改为可配置 `min_interaction_kinds`（默认 2、上限 3），其余 5.3 准入条件不变；同时支持无 verified Profile 的实时模式执行（不产出正式回归脚本），`bootstrap_only` 的 Profile 生成流程保持原验收语义。
 - 实现偏差（2026-09-13）：真实设备验收暴露并修复三类问题——① 启动时 verified Profile 快速复验的页面映射改用结构身份（与验证定位器同哈希空间），复验失败不再自动销毁 Profile，仅记录证据并转入完整探索重新验证；② 任务描述安全门只拦永久禁用项与凭证词，"确认/提交/发送"等门控词仅在工具决策层面按 `allow_*` 开关拦截；③ Hypium 生成器把 swipe 方向规范化为大写枚举（Hypium 不接受小写），并新增 OPEN_APP 冷启动静默期与截图前层级稳定轮询，避免截到启动 logo 页。准入门禁本身不变。
+- 实现偏差（2026-09-17）：资产流水线重构——① RunMode 枚举收缩为 regression 单值（exploration/stability/reproduction 仅用于历史 trace 读取兼容）；② Profile 验证从 3 轮精简为 1 轮（Settings.profile_verification_rounds 可调回 3）；③ Hypium 回放门禁从 3 次内联改为 1 次内联 + 2 次异步追加（POST /api/profiles/{id}/replay）；④ CLI discover 子命令删除，bootstrap_only 字段保留供 /api/profiles/{id}/verify 端点与 DC 蒸馏路径使用；⑤ DC Mode 新增 3 个断言工具（23→26）与「蒸馏为 Profile」能力（POST /api/dc/sessions/{id}/profile/distill），脚本 replay_eligible 改为条件判定；⑥ 前端 8 Tab 合并为 5 Tab（会话/页面图/脚本与回放/Profile 资产/历史运行）。准入门禁本身不变（3 页面、3 稳定定位器、2 断言、min_interaction_kinds 类交互）。
 
 ---
 

@@ -31,9 +31,9 @@ class DcToolTier(IntEnum):
 
 
 class DcToolName(StrEnum):
-    """DC 模式可用的 23 个工具名称。"""
+    """DC 模式可用的 26 个工具名称（2026-09-17 新增 3 个断言工具）。"""
 
-    # L1 — UI 交互 (8)
+    # L1 — UI 交互 (11)
     CLICK = "click"
     SWIPE = "swipe"
     INPUT_TEXT = "input_text"
@@ -42,6 +42,10 @@ class DcToolName(StrEnum):
     WAIT = "wait"
     SCREENSHOT = "screenshot"
     INSPECT_SCREEN = "inspect_screen"
+    # 断言是只读 UI 检查、无设备副作用，因此与 click/swipe 同属 L1 基础交互层。
+    ASSERT_VISIBLE = "assert_visible"
+    ASSERT_NOT_VISIBLE = "assert_not_visible"
+    ASSERT_TEXT = "assert_text"
     # L2 — 观测诊断 (6)
     DUMP_UI_HIERARCHY = "dump_ui_hierarchy"
     COLLECT_LOGS = "collect_logs"
@@ -74,6 +78,9 @@ TIER_TOOLS: dict[DcToolTier, tuple[DcToolName, ...]] = {
         DcToolName.WAIT,
         DcToolName.SCREENSHOT,
         DcToolName.INSPECT_SCREEN,
+        DcToolName.ASSERT_VISIBLE,
+        DcToolName.ASSERT_NOT_VISIBLE,
+        DcToolName.ASSERT_TEXT,
     ),
     DcToolTier.L2: (
         DcToolName.DUMP_UI_HIERARCHY,
@@ -170,6 +177,11 @@ class DcToolInvocation(BaseModel):
     before_snapshot_id: str | None = None
     after_snapshot_id: str | None = None
     resolved_element: UIElement | None = None
+    page_path: str = ""
+    """调用发生时的逻辑页路径（由 ``DcActionRecorder.run`` 从最新帧补录）。
+
+    DC 会话蒸馏 Profile 时用它校验页面覆盖度（比赛硬性要求：≥3 个页面）。
+    """
     error: str | None = None
 
     @property
@@ -360,6 +372,9 @@ class DcEventType(StrEnum):
     AGENT_TEXT = "agent_text"  # 模型可见叙述文本（每步 TextPart，非最终总结）
     TOKEN_USAGE_UPDATED = "token_usage_updated"  # 会话 token 用量/缓存命中率更新
     SCRIPT_GENERATED = "script_generated"
+    PROFILE_DISTILL_STARTED = "profile_distill_started"
+    PROFILE_DISTILL_FINISHED = "profile_distill_finished"
+    PROFILE_DISTILL_FAILED = "profile_distill_failed"
     TIER_CHANGED = "tier_changed"
     NEEDS_ATTENTION = "needs_attention"
     ERROR = "error"
@@ -411,6 +426,26 @@ class DcScriptArtifact(BaseModel):
     generated_at: datetime = Field(default_factory=utc_now)
     included_operations: int = 0
     omitted_operations: list[dict[str, str]] = Field(default_factory=list)
+    replay_eligible: bool = False
+    """脚本是否包含显式断言且应用身份非占位值：为真时可作为验收脚本执行。
+
+    旧脚本（无此字段）反序列化后为 ``False``，前端据此降级为「诊断回放专用」。
+    """
+    explicit_assertions: int = 0
+    """成功执行的 assert_* 工具调用数（replay_eligible 的判定依据之一）。"""
+
+
+class DcDistillResult(BaseModel):
+    """DC 会话蒸馏 Profile 的结果。"""
+
+    profile_id: str
+    status: Literal["draft", "candidate", "verified"]
+    pages_covered: int
+    stable_locators: int
+    assertions: int
+    replay_run_id: str | None = None
+    replay_passed: bool | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

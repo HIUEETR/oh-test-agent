@@ -29,15 +29,22 @@ export function derivePipeline(events: RunEvent[], trace: RunTrace | null, repor
   const planned = hasEvent(events, "plan_created");
   const exploring = hasEvent(events, "discovery_started") && !hasEvent(events, "discovery_finished");
   const explored = hasEvent(events, "discovery_finished");
-  // Profile 设备验证（3 轮独立重启回放）：draft 保存后进入，脚本生成或验证结果落盘即完成。
+  // Profile 设备验证（轮次由后端 Settings.profile_verification_rounds 决定，默认 1 轮）：
+  // draft 保存后进入，脚本生成或验证结果落盘即完成。
   const verifying = hasEvent(events, "profile_verification_started") || hasEvent(events, "profile_draft_saved");
   const verified = hasEvent(events, "script_generated") || Boolean(trace?.verification_result);
   const scripted = hasEvent(events, "script_generated") || Boolean(trace?.generated);
   const replayFinished = events.filter((event) => event.type === "hypium_replay_finished").length;
+  // 回放门禁次数由后端 Settings.hypium_replay_attempts 决定（默认 1 次内联，剩余由
+  // POST /api/profiles/{id}/replay 异步追加）。前端不再假设 3 次，改用 trace 上的
+  // replay_total / 已落地的准入回放条数推导，避免 1 次门禁下「回放」阶段永不完成。
+  const expectedReplays = Math.max(1, trace?.replay_total ?? 0, trace?.profile_validation_replays?.length ?? 0);
   // 回放覆盖两类来源：任务阶段的 execution_* 与 bootstrap 准入的 hypium_replay_*（逐次推送）。
   const replaying = (hasEvent(events, "execution_started") && !hasEvent(events, "execution_finished"))
-    || (hasEvent(events, "hypium_replay_started") && !hasEvent(events, "execution_finished") && replayFinished < 3);
-  const replayed = hasEvent(events, "execution_finished") || replayFinished >= 3
+    || (hasEvent(events, "hypium_replay_started")
+      && !hasEvent(events, "execution_finished")
+      && replayFinished < expectedReplays);
+  const replayed = hasEvent(events, "execution_finished") || replayFinished >= expectedReplays
     || Boolean(trace?.replays.length) || Boolean(trace?.profile_validation_replays?.length);
   const reportDone = reportReady || (terminal && scripted);
 

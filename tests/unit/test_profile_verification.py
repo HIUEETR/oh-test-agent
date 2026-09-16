@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from harmony_test_agent.agents import AgentOrchestrator
 from harmony_test_agent.discovery import (
     BoundedExplorer,
@@ -167,27 +169,55 @@ def _discovery(device: FakeVerificationDevice) -> DiscoveryResult:
     )
 
 
-def test_profile_verifier_replays_three_pages_across_three_independent_rounds(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_profile_verifier_replays_three_pages_across_independent_rounds(tmp_path: Path, rounds: int) -> None:
+    """轮次可配置：1 轮（资产流水线精简默认）与 3 轮（历史行为）都必须能通过。"""
     device = FakeVerificationDevice(tmp_path)
     verifier = ProfileVerifier(
         device=device,  # type: ignore[arg-type]
         target=_target(),
         output_dir=tmp_path / "verification",
         run_id="verification-run",
+        rounds=rounds,
     )
 
     result = verifier.verify(_discovery(device))
 
     assert result.passed
-    assert len(result.rounds) == 3
+    assert len(result.rounds) == rounds
     assert all(item.passed for item in result.rounds)
     assert all(len(set(item.visited_page_signatures)) >= 3 for item in result.rounds)
     assert all(item.recovery_passed for item in result.rounds)
-    assert device.stop_calls == 6
-    assert device.start_calls == 6
-    assert len(device.log_paths) == 3
+    assert device.stop_calls == 2 * rounds
+    assert device.start_calls == 2 * rounds
+    assert len(device.log_paths) == rounds
     assert result.stability.promotable_locator_count >= 3
     assert result.stability.app_assertion_count >= 2
+
+
+def test_verification_single_round_passes_with_three_pages(tmp_path: Path) -> None:
+    """1 轮内访问 3 页 + 3 个稳定定位器 + 2 个断言 → passed=True。
+
+    这是 Phase 1 的核心收益：Profile 首次生成不再需要 3 次独立重启回放。
+    """
+    device = FakeVerificationDevice(tmp_path)
+    verifier = ProfileVerifier(
+        device=device,  # type: ignore[arg-type]
+        target=_target(),
+        output_dir=tmp_path / "single-round",
+        run_id="single-round",
+        rounds=1,
+    )
+
+    result = verifier.verify(_discovery(device))
+
+    assert result.passed, result.failures
+    assert len(result.rounds) == 1
+    assert verifier.analyzer.required_rounds == 1
+    assert result.stability.promotable_locator_count >= 3
+    assert result.stability.app_assertion_count >= 2
+    assert device.stop_calls == 2
+    assert device.start_calls == 2
 
 
 def test_verifier_honors_configurable_min_interaction_kinds(tmp_path: Path) -> None:
@@ -256,11 +286,14 @@ def test_verifier_honors_configurable_min_interaction_kinds(tmp_path: Path) -> N
     assert any("no replayable discovery path covers 3 pages" in item for item in strict_result.failures)
 
 
-def test_stability_analyzer_rejects_dynamic_identifier_even_when_seen_in_all_rounds(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_stability_analyzer_rejects_dynamic_identifier_even_when_seen_in_all_rounds(
+    tmp_path: Path, rounds: int
+) -> None:
     device = FakeVerificationDevice(tmp_path, dynamic_locators=True)
-    analyzer = StabilityAnalyzer()
+    analyzer = StabilityAnalyzer(required_rounds=rounds)
     observations = []
-    for round_number in range(1, 4):
+    for round_number in range(1, rounds + 1):
         observations.extend(
             analyzer.locator_observations(
                 device.snapshot_for_page(0, label=f"round-{round_number}"),
@@ -275,13 +308,15 @@ def test_stability_analyzer_rejects_dynamic_identifier_even_when_seen_in_all_rou
     assert report.rejected_locators["key:session_123456_control"] == "identifier appears dynamic"
 
 
-def test_profile_verifier_blocks_promotion_when_only_dynamic_locators_exist(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_profile_verifier_blocks_promotion_when_only_dynamic_locators_exist(tmp_path: Path, rounds: int) -> None:
     device = FakeVerificationDevice(tmp_path, dynamic_locators=True)
     verifier = ProfileVerifier(
         device=device,  # type: ignore[arg-type]
         target=_target(),
         output_dir=tmp_path / "dynamic-verification",
         run_id="dynamic-verification-run",
+        rounds=rounds,
     )
 
     result = verifier.verify(_discovery(device))
@@ -289,11 +324,12 @@ def test_profile_verifier_blocks_promotion_when_only_dynamic_locators_exist(tmp_
     assert not result.passed
     assert "fewer than 3 stable high/medium locators" in result.failures
     assert result.stability.promotable_locator_count == 0
-    assert len(result.rounds) == 3
+    assert len(result.rounds) == rounds
     assert all(len(set(item.visited_page_signatures)) >= 3 for item in result.rounds)
 
 
-def test_profile_verifier_streams_round_lifecycle_callbacks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_profile_verifier_streams_round_lifecycle_callbacks(tmp_path: Path, rounds: int) -> None:
     """每轮开始/结束即时回调：编排器据此逐轮推送事件，而不是验证全部结束后补发。"""
     device = FakeVerificationDevice(tmp_path)
     started: list[int] = []
@@ -305,14 +341,16 @@ def test_profile_verifier_streams_round_lifecycle_callbacks(tmp_path: Path) -> N
         run_id="verification-callbacks",
         on_round_started=started.append,
         on_round_finished=lambda round_result: finished.append(round_result.round_number),
+        rounds=rounds,
     )
 
     result = verifier.verify(_discovery(device))
 
+    expected = list(range(1, rounds + 1))
     assert result.passed
-    assert started == [1, 2, 3]
-    assert finished == [1, 2, 3]
-    assert [round_result.round_number for round_result in result.rounds] == [1, 2, 3]
+    assert started == expected
+    assert finished == expected
+    assert [round_result.round_number for round_result in result.rounds] == expected
 
 
 def test_core_flow_pages_share_locator_identity_space(tmp_path: Path) -> None:

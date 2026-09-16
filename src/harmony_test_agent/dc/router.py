@@ -17,16 +17,31 @@ from pydantic import BaseModel, Field
 
 from ..config import Settings
 from ..devices.base import DeviceError
+from ..profiles import ProfileTransitionError
 from ..runner import HypiumRunner
 from .models import (
+    SIDE_EFFECT_TOOLS,
+    TOOL_TIER,
     DcDeviceBusy,
+    DcDistillResult,
+    DcError,
     DcEventType,
     DcProviderUnsupported,
     DcSessionNotFound,
     DcSessionView,
+    DcToolName,
     DcToolTier,
+    tools_up_to,
 )
 from .session import DcSession, DcSessionManager
+from .tools import _TOOL_REGISTRY
+
+# 断言工具清单（replay_eligible 判定的同一集合；供 GET /api/dc/tools 投影）。
+ASSERTION_TOOL_NAMES: tuple[DcToolName, ...] = (
+    DcToolName.ASSERT_VISIBLE,
+    DcToolName.ASSERT_NOT_VISIBLE,
+    DcToolName.ASSERT_TEXT,
+)
 
 # ---------------------------------------------------------------------------
 # 请求/响应模型
@@ -67,6 +82,13 @@ class ResolveAttentionRequest(BaseModel):
 class GenerateScriptRequest(BaseModel):
     bundle_name: str = "com.example.app"
     main_ability: str = "EntryAbility"
+
+
+class DistillProfileRequest(BaseModel):
+    """DC 会话蒸馏 Profile 请求：必须提供真实应用身份（非占位值）。"""
+
+    bundle_name: str = Field(min_length=1, max_length=255)
+    main_ability: str = Field(default="EntryAbility", min_length=1, max_length=255)
 
 
 class RunScriptRequest(BaseModel):
@@ -310,6 +332,61 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
         if session.script is None:
             raise HTTPException(status_code=404, detail="script not generated yet")
         return session.script.model_dump(mode="json")
+
+    # ------------------------------------------------------------------
+    # Profile 蒸馏（2026-09-17 重构）
+    # ------------------------------------------------------------------
+
+    @router.post("/sessions/{session_id}/profile/distill", response_model=DcDistillResult)
+    async def distill_profile(session_id: str, body: DistillProfileRequest):
+        """从 DC 会话蒸馏 Profile 资产（1 轮验证 + 1 次 Hypium 回放）。
+
+        端点是同步等待的：纯 CPU 阶段 <1s，加上 1 轮设备验证与 1 次回放总计 <2 分钟。
+        进度通过 SSE 的 ``profile_distill_started`` / ``profile_distill_finished`` /
+        ``profile_distill_failed`` 事件推送。
+        """
+        try:
+            session = manager.get(session_id)
+        except DcSessionNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not session.recorder.invocations:
+            raise HTTPException(status_code=409, detail="no operations recorded yet")
+        try:
+            return await session.distill_profile(body.bundle_name, body.main_ability)
+        except DcSessionNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except DcError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ProfileTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # 工具目录（只读）
+    # ------------------------------------------------------------------
+
+    @router.get("/tools")
+    async def list_tools(tier: int | None = None):
+        """列出 ≤ tier 的 DC 工具（默认全部 26 个）；用于前端/评审核对工具面。
+
+        单一数据源是 ``dc/models.py::TIER_TOOLS`` 与 ``dc/tools.py::_TOOL_REGISTRY``，
+        本端点只做投影，不复制清单。
+        """
+        resolved = DcToolTier(tier) if tier is not None else DcToolTier.L5
+        return {
+            "tier": resolved.value,
+            "total": len(tools_up_to(resolved)),
+            "assertion_tools": sorted(tool.value for tool in ASSERTION_TOOL_NAMES),
+            "tools": [
+                {
+                    "name": name.value,
+                    "tier": TOOL_TIER[name].value,
+                    "description": _TOOL_REGISTRY[name][1],
+                    "side_effect": name in SIDE_EFFECT_TOOLS,
+                }
+                for name in tools_up_to(resolved)
+                if name in _TOOL_REGISTRY
+            ],
+        }
 
     # ------------------------------------------------------------------
     # 产物下载

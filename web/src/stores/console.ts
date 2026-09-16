@@ -1,4 +1,4 @@
-// 控制台全局状态（zustand）：
+﻿// 控制台全局状态（zustand）：
 // 表单/运行/事件/脚本/Profile/报告 全部集中在单一 store，
 // 组件通过选择器订阅所需切片；异步动作沿用旧控制台的并发锁与轮询语义。
 
@@ -39,7 +39,6 @@ interface ConsoleState {
   targetKind: TargetKind;
   targetValue: string;
   task: string;
-  mode: string;
   policy: DiscoveryPolicy;
   attemptCount: 1 | 3;
 
@@ -69,7 +68,7 @@ interface ConsoleState {
   error: string;
 
   /* 动作 */
-  patchForm: (patch: Partial<Pick<ConsoleState, "targetKind" | "targetValue" | "task" | "mode" | "policy" | "attemptCount" | "selectedCandidate">>) => void;
+  patchForm: (patch: Partial<Pick<ConsoleState, "targetKind" | "targetValue" | "task" | "policy" | "attemptCount" | "selectedCandidate">>) => void;
   setTab: (tab: TabKey) => void;
   setError: (message: string) => void;
   loadHealth: () => Promise<void>;
@@ -102,7 +101,6 @@ export const useConsole = create<ConsoleState>()((set, get) => ({
   targetKind: "app_name",
   targetValue: "",
   task: "",
-  mode: "regression",
   policy: DEFAULT_POLICY,
   attemptCount: 3,
 
@@ -190,7 +188,7 @@ export const useConsole = create<ConsoleState>()((set, get) => ({
   },
 
   startRun: async () => {
-    const { targetKind, targetValue, task, mode, policy } = get();
+    const { targetKind, targetValue, task, policy } = get();
     if (!targetValue.trim() || !locks.acquire("start")) return;
     set({ runBusy: true, error: "" });
     get().resetRunView();
@@ -200,7 +198,7 @@ export const useConsole = create<ConsoleState>()((set, get) => ({
         body: {
           target: { [targetKind]: targetValue.trim() },
           task: task.trim() || undefined,
-          mode,
+          // 运行模式已收缩为单一 regression（2026-09-17 重构）：不再提交 mode 字段。
           max_steps: 20,
           auto_generate: true,
           discovery: policy,
@@ -251,16 +249,16 @@ export const useConsole = create<ConsoleState>()((set, get) => ({
 
   /** 选中运行但立即进入实时视图（新启动的运行）。 */
   openRun: (runId) => {
-    set({ runId, tab: "live" });
-    writeDeepLink("live", runId);
+    set({ runId, tab: "session" });
+    writeDeepLink("session", runId);
   },
 
   /** 切换到历史运行：清空当前运行视图后由轮询/SSE 重新拉取。 */
   selectRun: (runId) => {
     if (runId === get().runId) return;
     get().resetRunView();
-    set({ runId, runBusy: false, tab: "live" });
-    writeDeepLink("live", runId);
+    set({ runId, runBusy: false, tab: "session" });
+    writeDeepLink("session", runId);
   },
 
   appendEvent: (event) => {
@@ -386,8 +384,8 @@ export const useConsole = create<ConsoleState>()((set, get) => ({
       });
       if (action === "verify" && result.run_id) {
         get().resetRunView();
-        set({ runId: result.run_id, runBusy: true, tab: "live" });
-        writeDeepLink("live", result.run_id);
+        set({ runId: result.run_id, runBusy: true, tab: "session" });
+        writeDeepLink("session", result.run_id);
       }
       await get().loadProfiles(true);
     } catch (cause) {

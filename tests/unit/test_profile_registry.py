@@ -23,7 +23,8 @@ TARGET_APP_ID = "com-example-notes"
 BUNDLE_NAME = "com.example.notes"
 
 
-def profile(display_name: str = "Pocket Notes") -> TargetAppProfile:
+def profile(display_name: str = "Pocket Notes", *, rounds: int = 1) -> TargetAppProfile:
+    """构造一个满足准入门禁的 Profile；``rounds`` 决定证据轮次（默认 1 轮）。"""
     return TargetAppProfile(
         target_app_id=TARGET_APP_ID,
         display_name=display_name,
@@ -35,9 +36,11 @@ def profile(display_name: str = "Pocket Notes") -> TargetAppProfile:
                 name=f"locator-{index}",
                 page_signature=f"page-{index}",
                 key=f"key-{index}",
-                observed_rounds=3,
-                unique_match_rounds=3,
-                evidence_snapshot_ids=[f"snapshot-{index}-round-{round_number}" for round_number in range(1, 4)],
+                observed_rounds=rounds,
+                unique_match_rounds=rounds,
+                evidence_snapshot_ids=[
+                    f"snapshot-{index}-round-{round_number}" for round_number in range(1, rounds + 1)
+                ],
             )
             for index in range(1, 4)
         ],
@@ -47,8 +50,10 @@ def profile(display_name: str = "Pocket Notes") -> TargetAppProfile:
                 kind="visible",
                 target=f"key-{index}",
                 page_signature=f"page-{index}",
-                observed_rounds=3,
-                evidence_snapshot_ids=[f"assertion-{index}-round-{round_number}" for round_number in range(1, 4)],
+                observed_rounds=rounds,
+                evidence_snapshot_ids=[
+                    f"assertion-{index}-round-{round_number}" for round_number in range(1, rounds + 1)
+                ],
             )
             for index in range(1, 3)
         ],
@@ -69,21 +74,33 @@ def profile(display_name: str = "Pocket Notes") -> TargetAppProfile:
     )
 
 
+def make_registry(tmp_path: Path, *, rounds: int = 1, attempts: int = 1) -> ProfileRegistry:
+    """构造门禁参数显式的 Registry，避免用例依赖进程级 Settings。"""
+    return ProfileRegistry(
+        tmp_path / "profiles",
+        promotion_replay_attempts=attempts,
+        min_evidence_rounds=rounds,
+    )
+
+
+def replay_ids_for(attempts: int = 1) -> list[str]:
+    return [f"run-profile:profile-attempt-{attempt}" for attempt in range(1, attempts + 1)]
+
+
 def promote_profile(
     registry: ProfileRegistry,
     value: TargetAppProfile,
-    replay_ids: tuple[str, str, str] = (
-        "run-profile:profile-attempt-1",
-        "run-profile:profile-attempt-2",
-        "run-profile:profile-attempt-3",
-    ),
+    replay_ids: tuple[str, ...] | None = None,
 ) -> Path:
     registry.save_candidate(value)
-    return registry.promote(value.target_app_id, replay_run_ids=replay_ids)
+    return registry.promote(
+        value.target_app_id,
+        replay_run_ids=list(replay_ids) if replay_ids is not None else replay_ids_for(),
+    )
 
 
 def test_promotion_rejects_candidates_without_admission_assets(tmp_path: Path) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     empty = TargetAppProfile(
         target_app_id=TARGET_APP_ID,
         display_name="Empty",
@@ -94,8 +111,29 @@ def test_promotion_rejects_candidates_without_admission_assets(tmp_path: Path) -
         registry.save_candidate(empty)
 
 
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_admission_evidence_rounds_are_configurable(tmp_path: Path, rounds: int) -> None:
+    """准入门禁的「轮次」维度可配置：1 轮（精简默认）与 3 轮（历史）都要能晋级。"""
+    registry = make_registry(tmp_path, rounds=rounds, attempts=1)
+    value = profile(f"Rounds {rounds}", rounds=rounds)
+
+    candidate_path = registry.save_candidate(value)
+
+    assert candidate_path.exists()
+    verified = load_compatible_profile(registry.promote(TARGET_APP_ID, replay_run_ids=replay_ids_for(1)))
+    assert verified.status == ProfileStatus.VERIFIED
+
+
+def test_admission_rejects_insufficient_evidence_rounds(tmp_path: Path) -> None:
+    """配 3 轮门禁时，只有 1 轮证据的 Profile 不得进入 candidate。"""
+    registry = make_registry(tmp_path, rounds=3, attempts=1)
+
+    with pytest.raises(ProfileTransitionError, match="3-round unique locator evidence"):
+        registry.save_candidate(profile("One Round Only", rounds=1))
+
+
 def test_registry_persists_draft_candidate_and_verified_lifecycle(tmp_path: Path) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     value = profile()
 
     draft_path = registry.save_draft(value)
@@ -106,7 +144,7 @@ def test_registry_persists_draft_candidate_and_verified_lifecycle(tmp_path: Path
     assert candidate_path == registry.candidate_dir / f"{TARGET_APP_ID}.json"
     assert registry.read(TARGET_APP_ID, ProfileStatus.CANDIDATE).status == ProfileStatus.CANDIDATE
 
-    with pytest.raises(ProfileTransitionError, match="three independent"):
+    with pytest.raises(ProfileTransitionError, match="independent Hypium replay run ID"):
         registry.promote(TARGET_APP_ID, replay_run_ids=["same-run", "same-run", "same-run"])
     assert candidate_path.exists()
     assert not (registry.root / f"{TARGET_APP_ID}.json").exists()
@@ -134,11 +172,31 @@ def test_registry_persists_draft_candidate_and_verified_lifecycle(tmp_path: Path
     assert list(registry.root.rglob("*.tmp")) == []
 
 
+@pytest.mark.parametrize("attempts", [1, 3])
+def test_promote_requires_configurable_replay_ids(tmp_path: Path, attempts: int) -> None:
+    """晋级门禁的 replay 次数由 Settings.hypium_replay_attempts 决定。
+
+    ``attempts=1``（精简默认）时 1 个 replay ID 即可晋级；``attempts=3``（历史行为）
+    时必须 3 个，少于门禁次数一律拒绝。
+    """
+    registry = make_registry(tmp_path, attempts=attempts)
+    registry.save_candidate(profile("Configurable"))
+
+    if attempts > 1:
+        with pytest.raises(ProfileTransitionError, match=f"requires {attempts} independent"):
+            registry.promote(TARGET_APP_ID, replay_run_ids=replay_ids_for(1))
+        assert registry.get_any(target_app_id=TARGET_APP_ID).status == ProfileStatus.CANDIDATE
+
+    verified = load_compatible_profile(registry.promote(TARGET_APP_ID, replay_run_ids=replay_ids_for(attempts)))
+    assert verified.status == ProfileStatus.VERIFIED
+    assert len(verified.provenance.hypium_replay_run_ids) == attempts
+
+
 def test_atomic_write_preserves_previous_profile_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     path = registry.save_draft(profile("Original Name"))
     original_bytes = path.read_bytes()
 
@@ -156,7 +214,7 @@ def test_atomic_write_preserves_previous_profile_when_replace_fails(
 
 
 def test_locked_verified_profile_rejects_automatic_replacement(tmp_path: Path) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     verified_path = promote_profile(registry, profile("Approved Name"))
 
     locked = registry.lock(TARGET_APP_ID)
@@ -181,7 +239,7 @@ def test_locked_verified_profile_rejects_automatic_replacement(tmp_path: Path) -
 
 
 def test_replacement_creates_history_and_rollback_restores_prior_version(tmp_path: Path) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     promote_profile(registry, profile("Version One"))
     promote_profile(
         registry,
@@ -218,7 +276,7 @@ def test_replacement_creates_history_and_rollback_restores_prior_version(tmp_pat
 
 
 def test_registry_listing_skips_corrupt_files_and_keeps_valid_profiles(tmp_path: Path) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     valid_path = registry.save_draft(profile("Valid Draft"))
     (registry.root / "broken.json").write_text('{"status": "verified"', encoding="utf-8")
     (registry.draft_dir / "not-an-object.json").write_text("[]", encoding="utf-8")
@@ -235,7 +293,7 @@ def test_registry_listing_skips_corrupt_files_and_keeps_valid_profiles(tmp_path:
 
 
 def test_get_any_finds_non_verified_profiles_and_rollback_rejects_traversal(tmp_path: Path) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     registry.save_draft(profile("Draft"))
 
     assert registry.get_any(target_app_id=TARGET_APP_ID).status == ProfileStatus.DRAFT
@@ -245,7 +303,7 @@ def test_get_any_finds_non_verified_profiles_and_rollback_rejects_traversal(tmp_
 
 
 def test_get_any_prefers_verified_when_lifecycle_files_coexist(tmp_path: Path) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     promote_profile(registry, profile("Verified"))
     draft = profile("New Draft").model_copy(update={"status": ProfileStatus.DRAFT})
     registry._atomic_write(registry.draft_dir / f"{TARGET_APP_ID}.json", draft)
@@ -258,7 +316,7 @@ def test_get_any_prefers_verified_when_lifecycle_files_coexist(tmp_path: Path) -
 
 
 def test_update_verified_persists_quick_verification_metadata(tmp_path: Path) -> None:
-    registry = ProfileRegistry(tmp_path / "profiles")
+    registry = make_registry(tmp_path)
     promote_profile(registry, profile())
     current = registry.read(TARGET_APP_ID)
     evidence = dict(current.provenance.evidence)
@@ -271,3 +329,87 @@ def test_update_verified_persists_quick_verification_metadata(tmp_path: Path) ->
     registry.update_verified(updated)
 
     assert registry.read(TARGET_APP_ID).provenance.evidence["quick_verification"]["passed"] is True
+
+
+# ---------------------------------------------------------------------------
+# 手动追加 Hypium 回放证据（Phase 4：比赛「3 次连续成功」要求）
+# ---------------------------------------------------------------------------
+
+
+def test_append_replay_evidence_accumulates_to_promote(tmp_path: Path) -> None:
+    """candidate 累计满门禁次数且全部通过后自动晋级为 verified。"""
+    registry = make_registry(tmp_path, attempts=3)
+    registry.save_candidate(profile("Accumulating"))
+
+    first = registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+    assert first.status == ProfileStatus.CANDIDATE
+    assert first.provenance.hypium_replay_run_ids == ["run-profile:profile-attempt-1"]
+
+    second = registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+    assert second.status == ProfileStatus.CANDIDATE
+    assert second.provenance.hypium_replay_run_ids == [
+        "run-profile:profile-attempt-1",
+        "run-profile:profile-attempt-2",
+    ]
+
+    third = registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+    assert third.status == ProfileStatus.VERIFIED
+    assert third.provenance.verified_at is not None
+    assert third.provenance.hypium_replay_run_ids == [
+        "run-profile:profile-attempt-1",
+        "run-profile:profile-attempt-2",
+        "run-profile:profile-attempt-3",
+    ]
+    assert third.provenance.evidence["consecutive_replay_passes"] == 3
+    assert registry.read(TARGET_APP_ID).status == ProfileStatus.VERIFIED
+    assert not (registry.candidate_dir / f"{TARGET_APP_ID}.json").exists()
+
+
+def test_append_replay_evidence_promotes_immediately_with_single_attempt_gate(tmp_path: Path) -> None:
+    """默认门禁（1 次）下，主流程 1 次内联回放即可晋级；随后追加只补充审计证据。"""
+    registry = make_registry(tmp_path, attempts=1)
+    registry.save_candidate(profile("Single Gate"))
+
+    verified = registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+    assert verified.status == ProfileStatus.VERIFIED
+
+    # 已 verified：只追加证据，状态与门禁资产不变（计划 §17.6 不变式）。
+    extended = registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+    assert extended.status == ProfileStatus.VERIFIED
+    assert len(extended.provenance.hypium_replay_run_ids) == 2
+
+    completed = registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+    assert len(completed.provenance.hypium_replay_run_ids) == 3
+    assert completed.provenance.evidence["consecutive_replay_passes"] == 3
+
+    with pytest.raises(ProfileTransitionError, match="already complete"):
+        registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+
+
+def test_append_replay_evidence_rejects_non_candidate_states(tmp_path: Path) -> None:
+    """draft 阶段不得追加回放证据：门禁语义要求先通过设备验证。"""
+    registry = make_registry(tmp_path)
+    registry.save_draft(profile("Draft Only"))
+
+    with pytest.raises(ProfileTransitionError, match="candidate/verified"):
+        registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+
+
+def test_append_replay_evidence_rejects_locked_verified_profile(tmp_path: Path) -> None:
+    registry = make_registry(tmp_path)
+    promote_profile(registry, profile("Locked"))
+    registry.lock(TARGET_APP_ID)
+
+    with pytest.raises(ProfileLockedError, match="locked"):
+        registry.append_replay_evidence(TARGET_APP_ID, passed=True)
+
+
+def test_append_replay_evidence_does_not_promote_after_failure(tmp_path: Path) -> None:
+    """一次回放失败即中止累计：失败证据不得推高 consecutive 计数。"""
+    registry = make_registry(tmp_path, attempts=2)
+    registry.save_candidate(profile("Failing"))
+
+    after_failure = registry.append_replay_evidence(TARGET_APP_ID, passed=False)
+
+    assert after_failure.status == ProfileStatus.CANDIDATE
+    assert after_failure.provenance.evidence["consecutive_replay_passes"] == 0

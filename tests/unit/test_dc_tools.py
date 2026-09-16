@@ -2,15 +2,42 @@
 
 from __future__ import annotations
 
-from harmony_test_agent.dc.models import TIER_TOOLS, TOOL_TIER, DcToolName, DcToolTier, tools_up_to
-from harmony_test_agent.dc.tools import _TOOL_REGISTRY, build_tools
+import asyncio
+from pathlib import Path
+from typing import Any
+
+from pydantic_ai import RunContext
+from pydantic_ai.usage import RunUsage
+
+from harmony_test_agent.dc.models import (
+    SIDE_EFFECT_TOOLS,
+    TIER_TOOLS,
+    TOOL_TIER,
+    DcToolName,
+    DcToolStatus,
+    DcToolTier,
+    tools_up_to,
+)
+from harmony_test_agent.dc.tools import (
+    _TOOL_REGISTRY,
+    DcActionRecorder,
+    DcSnapshotHolder,
+    DcToolContext,
+    build_tools,
+    tool_assert_not_visible,
+    tool_assert_text,
+    tool_assert_visible,
+)
+from harmony_test_agent.models import BoundingBox, ScreenSnapshot, UIElement
+
+ASSERT_TOOLS = (DcToolName.ASSERT_VISIBLE, DcToolName.ASSERT_NOT_VISIBLE, DcToolName.ASSERT_TEXT)
 
 
 class TestTierTools:
     """TIER_TOOLS 字典是 tier→tool 映射的单一数据源。"""
 
-    def test_l1_has_8_tools(self) -> None:
-        assert len(TIER_TOOLS[DcToolTier.L1]) == 8
+    def test_l1_has_11_tools(self) -> None:
+        assert len(TIER_TOOLS[DcToolTier.L1]) == 11
 
     def test_l2_has_6_tools(self) -> None:
         assert len(TIER_TOOLS[DcToolTier.L2]) == 6
@@ -24,9 +51,9 @@ class TestTierTools:
     def test_l5_has_1_tool(self) -> None:
         assert len(TIER_TOOLS[DcToolTier.L5]) == 1
 
-    def test_total_23_tools(self) -> None:
+    def test_total_26_tools(self) -> None:
         total = sum(len(tools) for tools in TIER_TOOLS.values())
-        assert total == 23
+        assert total == 26
 
     def test_all_tool_names_unique(self) -> None:
         all_tools = [tool for tools in TIER_TOOLS.values() for tool in tools]
@@ -41,20 +68,20 @@ class TestTierTools:
 class TestToolsUpTo:
     """tools_up_to 返回 level ≤ tier 的全部工具。"""
 
-    def test_l1_returns_8(self) -> None:
-        assert len(tools_up_to(DcToolTier.L1)) == 8
+    def test_l1_returns_11(self) -> None:
+        assert len(tools_up_to(DcToolTier.L1)) == 11
 
-    def test_l2_returns_14(self) -> None:
-        assert len(tools_up_to(DcToolTier.L2)) == 14
+    def test_l2_returns_17(self) -> None:
+        assert len(tools_up_to(DcToolTier.L2)) == 17
 
-    def test_l3_returns_19(self) -> None:
-        assert len(tools_up_to(DcToolTier.L3)) == 19
+    def test_l3_returns_22(self) -> None:
+        assert len(tools_up_to(DcToolTier.L3)) == 22
 
-    def test_l4_returns_22(self) -> None:
-        assert len(tools_up_to(DcToolTier.L4)) == 22
+    def test_l4_returns_25(self) -> None:
+        assert len(tools_up_to(DcToolTier.L4)) == 25
 
-    def test_l5_returns_23(self) -> None:
-        assert len(tools_up_to(DcToolTier.L5)) == 23
+    def test_l5_returns_26(self) -> None:
+        assert len(tools_up_to(DcToolTier.L5)) == 26
 
     def test_l1_contains_click(self) -> None:
         assert DcToolName.CLICK in tools_up_to(DcToolTier.L1)
@@ -67,10 +94,10 @@ class TestToolsUpTo:
 
 
 class TestToolRegistry:
-    """_TOOL_REGISTRY 必须包含全部 23 个工具。"""
+    """_TOOL_REGISTRY 必须包含全部 26 个工具。"""
 
-    def test_registry_has_23_entries(self) -> None:
-        assert len(_TOOL_REGISTRY) == 23
+    def test_registry_has_26_entries(self) -> None:
+        assert len(_TOOL_REGISTRY) == 26
 
     def test_every_tool_name_in_registry(self) -> None:
         for tool_name in DcToolName:
@@ -85,13 +112,13 @@ class TestToolRegistry:
 class TestBuildTools:
     """build_tools 返回 pydantic-ai Tool 对象列表。"""
 
-    def test_l1_returns_8_tools(self) -> None:
+    def test_l1_returns_11_tools(self) -> None:
         tools = build_tools(DcToolTier.L1)
-        assert len(tools) == 8
+        assert len(tools) == 11
 
-    def test_l5_returns_23_tools(self) -> None:
+    def test_l5_returns_26_tools(self) -> None:
         tools = build_tools(DcToolTier.L5)
-        assert len(tools) == 23
+        assert len(tools) == 26
 
     def test_tool_names_match_tier(self) -> None:
         tools = build_tools(DcToolTier.L2)
@@ -108,3 +135,191 @@ class TestBuildTools:
         tools = build_tools(DcToolTier.L5)
         tool_names = {t.name for t in tools}
         assert "execute_shell" in tool_names
+
+
+class TestAssertionTools:
+    """Phase 3（2026-09-17）：3 个 DC 断言工具。"""
+
+    def test_assertion_tools_are_registered_at_l1(self) -> None:
+        l1 = {tool.value for tool in tools_up_to(DcToolTier.L1)}
+        assert {tool.value for tool in ASSERT_TOOLS} <= l1
+
+    def test_assertion_tools_have_no_device_side_effect(self) -> None:
+        """断言是只读 UI 检查：不得进入 SIDE_EFFECT_TOOLS（否则超时后会被判为副作用未知）。"""
+        assert not (set(ASSERT_TOOLS) & SIDE_EFFECT_TOOLS)
+
+    def test_assertion_tool_schemas_expose_target(self) -> None:
+        tools = {tool.name: tool for tool in build_tools(DcToolTier.L1)}
+        for name in ASSERT_TOOLS:
+            schema = tools[name.value].function_schema
+            assert "target" in schema.json_schema["properties"]
+
+
+def _snapshot(elements: list[UIElement], *, title: str = "", summary: str = "") -> ScreenSnapshot:
+    return ScreenSnapshot(
+        snapshot_id="snap-assert",
+        run_id="dc-test",
+        image_path=Path("snap.png"),
+        image_sha256="sha",
+        width=1080,
+        height=1920,
+        page_path="pages/Home",
+        page_title=title,
+        summary=summary,
+        elements=elements,
+    )
+
+
+def _element(key: str, content: str) -> UIElement:
+    return UIElement(
+        element_id=key,
+        key=key,
+        content=content,
+        clickable=True,
+        bbox=BoundingBox(left=0, top=0, right=100, bottom=50),
+    )
+
+
+class _FakeHdc:
+    """最小 HDC 替身：只为 tool_screenshot 提供一帧 JPEG。"""
+
+    def __init__(self) -> None:
+        self.capture_calls = 0
+
+    def screenshot_jpeg(self, screens_dir: Path, name: str, on_phase=None):  # type: ignore[no-untyped-def]
+        del on_phase
+        self.capture_calls += 1
+        screens_dir.mkdir(parents=True, exist_ok=True)
+        path = screens_dir / f"{name}.jpeg"
+        path.write_bytes(b"fake-jpeg")
+        return path, b"fake-jpeg", 1080, 1920
+
+
+class _FakeDevice:
+    """最小设备替身：screenshot 返回预先准备的帧。"""
+
+    def __init__(self, snapshot: ScreenSnapshot) -> None:
+        self.snapshot = snapshot
+
+    def screenshot(self, output_dir: Path, run_id: str, label: str = "screen") -> ScreenSnapshot:
+        del output_dir, run_id, label
+        return self.snapshot
+
+
+def _context(
+    tmp_path: Path,
+    snapshot: ScreenSnapshot | None,
+    *,
+    captured: ScreenSnapshot | None = None,
+) -> RunContext[DcToolContext]:
+    """构造只含断言工具所需依赖的 RunContext。
+
+    ``session_dir`` 必须指向临时目录：自动采集帧会在 ``session_dir/screens`` 下落盘，
+    用仓库根目录会留下测试残渣。
+    """
+    holder = DcSnapshotHolder()
+    holder.latest = snapshot
+    deps = DcToolContext(
+        session_id="dc-test",
+        device=_FakeDevice(captured or snapshot or _snapshot([])),  # type: ignore[arg-type]
+        hdc=_FakeHdc(),  # type: ignore[arg-type]
+        safety=Any,  # type: ignore[arg-type]
+        recorder=DcActionRecorder(),
+        artifacts=Any,  # type: ignore[arg-type]
+        session_dir=tmp_path,
+        snapshot_holder=holder,
+        tier=DcToolTier.L1,
+    )
+    # 断言工具只读取 deps；model/usage 是 RunContext 的形式参数，用占位值即可。
+    return RunContext(deps=deps, model=None, usage=RunUsage())  # type: ignore[arg-type]
+
+
+def test_assert_visible_success(tmp_path: Path) -> None:
+    """命中 UI 元素 → 返回断言消息，账本记为 succeeded。"""
+    ctx = _context(tmp_path, _snapshot([_element("home_search", "搜索")]))
+
+    message = asyncio.run(tool_assert_visible(ctx, "搜索"))
+
+    assert "assertion passed" in message
+    invocation = ctx.deps.recorder.invocations[-1]
+    assert invocation.tool == DcToolName.ASSERT_VISIBLE
+    assert invocation.status == DcToolStatus.SUCCEEDED
+    assert invocation.success is True
+
+
+def test_assert_visible_failure_records_failed_invocation(tmp_path: Path) -> None:
+    """目标不存在 → 工具返回失败摘要，账本记为 failed（不静默通过）。"""
+    ctx = _context(tmp_path, _snapshot([_element("home_search", "搜索")]))
+
+    message = asyncio.run(tool_assert_visible(ctx, "不存在的元素"))
+
+    invocation = ctx.deps.recorder.invocations[-1]
+    assert invocation.tool == DcToolName.ASSERT_VISIBLE
+    assert invocation.status == DcToolStatus.FAILED
+    assert invocation.success is False
+    assert "failed" in message
+
+
+def test_assert_not_visible_success(tmp_path: Path) -> None:
+    ctx = _context(tmp_path, _snapshot([_element("home_search", "搜索")]))
+
+    message = asyncio.run(tool_assert_not_visible(ctx, "加载中"))
+
+    assert "assertion passed" in message
+    assert ctx.deps.recorder.invocations[-1].success is True
+
+
+def test_assert_text_matches_explicit_element(tmp_path: Path) -> None:
+    """严格断言：元素命中即通过。"""
+    ctx = _context(tmp_path, _snapshot([_element("result_title", "OpenHarmony")]))
+
+    message = asyncio.run(tool_assert_text(ctx, "OpenHarmony"))
+
+    assert "UI element" in message
+    assert ctx.deps.recorder.invocations[-1].success is True
+
+
+def test_assert_text_ignores_page_summary_fallback(tmp_path: Path) -> None:
+    """页面摘要含目标但元素不含 → ASSERT_TEXT 仍失败（严格语义，与 Live Mode 一致）。"""
+    ctx = _context(tmp_path, _snapshot([_element("home_search", "搜索")], summary="OpenHarmony 首页"))
+
+    message = asyncio.run(tool_assert_text(ctx, "OpenHarmony"))
+
+    assert ctx.deps.recorder.invocations[-1].success is False
+    assert "failed" in message
+
+
+def test_assert_visible_falls_back_to_page_summary(tmp_path: Path) -> None:
+    """可见性断言允许页面摘要兜底（与 Live Mode 一致）。"""
+    ctx = _context(tmp_path, _snapshot([_element("home_search", "搜索")], summary="OpenHarmony 首页"))
+
+    message = asyncio.run(tool_assert_visible(ctx, "OpenHarmony"))
+
+    assert "page summary" in message
+    assert ctx.deps.recorder.invocations[-1].success is True
+
+
+def test_assertion_without_snapshot_captures_one(tmp_path: Path) -> None:
+    """无帧可判时自动采集一帧（并经 recorder 落账），而不是直接判失败。"""
+    ctx = _context(tmp_path, None, captured=_snapshot([_element("home_search", "搜索")]))
+
+    message = asyncio.run(tool_assert_visible(ctx, "搜索"))
+
+    assert ctx.deps.hdc.capture_calls == 1
+    assert ctx.deps.snapshot_holder.latest is not None
+    assert "assertion passed" in message
+    # 采集帧与断言各自落账（SCREENSHOT + ASSERT_VISIBLE）
+    assert [inv.tool for inv in ctx.deps.recorder.invocations] == [
+        DcToolName.SCREENSHOT,
+        DcToolName.ASSERT_VISIBLE,
+    ]
+    assert ctx.deps.recorder.invocations[-1].page_path == "pages/Home"
+
+
+def test_page_path_is_recorded_from_latest_snapshot(tmp_path: Path) -> None:
+    """工具调用落账时补录 page_path（DC 蒸馏的页面覆盖校验依赖它）。"""
+    ctx = _context(tmp_path, _snapshot([_element("home_search", "搜索")]))
+
+    asyncio.run(tool_assert_visible(ctx, "搜索"))
+
+    assert ctx.deps.recorder.invocations[-1].page_path == "pages/Home"

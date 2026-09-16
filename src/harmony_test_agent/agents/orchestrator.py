@@ -24,6 +24,7 @@ from ..models import (
     ConfidenceLevel,
     DeviceCompatibility,
     EventType,
+    GeneratedArtifact,
     LocatorCandidate,
     LocatorKind,
     PlannedStep,
@@ -281,7 +282,9 @@ class AgentOrchestrator:
                 request.auto_execute = False
             if request.auto_generate:
                 trace.state = RunState.SCRIPT_GENERATING
-                trace.generated = HypiumGenerator(self.artifacts).generate(trace)
+                trace.generated = HypiumGenerator(
+                    self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds
+                ).generate(trace)
                 emitter.emit(
                     EventType.SCRIPT_GENERATED,
                     "Hypium Python 和 JSON 已生成",
@@ -293,13 +296,15 @@ class AgentOrchestrator:
                 trace.state = RunState.SCRIPT_EXECUTING
                 emitter.emit(EventType.EXECUTION_STARTED, "开始执行生成的 Hypium 用例")
                 runner = HypiumRunner(self.settings.resolved_runtime_home)
-                trace.replays = await self._run_replays(runner, trace.generated, trace.run_id, 3, emitter)
+                trace.replays = await self._run_replays(
+                    runner, trace.generated, trace.run_id, self.settings.hypium_replay_attempts, emitter
+                )
                 self._update_replay_summary(trace)
                 if not all(item.passed for item in trace.replays):
                     raise ToolExecutionError("one or more Hypium replay attempts failed", RunState.FAILED_SCRIPT)
                 emitter.emit(
                     EventType.EXECUTION_FINISHED,
-                    "Hypium 用例连续执行三次成功",
+                    f"Hypium 用例连续执行 {self.settings.hypium_replay_attempts} 次成功",
                     {"replays": [item.model_dump(mode="json") for item in trace.replays]},
                 )
 
@@ -344,6 +349,8 @@ class AgentOrchestrator:
         registry = ProfileRegistry(
             self.settings.resolved_profiles_dir,
             min_interaction_kinds=request.exploration_policy.min_interaction_kinds,
+            promotion_replay_attempts=self.settings.hypium_replay_attempts,
+            min_evidence_rounds=self.settings.profile_verification_rounds,
         )
         explicit_override = bool(self.settings.target_profile_path and "TARGET_PROFILE_PATH" in os.environ)
         if explicit_override:
@@ -607,7 +614,11 @@ class AgentOrchestrator:
         self.artifacts.write_json(run_dir / "discovery" / "draft-profile.json", draft)
         emitter.emit(EventType.PROFILE_DRAFT_SAVED, "已保存 draft Profile", {"path": str(draft_path)})
         trace.state = RunState.PROFILE_VERIFYING
-        emitter.emit(EventType.PROFILE_VERIFICATION_STARTED, "开始 Profile 设备验证（3 轮独立重启回放）", {})
+        emitter.emit(
+            EventType.PROFILE_VERIFICATION_STARTED,
+            f"开始 Profile 设备验证（{self.settings.profile_verification_rounds} 轮重启回放）",
+            {"rounds": self.settings.profile_verification_rounds},
+        )
         verification = await asyncio.to_thread(
             ProfileVerifier(
                 device,
@@ -616,6 +627,7 @@ class AgentOrchestrator:
                 trace.run_id,
                 should_stop=lambda: self._should_stop(trace.run_id),
                 min_interaction_kinds=request.exploration_policy.min_interaction_kinds,
+                rounds=self.settings.profile_verification_rounds,
                 # 每轮开始/结束即时推送：验证全程约数分钟，攒批发送会让实时视图长时间无反馈。
                 on_round_started=lambda number: emitter.emit(
                     EventType.PROFILE_VERIFICATION_ROUND_STARTED,
@@ -659,9 +671,15 @@ class AgentOrchestrator:
         registry.save_candidate(candidate)
         trace.profile_snapshot = candidate.model_copy(deep=True)
         validation_trace = self._profile_validation_trace(trace, candidate, discovery, verification)
-        validation_generator = HypiumGenerator(self.artifacts)
+        validation_generator = HypiumGenerator(
+            self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds
+        )
         trace.state = RunState.SCRIPT_GENERATING
         trace.profile_validation_generated = await asyncio.to_thread(validation_generator.generate, validation_trace)
+        # 记录门禁脚本路径：POST /api/profiles/{id}/replay 需要复用它异步追加回放证据。
+        candidate = self._attach_generated_script(candidate, trace.profile_validation_generated)
+        registry.save_candidate(candidate)
+        trace.profile_snapshot = candidate.model_copy(deep=True)
         emitter.emit(
             EventType.SCRIPT_GENERATED,
             "已从 Profile 验证证据生成 Hypium Driver 用例",
@@ -672,8 +690,13 @@ class AgentOrchestrator:
         trace.state = RunState.SCRIPT_EXECUTING
         runner = HypiumRunner(self.settings.resolved_runtime_home)
         trace.profile_validation_replays = await self._run_replays(
-            runner, trace.profile_validation_generated, trace.run_id, 3, emitter
+            runner, trace.profile_validation_generated, trace.run_id, self.settings.hypium_replay_attempts, emitter
         )
+        # 让前端流水线的「回放」阶段知道本门禁计划跑几次（默认 1 次，可配 3）；
+        # 不再依赖前端硬编码 3。RunTrace validator 只在 trace.replays 非空时重算这些字段。
+        trace.replay_total = self.settings.hypium_replay_attempts
+        trace.replay_completed = len(trace.profile_validation_replays)
+        trace.replay_passed = sum(item.passed for item in trace.profile_validation_replays)
         if not all(item.passed for item in trace.profile_validation_replays):
             raise ToolExecutionError("Profile Hypium replay gate failed", RunState.FAILED_SCRIPT)
         trace.state = RunState.PROFILE_PROMOTING
@@ -690,6 +713,20 @@ class AgentOrchestrator:
             EventType.PROFILE_PROMOTED, "Profile 已自动晋级为 verified", {"target_app_id": promoted.target_app_id}
         )
         return promoted
+
+    @staticmethod
+    def _attach_generated_script(profile: TargetAppProfile, generated: GeneratedArtifact | None) -> TargetAppProfile:
+        """把门禁 Hypium 脚本路径写入 provenance。
+
+        ``POST /api/profiles/{id}/replay`` 依赖该路径异步追加剩余回放证据；
+        缺少它时端点会以 409 拒绝，而不是猜测脚本位置。
+        """
+        if generated is None or not getattr(generated, "python_path", None):
+            return profile
+        provenance = profile.provenance.model_copy(
+            update={"generated_script_path": str(generated.python_path)}, deep=True
+        )
+        return profile.model_copy(update={"provenance": provenance}, deep=True)
 
     @staticmethod
     def _profile_validation_trace(trace, profile, discovery, verification) -> RunTrace:

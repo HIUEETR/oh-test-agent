@@ -49,3 +49,51 @@ def test_dc_context_window_default_and_bounds():
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None, dc_model_context_window=10)
+
+
+# ---------------------------------------------------------------------------
+# 资产流水线精简 Flag（2026-09-17 重构）
+# ---------------------------------------------------------------------------
+
+
+def test_profile_verification_rounds_default_is_one():
+    """默认 1 轮设备验证；3 轮旧行为只能显式开启。"""
+    assert Settings(_env_file=None).profile_verification_rounds == 1
+
+
+def test_hypium_replay_attempts_default_is_one():
+    """主流程默认只内联 1 次 Hypium 回放。"""
+    assert Settings(_env_file=None).hypium_replay_attempts == 1
+
+
+def test_enable_legacy_run_modes_default_false():
+    """历史 RunMode 默认不启用（读取历史 trace 时静默降级为 regression）。"""
+    assert Settings(_env_file=None).enable_legacy_run_modes is False
+
+
+@pytest.mark.parametrize("field", ["profile_verification_rounds", "hypium_replay_attempts"])
+@pytest.mark.parametrize("value", [0, 4])
+def test_pipeline_count_flags_are_bounded(field: str, value: int):
+    """轮次/次数限定在 1..3：不允许 0（静默关闭门禁）或 >3（超出设备验收预算）。"""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("env_name", "field"),
+    [
+        ("PROFILE_VERIFICATION_ROUNDS", "profile_verification_rounds"),
+        ("HYPIUM_REPLAY_ATTEMPTS", "hypium_replay_attempts"),
+    ],
+)
+def test_pipeline_count_flags_are_env_overridable(monkeypatch: pytest.MonkeyPatch, env_name: str, field: str):
+    """环境变量是 Phase 1 的即时回滚手段，必须生效。"""
+    monkeypatch.setenv(env_name, "3")
+
+    assert getattr(Settings(_env_file=None), field) == 3
+
+
+def test_enable_legacy_run_modes_is_env_overridable(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ENABLE_LEGACY_RUN_MODES", "true")
+
+    assert Settings(_env_file=None).enable_legacy_run_modes is True

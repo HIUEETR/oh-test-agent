@@ -7,6 +7,7 @@ import {
   closeDcSession,
   createDcSession,
   dcArtifactUrl,
+  distillDcProfile,
   generateDcScript,
   getDcSession,
   listDcSessions,
@@ -22,6 +23,7 @@ import type {
   DcCancelStatus,
   DcChatMessage,
   DcContinuationContext,
+  DcDistillResult,
   DcEffectStatus,
   DcEvent,
   DcLiveConnection,
@@ -109,6 +111,9 @@ interface DcState {
   /* 脚本 */
   script: DcScriptArtifact | null;
 
+  /* 蒸馏为 Profile 资产的结果 */
+  distillResult: DcDistillResult | null;
+
   /* 错误 */
   error: string;
 
@@ -144,6 +149,7 @@ interface DcState {
   stopTurn: () => Promise<void>;
   changeTier: (tier: DcToolTier) => Promise<void>;
   generateScript: (bundleName?: string, mainAbility?: string) => Promise<void>;
+  distillProfile: (bundleName: string, mainAbility: string) => Promise<DcDistillResult | null>;
   closeSession: () => Promise<void>;
   appendEvent: (event: DcEvent) => void;
   setConnection: (connection: DcLiveConnection) => void;
@@ -166,6 +172,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
   status: "idle",
   sending: false,
   script: null,
+  distillResult: null,
   error: "",
 
   liveInvocations: NO_LIVE_INVOCATIONS,
@@ -215,6 +222,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
         messages: [],
         session: null,
         script: null,
+        distillResult: null,
         latestScreenshotUrl: null,
         status: "idle",
         ...emptyLivePatch(),
@@ -235,6 +243,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
       messages: [],
       session: null,
       script: null,
+      distillResult: null,
       latestScreenshotUrl: null,
       status: "idle",
       error: "",
@@ -385,6 +394,21 @@ export const useDcConsole = create<DcState>()((set, get) => ({
     }
   },
 
+  // 蒸馏为 Profile 资产：纯 CPU + 1 轮设备验证 + 1 次 Hypium 回放，返回蒸馏结果。
+  // SSE 会自动推送 profile_distill_started / finished / failed，由 appendEvent 消费。
+  distillProfile: async (bundleName: string, mainAbility: string) => {
+    const { activeSessionId } = get();
+    if (!activeSessionId) return null;
+    try {
+      const result = await distillDcProfile(activeSessionId, bundleName, mainAbility);
+      set({ distillResult: result });
+      return result;
+    } catch (cause) {
+      set({ error: apiError("蒸馏 Profile 失败", cause) });
+      return null;
+    }
+  },
+
   closeSession: async () => {
     const { activeSessionId } = get();
     if (!activeSessionId) return;
@@ -397,6 +421,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
         events: [],
         messages: [],
         script: null,
+        distillResult: null,
         latestScreenshotUrl: null,
         status: "idle",
         ...emptyLivePatch(),
@@ -750,6 +775,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
       status: "idle",
       sending: false,
       script: null,
+      distillResult: null,
       error: "",
       ...emptyLivePatch(),
     }),

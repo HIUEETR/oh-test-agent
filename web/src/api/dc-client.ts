@@ -4,10 +4,12 @@
 import { apiJson, apiUrl } from "./client";
 import type {
   CreateSessionResponse,
+  DcDistillResult,
   DcScriptArtifact,
   DcSessionSummary,
   DcSessionView,
   DcToolTier,
+  ProfileReplayResponse,
   SendMessageResponse,
 } from "./dc-types";
 
@@ -75,6 +77,26 @@ export function generateDcScript(
 /** 获取已生成的脚本 */
 export function fetchDcScript(sessionId: string): Promise<DcScriptArtifact> {
   return apiJson<DcScriptArtifact>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/script`);
+}
+
+/** 从 DC 会话蒸馏 Profile 资产（1 轮设备验证 + 1 次 Hypium 回放） */
+export function distillDcProfile(
+  sessionId: string,
+  bundleName: string,
+  mainAbility: string,
+): Promise<DcDistillResult> {
+  return apiJson<DcDistillResult>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/profile/distill`, {
+    method: "POST",
+    body: { bundle_name: bundleName, main_ability: mainAbility },
+  });
+}
+
+/** 向 candidate/verified Profile 追加 Hypium 回放证据（比赛「3 次连续成功」要求） */
+export function replayProfile(profileId: string, attempts: number): Promise<ProfileReplayResponse> {
+  return apiJson<ProfileReplayResponse>(`/api/profiles/${encodeURIComponent(profileId)}/replay`, {
+    method: "POST",
+    body: { attempts },
+  });
 }
 
 /** 关闭会话 */

@@ -217,57 +217,84 @@ class ToolExecutor:
         decision: ToolDecision,
         snapshot: ScreenSnapshot | None,
     ) -> tuple[AssertionResult, LocatorCandidate | None]:
-        if snapshot is None:
-            return AssertionResult(
-                kind=decision.tool, target=decision.target or "", passed=False, message="no screenshot"
-            ), None
+        # ASSERT_TEXT 以 text 优先（期望文案），其余断言以 target 优先（语义目标）。
+        # 该优先级必须与重构前逐字一致，因此在此计算而不是下沉到公共函数。
         target = (
             (decision.text or decision.target or "")
             if decision.tool == ToolName.ASSERT_TEXT
             else (decision.target or decision.text or "")
         )
-        candidates = self._assertion_candidates(target)
-        found = None
-        matched_candidate = None
-        for candidate in candidates:
-            found = find_element(
-                snapshot.elements,
-                candidate,
-                stable_locators=self.stable_locators,
-            )
-            if found:
-                matched_candidate = candidate
-                break
-
-        page_text = " ".join(filter(None, (snapshot.page_title, snapshot.summary))).casefold()
-        summary_candidate = next(
-            (candidate for candidate in candidates if candidate.casefold() in page_text),
-            None,
-        )
-        # 页面摘要仅能证明可见性；文本断言仍要求命中实际 UI 元素。
-        visible = found is not None or summary_candidate is not None
-        if decision.tool == ToolName.ASSERT_NOT_VISIBLE:
-            passed = not visible
-        elif decision.tool == ToolName.ASSERT_TEXT:
-            passed = found is not None
-        else:
-            passed = visible or (target.casefold() in {"内容", "content"} and bool(snapshot.elements))
-
-        if passed and found:
-            message = f"assertion passed using UI element: {matched_candidate}"
-        elif passed and summary_candidate:
-            message = f"assertion passed using page summary: {summary_candidate}"
-        elif passed:
-            message = "assertion passed using visible screen content"
-        else:
-            message = f"target is not in current screen: {target.casefold()}"
-        return AssertionResult(
-            kind=decision.tool,
-            target=target,
-            passed=passed,
-            message=message,
-        ), found[1] if found else None
+        return evaluate_assertion(snapshot, decision.tool, target, self.stable_locators)
 
     @staticmethod
     def _assertion_candidates(target: str) -> list[str]:
         return target_variants(target)
+
+
+def evaluate_assertion(
+    snapshot: ScreenSnapshot | None,
+    kind: ToolName,
+    target: str,
+    stable_locators: list[StableLocator] | None = None,
+) -> tuple[AssertionResult, LocatorCandidate | None]:
+    """纯函数断言评估，供 Live Mode ``ToolExecutor._assert`` 与 DC 断言工具共用。
+
+    语义与重构前的 ``ToolExecutor._assert`` 完全一致：
+
+    - ``target_variants`` 模糊匹配（返回首个命中变体）；
+    - 页面摘要兜底仅证明「可见性」，供 ASSERT_VISIBLE / ASSERT_NOT_VISIBLE 使用；
+    - ASSERT_TEXT 是严格断言，必须命中真实 UI 元素（页面摘要不算通过）；
+    - 通用「内容/content」在仍有元素时视为通过。
+
+    Args:
+        snapshot: 目标帧；``None`` 表示尚未采集截图，直接判为失败。
+        kind: ASSERT_VISIBLE / ASSERT_NOT_VISIBLE / ASSERT_TEXT。
+        target: 已按工具语义选定优先级的断言目标。
+        stable_locators: 参与 ``find_element`` 的稳定定位器证据。
+
+    Returns:
+        ``(AssertionResult, 命中元素的 LocatorCandidate 或 None)``。
+    """
+    if snapshot is None:
+        return AssertionResult(kind=kind, target=target, passed=False, message="no screenshot"), None
+    candidates = target_variants(target)
+    found = None
+    matched_candidate = None
+    for candidate in candidates:
+        found = find_element(
+            snapshot.elements,
+            candidate,
+            stable_locators=stable_locators or [],
+        )
+        if found:
+            matched_candidate = candidate
+            break
+
+    page_text = " ".join(filter(None, (snapshot.page_title, snapshot.summary))).casefold()
+    summary_candidate = next(
+        (candidate for candidate in candidates if candidate.casefold() in page_text),
+        None,
+    )
+    # 页面摘要仅能证明可见性；文本断言仍要求命中实际 UI 元素。
+    visible = found is not None or summary_candidate is not None
+    if kind == ToolName.ASSERT_NOT_VISIBLE:
+        passed = not visible
+    elif kind == ToolName.ASSERT_TEXT:
+        passed = found is not None
+    else:
+        passed = visible or (target.casefold() in {"内容", "content"} and bool(snapshot.elements))
+
+    if passed and found:
+        message = f"assertion passed using UI element: {matched_candidate}"
+    elif passed and summary_candidate:
+        message = f"assertion passed using page summary: {summary_candidate}"
+    elif passed:
+        message = "assertion passed using visible screen content"
+    else:
+        message = f"target is not in current screen: {target.casefold()}"
+    return AssertionResult(
+        kind=kind,
+        target=target,
+        passed=passed,
+        message=message,
+    ), found[1] if found else None

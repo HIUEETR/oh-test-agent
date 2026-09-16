@@ -1,4 +1,17 @@
-"""Three-round device verification and Profile admission gates."""
+"""Device verification rounds and Profile admission gates (internal capability).
+
+INTERNAL CAPABILITY (2026-09-17 重构后): 不再通过 CLI/API/Web 直接暴露。
+
+消费方：
+- agents/orchestrator.py（资产流水线状态机内部调用）
+- api/app.py::POST /api/profiles/{id}/verify（Profile 重验证端点，bootstrap_only=True）
+- dc/distill.py::DcProfileDistiller（DC 会话蒸馏的 1 轮设备验证）
+
+禁止从 cli.py 或 web/ 反向依赖本模块。
+
+2026-09-17 重构：验证轮次从硬编码 3 轮改为 ``rounds`` 参数（默认 1），
+由 ``Settings.profile_verification_rounds`` 注入。
+"""
 
 from __future__ import annotations
 
@@ -18,6 +31,14 @@ from .stability import (
     StabilityAnalyzer,
     StabilityReport,
 )
+
+# 显式导出（2026-09-17 重构 §8.7）：orchestrator / api / dc 蒸馏消费的公开能力。
+__all__ = [
+    "AssertionProbe",
+    "ProfileVerificationResult",
+    "ProfileVerifier",
+    "VerificationRound",
+]
 
 
 class VerificationRound(BaseModel):
@@ -52,7 +73,7 @@ AssertionProbe = Callable[[ScreenSnapshot, int, str], list[AssertionObservation]
 
 
 class ProfileVerifier:
-    """Restart, launch, cross-check and collect three independent evidence rounds."""
+    """Restart, launch, cross-check and collect N independent evidence rounds."""
 
     def __init__(
         self,
@@ -65,12 +86,15 @@ class ProfileVerifier:
         min_interaction_kinds: int = 2,
         on_round_started: Callable[[int], None] | None = None,
         on_round_finished: Callable[[VerificationRound], None] | None = None,
+        rounds: int = 1,
     ) -> None:
         self.device = device
         self.target = target
         self.output_dir = output_dir
         self.run_id = run_id
-        self.analyzer = analyzer or StabilityAnalyzer()
+        self.rounds = max(int(rounds), 1)
+        # 轮次必须与分析器共享：只改生成方会让所有定位器因「轮次不足」被拒绝。
+        self.analyzer = analyzer or StabilityAnalyzer(required_rounds=self.rounds)
         self.should_stop = should_stop or (lambda: False)
         self.min_interaction_kinds = max(min_interaction_kinds, 1)
         self.on_round_started = on_round_started
@@ -102,7 +126,7 @@ class ProfileVerifier:
             if self.on_round_finished is not None:
                 self.on_round_finished(round_result)
 
-        for round_number in range(1, 4):
+        for round_number in range(1, self.rounds + 1):
             if self.on_round_started is not None:
                 self.on_round_started(round_number)
             current = VerificationRound(round_number=round_number, passed=False)
@@ -245,7 +269,7 @@ class ProfileVerifier:
         # 跨轮重复页按逻辑页身份判定：整树签名会被信息流内容抖动拆散。
         repeated_pages = (
             set.intersection(*(set(item.visited_page_identities) for item in result.rounds))
-            if len(result.rounds) == 3
+            if len(result.rounds) == self.rounds
             else set()
         )
         if len(repeated_pages) < 3:
@@ -254,7 +278,7 @@ class ProfileVerifier:
             result.failures.append("fewer than 3 stable high/medium locators")
         if result.stability.app_assertion_count < 2:
             result.failures.append("fewer than 2 stable application-level assertions")
-        if len(result.rounds) != 3 or not all(item.passed for item in result.rounds):
+        if len(result.rounds) != self.rounds or not all(item.passed for item in result.rounds):
             result.failures.append("one or more device verification rounds failed")
         result.passed = not result.failures
         self._save(result)

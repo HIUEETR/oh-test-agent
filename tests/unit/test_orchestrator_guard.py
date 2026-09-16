@@ -99,7 +99,7 @@ def _stable_frame_trace() -> RunTrace:
         target_app_id="t",
         task="",
         device_id="device-1",
-        mode="exploration",
+        mode="regression",
         model_used="m",
         model_mock=True,
         exploration_policy=ExplorationPolicy(settle_timeout_seconds=1),

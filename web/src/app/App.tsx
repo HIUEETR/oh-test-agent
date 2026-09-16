@@ -24,18 +24,16 @@ import { ProfilesPanel } from "../features/profiles/ProfilesPanel";
 import { ReportPanel } from "../features/report/ReportPanel";
 import { RunsView } from "../features/runs/RunsView";
 import { DcPanel } from "../features/dc/DcPanel";
-
-type TabKey = "live" | "graph" | "advisor" | "script" | "profiles" | "report" | "runs" | "dc";
+import type { TabKey } from "./deep-links";
 
 const TABS: Array<{ key: TabKey; label: string; icon: ReactNode }> = [
-  { key: "live", label: "实时执行", icon: <Activity size={15} /> },
+  // 2026-09-17 重构：8 Tab 收敛为 5 Tab（会话 / 页面关系图 / 脚本与回放 / Profile 资产 / 历史运行）。
+  // 会话面以 DC（唯一交互入口）为主，同时保留 Live 资产流水线降级视图（在历史运行详情中打开）。
+  { key: "session", label: "会话", icon: <Zap size={15} /> },
   { key: "graph", label: "页面关系图", icon: <GitBranch size={15} /> },
-  { key: "advisor", label: "顾问对话", icon: <BrainCircuit size={15} /> },
-  { key: "script", label: "Hypium 脚本", icon: <FileCode2 size={15} /> },
+  { key: "script", label: "脚本与回放", icon: <FileCode2 size={15} /> },
   { key: "profiles", label: "Profile 资产", icon: <ShieldCheck size={15} /> },
-  { key: "report", label: "报告", icon: <Braces size={15} /> },
   { key: "runs", label: "历史运行", icon: <History size={15} /> },
-  { key: "dc", label: "直流模式", icon: <Zap size={15} /> },
 ];
 
 export default function App() {
@@ -139,24 +137,7 @@ export default function App() {
             </div>
           )}
 
-          {tab === "live" && (
-            <div className="live-grid">
-              <div className="live-main">
-                <section className="panel">
-                  <div className="card-heading">
-                    <span>Agent 思考过程</span>
-                    {mockModel && <Badge tone="warn">Mock 模型</Badge>}
-                    <small><LiveViewToggle mode={liveMode} onChange={setLiveMode} /></small>
-                  </div>
-                  {liveMode === "thoughts" ? <ThoughtStream /> : <EventTimeline />}
-                </section>
-              </div>
-              <div className="live-side">
-                <DeviceScreen />
-                <ElementTable />
-              </div>
-            </div>
-          )}
+          {tab === "session" && <SessionTab liveMode={liveMode} onLiveModeChange={setLiveMode} mockModel={mockModel} />}
 
           {tab === "graph" && (
             <section className="panel">
@@ -164,19 +145,113 @@ export default function App() {
             </section>
           )}
 
-          {tab === "advisor" && <AdvisorPanel />}
-
-          {tab === "script" && <ScriptPanel />}
+          {tab === "script" && <ScriptTab />}
 
           {tab === "profiles" && <ProfilesPanel />}
 
-          {tab === "report" && <ReportPanel />}
-
           {tab === "runs" && <RunsView />}
-
-          {tab === "dc" && <DcPanel />}
         </section>
       </main>
+    </div>
+  );
+}
+
+/**
+ * 「会话」Tab：默认呈现 DC 模式（唯一交互入口）。
+ * Live Mode 的执行可视化（设备屏/元素表/思考流/事件时间线）作为「资产流水线降级」
+ * 子视图保留在同一 Tab 内，不再单独占用一个顶层 Tab。
+ */
+function SessionTab({
+  liveMode,
+  onLiveModeChange,
+  mockModel,
+}: {
+  liveMode: "thoughts" | "events";
+  onLiveModeChange: (mode: "thoughts" | "events") => void;
+  mockModel: boolean;
+}) {
+  const [surface, setSurface] = useState<"dc" | "live" | "advisor">("dc");
+
+  return (
+    <div className="session-tab">
+      <nav className="panel tab-nav sub-tab-nav" aria-label="会话视图切换">
+        <button
+          type="button"
+          className={clsx(surface === "dc" && "active")}
+          onClick={() => setSurface("dc")}
+          aria-current={surface === "dc" ? "page" : undefined}
+        >
+          <Zap size={15} />直流模式（推荐）
+        </button>
+        <button
+          type="button"
+          className={clsx(surface === "live" && "active")}
+          onClick={() => setSurface("live")}
+          aria-current={surface === "live" ? "page" : undefined}
+        >
+          <Activity size={15} />资产流水线降级
+        </button>
+        <button
+          type="button"
+          className={clsx(surface === "advisor" && "active")}
+          onClick={() => setSurface("advisor")}
+          aria-current={surface === "advisor" ? "page" : undefined}
+        >
+          <BrainCircuit size={15} />顾问对话
+        </button>
+      </nav>
+
+      {surface === "dc" && <DcPanel />}
+
+      {surface === "advisor" && <AdvisorPanel />}
+
+      {surface === "live" && (
+        <div className="live-grid">
+          <div className="live-main">
+            <section className="panel">
+              <div className="card-heading">
+                <span>Agent 思考过程</span>
+                {mockModel && <Badge tone="warn">Mock 模型</Badge>}
+                <small><LiveViewToggle mode={liveMode} onChange={onLiveModeChange} /></small>
+              </div>
+              {liveMode === "thoughts" ? <ThoughtStream /> : <EventTimeline />}
+            </section>
+          </div>
+          <div className="live-side">
+            <DeviceScreen />
+            <ElementTable />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 「脚本与回放」Tab：Hypium 脚本列表 + 运行报告子视图。 */
+function ScriptTab() {
+  const [surface, setSurface] = useState<"script" | "report">("script");
+
+  return (
+    <div className="script-tab">
+      <nav className="panel tab-nav sub-tab-nav" aria-label="脚本与回放视图切换">
+        <button
+          type="button"
+          className={clsx(surface === "script" && "active")}
+          onClick={() => setSurface("script")}
+          aria-current={surface === "script" ? "page" : undefined}
+        >
+          <FileCode2 size={15} />Hypium 脚本
+        </button>
+        <button
+          type="button"
+          className={clsx(surface === "report" && "active")}
+          onClick={() => setSurface("report")}
+          aria-current={surface === "report" ? "page" : undefined}
+        >
+          <Braces size={15} />运行报告
+        </button>
+      </nav>
+      {surface === "script" ? <ScriptPanel /> : <ReportPanel />}
     </div>
   );
 }

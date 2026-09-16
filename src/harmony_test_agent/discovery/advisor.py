@@ -1,5 +1,12 @@
 """LLM 视觉探索顾问：单次探索维持一段连续对话，逐页约束点击范围与次数。
 
+INTERNAL CAPABILITY (2026-09-17 重构后): 不再通过 CLI/API/Web 直接暴露。
+
+消费方：
+- agents/orchestrator.py（资产流水线探索阶段的可选顾问）
+
+禁止从 cli.py 或 web/ 反向依赖本模块。
+
 顾问只对确定性候选列表做重排/过滤，风险分类在它之后照常执行，因此模型永远
 无法放行被安全策略拦截的动作。任何一次调用失败都回退为启发式排序，探索绝不
 因顾问而中断。
@@ -14,6 +21,15 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..models import ExplorationPolicy, ScreenSnapshot
+
+# 显式导出（2026-09-17 重构 §8.7）：orchestrator 与 providers 消费的公开能力。
+__all__ = [
+    "ADVISOR_PROMPT",
+    "AdvisorTurnRecord",
+    "AdvisorTurnResult",
+    "AdvisorVerdict",
+    "ExplorationAdvisor",
+]
 
 
 class AdvisorVerdict(BaseModel):

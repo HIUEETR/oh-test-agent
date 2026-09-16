@@ -1,4 +1,4 @@
-// 启动器面板：目标解析、任务输入、运行模式、探索策略与启动/停止控制。
+// 启动器面板：目标解析、任务输入、探索策略与启动/停止控制。
 
 import { CircleStop, Play, Search, Settings2, TerminalSquare } from "lucide-react";
 import { Badge } from "../../components/ui/primitives";
@@ -6,18 +6,10 @@ import { useConsole } from "../../stores/console";
 import { DEFAULT_POLICY } from "../../stores/console";
 import type { DiscoveryPolicy } from "../../api/types";
 
-const MODES: Array<[string, string]> = [
-  ["regression", "回归测试"],
-  ["exploration", "探索诊断"],
-  ["stability", "稳定性测试"],
-  ["reproduction", "问题诊断"],
-];
-
 export function LauncherPanel() {
   const targetKind = useConsole((state) => state.targetKind);
   const targetValue = useConsole((state) => state.targetValue);
   const task = useConsole((state) => state.task);
-  const mode = useConsole((state) => state.mode);
   const policy = useConsole((state) => state.policy);
   const runBusy = useConsole((state) => state.runBusy);
   const operation = useConsole((state) => state.operation);
@@ -30,9 +22,11 @@ export function LauncherPanel() {
   const stopRun = useConsole((state) => state.stopRun);
 
   const operationBusy = operation !== "idle";
+  // 「实时模式」已按资产流水线语义改称「资产流水线降级」（2026-09-17 重构）：
+  // 内部字段 trace.live_mode 保留，仅用户可见文案变化。
   const profileStatus = discovery?.profile_status
     ?? trace?.profile_snapshot?.status
-    ?? (trace?.live_mode ? "实时模式" : trace?.profile_status_at_start ?? "未创建");
+    ?? (trace?.live_mode ? "资产流水线降级" : trace?.profile_status_at_start ?? "未创建");
 
   return (
     <section className="panel panel-pad">
@@ -66,10 +60,8 @@ export function LauncherPanel() {
 
       <div className="field-row">
         <div>
-          <label htmlFor="mode">运行模式</label>
-          <select id="mode" value={mode} onChange={(event) => patchForm({ mode: event.target.value })}>
-            {MODES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
+          <label>运行模式</label>
+          <div className="static-field"><Badge tone="brand">回归测试</Badge></div>
         </div>
         <div>
           <label>当前 Profile</label>

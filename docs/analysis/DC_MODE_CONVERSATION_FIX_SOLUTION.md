@@ -1,5 +1,7 @@
 # 直流模式（DC Mode）对话交互问题修复方案
 
+> ⚠️ 历史设计文档（2026-09-17 重构前）。当前架构见 docs/ARCHITECTURE.md §16。本文保留仅供追溯。
+
 > 交付对象：执行 Agent。本文档为**可直接实施**的技术方案，包含根因（带文件+行号）、函数级改动、代码模式、边界条件与验证清单。
 >
 > 分支：`dc-mode`。所有改动限定在 `src/harmony_test_agent/dc/` 与 `web/src/{api,stores,features/dc}/`，**不得触碰 Live Mode 代码路径**（`agents/orchestrator.py`、`runtime/*`、`generation/hypium.py`、`devices/*`、`stores/console.ts`）。

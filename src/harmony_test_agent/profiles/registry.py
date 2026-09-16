@@ -14,6 +14,9 @@ from uuid import uuid4
 from ..models import ProfileStatus, TargetAppProfile, utc_now
 from .compat import load_compatible_profile
 
+# 比赛「3 次连续成功」要求的总回放证据上限（主流程 1 次 + 异步追加 2 次）。
+MAX_REPLAY_EVIDENCE = 3
+
 
 class ProfileRegistryError(RuntimeError):
     """Base error for deterministic Profile registry operations."""
@@ -34,12 +37,31 @@ class ProfileTransitionError(ProfileRegistryError):
 class ProfileRegistry:
     """Stores lifecycle versions with schema validation, backups, and atomic replacement."""
 
-    def __init__(self, root: Path, min_interaction_kinds: int = 2):
+    def __init__(
+        self,
+        root: Path,
+        min_interaction_kinds: int = 2,
+        *,
+        promotion_replay_attempts: int | None = None,
+        min_evidence_rounds: int | None = None,
+    ):
         self.root = Path(root)
         self.draft_dir = self.root / "draft"
         self.candidate_dir = self.root / "candidate"
         self.history_dir = self.root / "history"
         self.min_interaction_kinds = max(min_interaction_kinds, 1)
+        # 2026-09-17 重构：门禁轮次/次数由 Settings 注入，缺省时读取进程配置。
+        # 不显式传参时（例如既有测试）同样跟随 Settings 默认值（1 轮 / 1 次）。
+        if promotion_replay_attempts is None or min_evidence_rounds is None:
+            from ..config import get_settings
+
+            settings = get_settings()
+            if promotion_replay_attempts is None:
+                promotion_replay_attempts = settings.hypium_replay_attempts
+            if min_evidence_rounds is None:
+                min_evidence_rounds = settings.profile_verification_rounds
+        self.promotion_replay_attempts = max(int(promotion_replay_attempts), 1)
+        self.min_evidence_rounds = max(int(min_evidence_rounds), 1)
         self._lock = threading.RLock()
         for directory in (self.root, self.draft_dir, self.candidate_dir, self.history_dir):
             directory.mkdir(parents=True, exist_ok=True)
@@ -153,7 +175,7 @@ class ProfileRegistry:
         replay_run_ids: Iterable[str] | None = None,
         verified_at: datetime | None = None,
     ) -> Path:
-        """Promote only the persisted candidate after three independent replay IDs."""
+        """Promote only the persisted candidate after the configured number of independent replay IDs."""
         with self._lock:
             target_app_id = (
                 profile_or_id.target_app_id if isinstance(profile_or_id, TargetAppProfile) else profile_or_id
@@ -171,10 +193,17 @@ class ProfileRegistry:
             self._validate_admission_assets(candidate, "promotion")
 
             replay_ids = list(replay_run_ids or candidate.provenance.hypium_replay_run_ids)
-            expected = {f"{candidate.provenance.discovery_run_id}:profile-attempt-{attempt}" for attempt in range(1, 4)}
-            if len(replay_ids) != 3 or set(replay_ids) != expected or not candidate.provenance.discovery_run_id:
+            required = self.promotion_replay_attempts
+            discovery_run_id = candidate.provenance.discovery_run_id
+            allowed = {f"{discovery_run_id}:profile-attempt-{attempt}" for attempt in range(1, MAX_REPLAY_EVIDENCE + 1)}
+            if (
+                not discovery_run_id
+                or len(replay_ids) < required
+                or len(set(replay_ids)) != len(replay_ids)
+                or not set(replay_ids) <= allowed
+            ):
                 raise ProfileTransitionError(
-                    "promotion requires three independent Hypium replay run IDs for the discovery Run"
+                    f"promotion requires {required} independent Hypium replay run ID(s) for the discovery Run"
                 )
 
             current_path = self._path_for(self.root, candidate.target_app_id)
@@ -201,6 +230,102 @@ class ProfileRegistry:
             candidate_path.unlink(missing_ok=True)
             self._path_for(self.draft_dir, candidate.target_app_id).unlink(missing_ok=True)
             return current_path
+
+    def append_replay_evidence(
+        self,
+        target_app_id: str,
+        *,
+        passed: bool,
+        run_id: str | None = None,
+        evidence_refs: Iterable[str] | None = None,
+        checked_at: datetime | None = None,
+    ) -> TargetAppProfile:
+        """向 Profile 追加一次 Hypium 回放证据（比赛「3 次连续成功」要求）。
+
+        主流程只内联 ``hypium_replay_attempts`` 次回放（默认 1 次）即完成晋级门禁，
+        剩余次数由用户/CI 通过 ``POST /api/profiles/{id}/replay`` 异步追加。
+
+        不变式（计划 §17.6）：
+        - 只接受 **candidate / verified** 的 Profile；draft/invalid/superseded 一律拒绝。
+        - 锁定的 verified Profile 拒绝追加（``ProfileLockedError``）。
+        - 已处于 verified 的 Profile 仅追加审计证据，**不改变** 状态、不修改门禁资产。
+        - candidate 累计满 ``promotion_replay_attempts`` 次且全部通过后自动晋级。
+        - 同一 ``run_id`` 不能重复追加；证据总数上限 ``MAX_REPLAY_EVIDENCE``。
+        """
+        with self._lock:
+            profile = self.get_any(target_app_id=target_app_id)
+            if profile is None:
+                raise ProfileNotFoundError(f"Profile not found: {target_app_id}")
+            if profile.status not in {ProfileStatus.CANDIDATE, ProfileStatus.VERIFIED}:
+                raise ProfileTransitionError(
+                    f"replay evidence can only be appended to candidate/verified Profiles, got {profile.status}"
+                )
+            if profile.status == ProfileStatus.VERIFIED:
+                verified_path = self._path_for(self.root, profile.target_app_id)
+                if verified_path.exists() and load_compatible_profile(verified_path).locked:
+                    raise ProfileLockedError(f"verified Profile is locked: {profile.target_app_id}")
+
+            discovery_run_id = profile.provenance.discovery_run_id or profile.target_app_id
+            existing = list(profile.provenance.hypium_replay_run_ids)
+            if len(existing) >= MAX_REPLAY_EVIDENCE:
+                raise ProfileTransitionError(
+                    f"replay evidence is already complete ({MAX_REPLAY_EVIDENCE} attempts recorded)"
+                )
+            attempt = len(existing) + 1
+            evidence_id = run_id or f"{discovery_run_id}:profile-attempt-{attempt}"
+            if evidence_id in existing:
+                raise ProfileTransitionError(f"replay evidence already recorded: {evidence_id}")
+
+            evidence = dict(profile.provenance.evidence)
+            replays = list(evidence.get("hypium_replays") or [])
+            # 回填主流程内联回放证据：晋级时只写入 hypium_replay_run_ids，审计列表需要
+            # 与之保持一致，否则 consecutive_replay_passes 会漏算主流程那一次。
+            recorded = {item.get("run_id") for item in replays}
+            for index, existing_id in enumerate(existing, 1):
+                if existing_id in recorded:
+                    continue
+                replays.append(
+                    {
+                        "attempt": index,
+                        "run_id": existing_id,
+                        "passed": True,
+                        "checked_at": (checked_at or utc_now()).isoformat(),
+                        "evidence": [],
+                        "backfilled": True,
+                    }
+                )
+            replays.append(
+                {
+                    "attempt": attempt,
+                    "run_id": evidence_id,
+                    "passed": bool(passed),
+                    "checked_at": (checked_at or utc_now()).isoformat(),
+                    "evidence": sorted(evidence_refs or []),
+                }
+            )
+            evidence["hypium_replays"] = replays
+            if all(item["passed"] for item in replays):
+                evidence["consecutive_replay_passes"] = len(replays)
+            else:
+                evidence["consecutive_replay_passes"] = 0
+            provenance = profile.provenance.model_copy(
+                update={"hypium_replay_run_ids": [*existing, evidence_id], "evidence": evidence}, deep=True
+            )
+            updated = profile.model_copy(update={"provenance": provenance}, deep=True)
+
+            if profile.status == ProfileStatus.VERIFIED:
+                # 已 verified：只落盘追加的审计证据，不动状态与门禁资产。
+                self.update_verified(updated)
+                return updated
+
+            candidate = updated.model_copy(update={"status": ProfileStatus.CANDIDATE}, deep=True)
+            self._save_lifecycle(candidate, self.candidate_dir)
+            if len(provenance.hypium_replay_run_ids) >= self.promotion_replay_attempts and all(
+                item["passed"] for item in replays
+            ):
+                self.promote(candidate.target_app_id)
+                return self.require(target_app_id=candidate.target_app_id, status=ProfileStatus.VERIFIED)
+            return candidate
 
     def update_verified(self, profile: TargetAppProfile) -> Path:
         """Persist verification metadata without changing immutable Profile content."""
@@ -395,18 +520,23 @@ class ProfileRegistry:
             raise ProfileTransitionError(f"{transition} requires three stable locators")
         if len({item.page_signature for item in locators}) < 3:
             raise ProfileTransitionError(f"{transition} requires stable locators on three pages")
+        # 仅「轮次」维度可配置（默认 1 轮）；资产丰富度门槛（3 定位器 / 3 页面 /
+        # 2 断言 / 核心流 3 页）保持不变，仍是比赛硬性要求。
+        min_rounds = self.min_evidence_rounds
         admitted_locators = [
             item
             for item in locators
-            if item.observed_rounds >= 3 and item.unique_match_rounds >= 3 and item.evidence_snapshot_ids
+            if item.observed_rounds >= min_rounds
+            and item.unique_match_rounds >= min_rounds
+            and item.evidence_snapshot_ids
         ]
         if len(admitted_locators) < 3:
-            raise ProfileTransitionError(f"{transition} requires three-round unique locator evidence")
+            raise ProfileTransitionError(f"{transition} requires {min_rounds}-round unique locator evidence")
         assertions = profile.assertion_inventory
         if len(assertions) < 2:
             raise ProfileTransitionError(f"{transition} requires two application-level assertions")
-        if any(item.observed_rounds < 3 or not item.evidence_snapshot_ids for item in assertions):
-            raise ProfileTransitionError(f"{transition} requires three-round assertion evidence")
+        if any(item.observed_rounds < min_rounds or not item.evidence_snapshot_ids for item in assertions):
+            raise ProfileTransitionError(f"{transition} requires {min_rounds}-round assertion evidence")
         if not profile.core_flows or len(profile.core_flows[0].get("pages", [])) < 3:
             raise ProfileTransitionError(f"{transition} requires a replayable three-page core flow")
         if len(set(profile.core_flows[0].get("interaction_types", []))) < self.min_interaction_kinds:

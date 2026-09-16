@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from harmony_test_agent.dc.generator import DcHypiumGenerator
-from harmony_test_agent.dc.models import DcToolInvocation, DcToolName, DcToolTier, utc_now
+from harmony_test_agent.dc.models import DcScriptArtifact, DcToolInvocation, DcToolName, DcToolTier, utc_now
+from harmony_test_agent.models import BoundingBox, UIElement
 from harmony_test_agent.storage.artifacts import ArtifactStore
 
 
@@ -14,6 +16,7 @@ def _invocation(
     args: dict | None = None,
     success: bool = True,
     invocation_id: str = "inv-001",
+    resolved_element: UIElement | None = None,
 ) -> DcToolInvocation:
     return DcToolInvocation(
         invocation_id=invocation_id,
@@ -25,7 +28,40 @@ def _invocation(
         started_at=utc_now(),
         ended_at=utc_now(),
         duration_ms=100,
+        resolved_element=resolved_element,
     )
+
+
+def _assertion(
+    tool: DcToolName,
+    target: str,
+    *,
+    key: str = "",
+    success: bool = True,
+    invocation_id: str = "inv-assert",
+) -> DcToolInvocation:
+    """构造一条断言工具调用；``key`` 非空时附带结构化元素证据。"""
+    element = (
+        UIElement(
+            element_id=key or target,
+            key=key,
+            content=target,
+            bbox=BoundingBox(left=0, top=0, right=10, bottom=10),
+        )
+        if key
+        else None
+    )
+    return _invocation(
+        tool,
+        {"target": target},
+        success=success,
+        invocation_id=invocation_id,
+        resolved_element=element,
+    )
+
+
+def _config(result: DcScriptArtifact) -> dict:
+    return json.loads(Path(result.python_path).with_suffix(".json").read_text(encoding="utf-8"))
 
 
 class TestDcHypiumGenerator:
@@ -189,3 +225,128 @@ class TestDcHypiumGenerator:
         )
         assert "pass" in result.python_text
         assert result.included_operations == 0
+
+    # ------------------------------------------------------------------
+    # Phase 3（2026-09-17）：断言渲染 + replay_eligible 条件判定
+    # ------------------------------------------------------------------
+
+    def test_dc_script_with_assertions_is_replay_eligible(self, tmp_path: Path) -> None:
+        """含显式断言 + 非占位应用身份 → replay_eligible=True 且渲染检查点。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [
+            _assertion(DcToolName.ASSERT_VISIBLE, "搜索", key="home_search_button"),
+            _invocation(DcToolName.CLICK, {"x": 100, "y": 200}, invocation_id="inv-002"),
+            _assertion(DcToolName.ASSERT_NOT_VISIBLE, "加载中", invocation_id="inv-003"),
+            _assertion(DcToolName.ASSERT_TEXT, "OpenHarmony", invocation_id="inv-004"),
+        ]
+        result = generator.generate(
+            session_id="dc-test-assertions",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+            bundle_name="com.zhihu.plus",
+            main_ability="MainAbility",
+        )
+
+        assert result.replay_eligible is True
+        assert result.explicit_assertions == 3
+        assert "driver.check_component_exist(BY.key('home_search_button'), expect_exist=True)" in result.python_text
+        assert "driver.check_component_exist(BY.text('加载中'), expect_exist=False)" in result.python_text
+
+        config = _config(result)
+        assert config["purpose"] == "acceptance"
+        assert config["replay_eligible"] is True
+        assert config["explicit_assertions"] == 3
+
+    def test_dc_script_without_assertions_is_not_replay_eligible(self, tmp_path: Path) -> None:
+        """无断言 → replay_eligible=False（即使应用身份合法），仍不注入兜底断言。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [_invocation(DcToolName.CLICK, {"x": 100, "y": 200})]
+        result = generator.generate(
+            session_id="dc-test-no-assertions",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+            bundle_name="com.zhihu.plus",
+            main_ability="MainAbility",
+        )
+
+        assert result.replay_eligible is False
+        assert result.explicit_assertions == 0
+        assert "check_component_exist" not in result.python_text
+        assert any("no explicit assert_*" in warning for warning in result.warnings)
+        assert _config(result)["purpose"] == "dc_recording"
+
+    def test_dc_script_placeholder_identity_is_not_replay_eligible(self, tmp_path: Path) -> None:
+        """占位 bundle/ability：即使有断言也不得作为验收脚本（防误用 com.example.app）。
+
+        ``EntryAbility`` 与 ``com.example.app`` 同为默认占位值，必须显式提供真实身份
+        才允许晋级为 acceptance 脚本；警告文案说明未通过的原因。
+        """
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [_assertion(DcToolName.ASSERT_VISIBLE, "搜索")]
+        result = generator.generate(
+            session_id="dc-test-placeholder",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+        )
+
+        assert result.replay_eligible is False
+        assert any("placeholder" in warning for warning in result.warnings)
+
+    def test_dc_script_rejects_default_entry_ability_placeholder(self, tmp_path: Path) -> None:
+        """仅 bundle 合法、ability 仍为 EntryAbility 时同样不视为验收脚本。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        result = generator.generate(
+            session_id="dc-test-default-ability",
+            device_id="127.0.0.1:5555",
+            invocations=[_assertion(DcToolName.ASSERT_VISIBLE, "首页")],
+            bundle_name="com.zhihu.plus",
+            main_ability="EntryAbility",
+        )
+
+        assert result.replay_eligible is False
+        assert any("placeholder" in warning for warning in result.warnings)
+
+    def test_dc_script_purpose_acceptance_vs_recording(self, tmp_path: Path) -> None:
+        """purpose 随 replay_eligible 变化：acceptance ↔ dc_recording。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        eligible = generator.generate(
+            session_id="dc-test-purpose-ok",
+            device_id="d",
+            invocations=[_assertion(DcToolName.ASSERT_VISIBLE, "首页")],
+            bundle_name="com.demo.app",
+            main_ability="MainAbility",
+        )
+        recording = generator.generate(
+            session_id="dc-test-purpose-ko",
+            device_id="d",
+            invocations=[_invocation(DcToolName.BACK, {})],
+            bundle_name="com.demo.app",
+            main_ability="MainAbility",
+        )
+
+        assert _config(eligible)["purpose"] == "acceptance"
+        assert _config(recording)["purpose"] == "dc_recording"
+
+    def test_failed_assertion_does_not_make_script_replay_eligible(self, tmp_path: Path) -> None:
+        """失败的断言不算 explicit_assertions：不能靠失败断言换取验收资格。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [
+            _assertion(DcToolName.ASSERT_VISIBLE, "不存在的元素", success=False, invocation_id="inv-001"),
+            _invocation(DcToolName.BACK, {}, invocation_id="inv-002"),
+        ]
+        result = generator.generate(
+            session_id="dc-test-failed-assertion",
+            device_id="d",
+            invocations=invocations,
+            bundle_name="com.demo.app",
+            main_ability="MainAbility",
+        )
+
+        assert result.replay_eligible is False
+        assert result.explicit_assertions == 0

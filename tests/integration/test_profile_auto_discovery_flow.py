@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -58,6 +59,12 @@ from harmony_test_agent.targets import ForegroundApp, InstalledApp, ResolvedTarg
 BUNDLE_A = "com.example.notes.alpha"
 BUNDLE_B = "com.example.notes.beta"
 TARGET_A = "com-example-notes-alpha"
+
+# 资产流水线精简后的默认门禁（1 轮设备验证 / 1 次 Hypium 回放）；用例用显式常量
+# 而不是字面量 3，避免重构后测试与实现漂移。
+_DEFAULT_SETTINGS = Settings(_env_file=None)
+EVIDENCE_ROUNDS = _DEFAULT_SETTINGS.profile_verification_rounds
+REPLAY_ATTEMPTS = _DEFAULT_SETTINGS.hypium_replay_attempts
 TARGET_B = "com-example-notes-beta"
 
 
@@ -209,15 +216,16 @@ def _profile(
     bundle_name: str = BUNDLE_A,
     target_app_id: str = TARGET_A,
     display_name: str = "Notes",
+    rounds: int = EVIDENCE_ROUNDS,
 ) -> TargetAppProfile:
     page_locators = [
         StableLocator(
             name=f"page-{index}",
             page_signature=f"page-{index}",
             key=f"page-key-{index}",
-            observed_rounds=3,
-            unique_match_rounds=3,
-            evidence_snapshot_ids=[f"page-{index}-round-{round_number}" for round_number in range(1, 4)],
+            observed_rounds=rounds,
+            unique_match_rounds=rounds,
+            evidence_snapshot_ids=[f"page-{index}-round-{round_number}" for round_number in range(1, rounds + 1)],
         )
         for index in range(1, 4)
     ]
@@ -240,8 +248,10 @@ def _profile(
                 kind="visible",
                 target=f"page-key-{index}",
                 page_signature=f"page-{index}",
-                observed_rounds=3,
-                evidence_snapshot_ids=[f"assertion-{index}-round-{round_number}" for round_number in range(1, 4)],
+                observed_rounds=rounds,
+                evidence_snapshot_ids=[
+                    f"assertion-{index}-round-{round_number}" for round_number in range(1, rounds + 1)
+                ],
             )
             for index in range(1, 3)
         ],
@@ -262,20 +272,32 @@ def _profile(
     )
 
 
-def _promote(registry: ProfileRegistry, profile: TargetAppProfile) -> TargetAppProfile:
+def _replay_ids(attempts: int = REPLAY_ATTEMPTS) -> list[str]:
+    return [f"run-profile:profile-attempt-{attempt}" for attempt in range(1, attempts + 1)]
+
+
+def _promote(
+    registry: ProfileRegistry,
+    profile: TargetAppProfile,
+    *,
+    attempts: int = REPLAY_ATTEMPTS,
+) -> TargetAppProfile:
     registry.save_candidate(profile)
-    registry.promote(
-        profile.target_app_id,
-        replay_run_ids=[
-            "run-profile:profile-attempt-1",
-            "run-profile:profile-attempt-2",
-            "run-profile:profile-attempt-3",
-        ],
-    )
+    registry.promote(profile.target_app_id, replay_run_ids=_replay_ids(attempts))
     return registry.read(profile.target_app_id)
 
 
-def _settings(tmp_path: Path) -> Settings:
+def _settings(
+    tmp_path: Path,
+    *,
+    rounds: int | None = None,
+    attempts: int | None = None,
+) -> Settings:
+    overrides: dict[str, int] = {}
+    if rounds is not None:
+        overrides["profile_verification_rounds"] = rounds
+    if attempts is not None:
+        overrides["hypium_replay_attempts"] = attempts
     return Settings(
         runtime_dir=tmp_path / "runs",
         database_path=tmp_path / "agent.db",
@@ -284,11 +306,18 @@ def _settings(tmp_path: Path) -> Settings:
         runtime_home=tmp_path / "runtime-home",
         agent_provider="mock",
         unchanged_screen_limit=2,
+        **overrides,
     )
 
 
-def _orchestrator(tmp_path: Path, device: FlowDevice) -> AgentOrchestrator:
-    settings = _settings(tmp_path)
+def _orchestrator(
+    tmp_path: Path,
+    device: FlowDevice,
+    *,
+    rounds: int | None = None,
+    attempts: int | None = None,
+) -> AgentOrchestrator:
+    settings = _settings(tmp_path, rounds=rounds, attempts=attempts)
     return AgentOrchestrator(
         settings,
         provider=OriginalTaskProvider(),
@@ -370,16 +399,17 @@ def _discovery_result() -> DiscoveryResult:
     )
 
 
-def _verification_result(*, passed: bool = True) -> ProfileVerificationResult:
+def _verification_result(*, passed: bool = True, rounds: int = EVIDENCE_ROUNDS) -> ProfileVerificationResult:
     target = _resolved()
     page_signatures = [f"page-{index}" for index in range(1, 5)]
+    observed = tuple(range(1, rounds + 1))
     locator_evidence = [
         StableLocatorEvidence(
             name=f"stable-{index}",
             kind=LocatorKind.KEY,
             value=f"stable-key-{index}",
             level=StabilityLevel.HIGH,
-            rounds=(1, 2, 3),
+            rounds=observed,
             page_signatures=(signature,),
             unique_each_round=True,
         )
@@ -389,13 +419,13 @@ def _verification_result(*, passed: bool = True) -> ProfileVerificationResult:
         StableAssertionEvidence(
             kind="visible",
             target=f"stable-key-{index}",
-            rounds=(1, 2, 3),
+            rounds=observed,
             page_signatures=(page_signatures[index - 1],),
         )
         for index in range(1, 3)
     ]
-    rounds = []
-    for round_number in range(1, 4):
+    verification_rounds = []
+    for round_number in range(1, rounds + 1):
         locator_observations = [
             LocatorObservation(
                 round_number=round_number,
@@ -415,7 +445,7 @@ def _verification_result(*, passed: bool = True) -> ProfileVerificationResult:
             )
             for index in range(1, 3)
         ]
-        rounds.append(
+        verification_rounds.append(
             VerificationRound(
                 round_number=round_number,
                 passed=passed,
@@ -429,24 +459,29 @@ def _verification_result(*, passed: bool = True) -> ProfileVerificationResult:
         )
     return ProfileVerificationResult(
         target=target,
-        rounds=rounds,
+        rounds=verification_rounds,
         stability=StabilityReport(
             locators=locator_evidence if passed else [],
             assertions=assertion_evidence if passed else [],
         ),
         passed=passed,
-        failures=[] if passed else ["three-round verification failed"],
+        failures=[] if passed else ["device verification failed"],
     )
 
 
-def _patch_discovery(monkeypatch, *, verification_passed: bool) -> None:
+def _patch_discovery(
+    monkeypatch,
+    *,
+    verification_passed: bool,
+    rounds: int = EVIDENCE_ROUNDS,
+) -> None:
     monkeypatch.setattr(
         "harmony_test_agent.agents.orchestrator.BoundedExplorer.explore",
         lambda self: _discovery_result(),
     )
     monkeypatch.setattr(
         "harmony_test_agent.agents.orchestrator.ProfileVerifier.verify",
-        lambda self, discovery: _verification_result(passed=verification_passed),
+        lambda self, discovery: _verification_result(passed=verification_passed, rounds=rounds),
     )
 
 
@@ -499,18 +534,21 @@ async def test_ambiguous_target_waits_for_selection_then_resumes_same_run(tmp_pa
     assert any(event.type == EventType.ORIGINAL_TASK_STARTED for event in trace.events)
 
 
+@pytest.mark.parametrize("attempts", [1, 3])
 async def test_same_run_discovers_promotes_then_executes_original_task(
     tmp_path: Path,
     monkeypatch,
+    attempts: int,
 ) -> None:
+    """编排器把 Settings.hypium_replay_attempts 透传给回放门禁（1 次精简 / 3 次历史）。"""
     device = FlowDevice(tmp_path)
-    orchestrator = _orchestrator(tmp_path, device)
+    orchestrator = _orchestrator(tmp_path, device, attempts=attempts)
     _patch_discovery(monkeypatch, verification_passed=True)
 
-    async def successful_replays(runner, generated, run_id: str, attempts: int, emitter=None):
+    async def successful_replays(runner, generated, run_id: str, attempt_count: int, emitter=None):
         del runner, generated, run_id, emitter
-        assert attempts == 3
-        return _replays(True, True, True)
+        assert attempt_count == attempts
+        return _replays(*([True] * attempts))
 
     monkeypatch.setattr(orchestrator, "_run_replays", successful_replays)
     trace = await orchestrator.run(
@@ -527,11 +565,63 @@ async def test_same_run_discovers_promotes_then_executes_original_task(
     assert trace.state == RunState.COMPLETED, trace.error
     assert trace.phase == "task"
     assert trace.profile_validation_generated is not None
-    assert len(trace.profile_validation_replays) == 3
+    assert len(trace.profile_validation_replays) == attempts
     assert stored.status == ProfileStatus.VERIFIED
     assert stored.provenance.discovery_run_id == trace.run_id
+    assert len(stored.provenance.hypium_replay_run_ids) == attempts
     assert event_types.index(EventType.PROFILE_PROMOTED) < event_types.index(EventType.ORIGINAL_TASK_STARTED)
     assert any(action.step_id == "task-assert" for action in trace.actions)
+
+
+async def test_profile_provenance_records_generated_script_for_async_replay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """晋级后的 Profile 必须记录门禁脚本路径，供 POST /api/profiles/{id}/replay 复用。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device)
+    _patch_discovery(monkeypatch, verification_passed=True)
+
+    async def successful_replays(runner, generated, run_id: str, attempt_count: int, emitter=None):
+        del runner, generated, run_id, emitter
+        return _replays(*([True] * REPLAY_ATTEMPTS))
+
+    monkeypatch.setattr(orchestrator, "_run_replays", successful_replays)
+
+    await orchestrator.run(
+        RunRequest(target={"bundle_name": BUNDLE_A}, task="check target home", auto_generate=False),
+        run_id="run-script-path",
+    )
+
+    stored = ProfileRegistry(orchestrator.settings.resolved_profiles_dir).read(TARGET_A)
+    assert stored.provenance.generated_script_path
+    assert Path(stored.provenance.generated_script_path).is_file()
+
+
+async def test_legacy_three_round_verification_and_replay_still_promotes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """回滚开关：PROFILE_VERIFICATION_ROUNDS=3 + HYPIUM_REPLAY_ATTEMPTS=3 恢复旧行为。"""
+    device = FlowDevice(tmp_path)
+    orchestrator = _orchestrator(tmp_path, device, rounds=3, attempts=3)
+    _patch_discovery(monkeypatch, verification_passed=True, rounds=3)
+
+    async def successful_replays(runner, generated, run_id: str, attempt_count: int, emitter=None):
+        del runner, generated, run_id, emitter
+        assert attempt_count == 3
+        return _replays(True, True, True)
+
+    monkeypatch.setattr(orchestrator, "_run_replays", successful_replays)
+    trace = await orchestrator.run(
+        RunRequest(target={"bundle_name": BUNDLE_A}, task="check target home", auto_generate=False),
+        run_id="run-legacy-three-rounds",
+    )
+
+    stored = ProfileRegistry(orchestrator.settings.resolved_profiles_dir).read(TARGET_A)
+    assert trace.state == RunState.COMPLETED, trace.error
+    assert stored.status == ProfileStatus.VERIFIED
+    assert len(stored.provenance.hypium_replay_run_ids) == 3
 
 
 async def test_provisional_profile_blocks_formal_hypium_generation_and_execution(
@@ -625,7 +715,7 @@ async def test_failed_admission_replay_keeps_candidate_and_prevents_promotion(
     monkeypatch,
 ) -> None:
     device = FlowDevice(tmp_path)
-    orchestrator = _orchestrator(tmp_path, device)
+    orchestrator = _orchestrator(tmp_path, device, attempts=3)
     _patch_discovery(monkeypatch, verification_passed=True)
 
     async def failing_replays(runner, generated, run_id: str, attempts: int, emitter=None):
@@ -684,14 +774,15 @@ async def test_failed_quick_revalidation_keeps_verified_profile(
     )
 
 
-async def test_replay_events_stream_per_attempt(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("attempts", [1, 3])
+async def test_replay_events_stream_per_attempt(tmp_path: Path, monkeypatch, attempts: int) -> None:
     """Hypium 回放事件逐次推送：每次尝试的开始/完成交错出现，而非全部结束后补发。"""
     device = FlowDevice(tmp_path)
-    orchestrator = _orchestrator(tmp_path, device)
+    orchestrator = _orchestrator(tmp_path, device, attempts=attempts)
     _patch_discovery(monkeypatch, verification_passed=True)
     monkeypatch.setattr(
         "harmony_test_agent.agents.orchestrator.HypiumRunner.execute",
-        lambda self, generated, attempt: _replays(True, True, True)[attempt - 1],
+        lambda self, generated, attempt: _replays(True)[0].model_copy(update={"attempt": attempt}),
     )
     trace = await orchestrator.run(
         RunRequest(target={"bundle_name": BUNDLE_A}, task="check target home", auto_generate=False),
@@ -702,11 +793,11 @@ async def test_replay_events_stream_per_attempt(tmp_path: Path, monkeypatch) -> 
     types = [event.type for event in trace.events]
     started_index = [index for index, item in enumerate(types) if item == EventType.HYPIUM_REPLAY_STARTED]
     finished_index = [index for index, item in enumerate(types) if item == EventType.HYPIUM_REPLAY_FINISHED]
-    assert len(started_index) == 3
-    assert len(finished_index) == 3
+    assert len(started_index) == attempts
+    assert len(finished_index) == attempts
     assert all(start < finish for start, finish in zip(started_index, finished_index, strict=True))
     assert all(finish < start for finish, start in zip(finished_index[:-1], started_index[1:], strict=True))
-    assert [item.attempt for item in trace.profile_validation_replays] == [1, 2, 3]
+    assert [item.attempt for item in trace.profile_validation_replays] == list(range(1, attempts + 1))
 
 
 class _RecordingDevice(FlowDevice):

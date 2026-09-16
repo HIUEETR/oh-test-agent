@@ -663,6 +663,15 @@ button.icon-button {
 .profile-card .profile-head .badge { margin-left: auto; flex-shrink: 0; }
 .profile-card .profile-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .profile-card .profile-actions button { padding: 5px 10px; font-size: 12px; }
+/* 比赛「3 次连续成功」回放进度（2026-09-17 重构） */
+.profile-replay-progress { display: flex; align-items: center; gap: 8px; }
+.profile-replay-progress progress { flex: 1; height: 6px; accent-color: var(--brand-strong); }
+.profile-replay-progress small { color: var(--text-3); font-size: 11px; white-space: nowrap; }
+.profile-replay-error { color: var(--danger, #c0392b); font-size: 11px; }
+
+/* ---------- 顶层子 Tab（会话 / 脚本与回放，2026-09-17 重构） ---------- */
+.sub-tab-nav { margin-bottom: 12px; }
+.sub-tab-nav button { font-size: 12px; }
 
 /* ---------- 报告 ---------- */
 .report-card {
@@ -1028,6 +1037,16 @@ button.icon-button {
   display: flex; gap: 8px; justify-content: flex-end; padding: 10px 18px;
   border-top: 1px solid var(--glass-line);
 }
+
+/* ---------- DC 蒸馏为 Profile（2026-09-17 重构） ---------- */
+.dc-distill-fields { display: flex; flex-direction: column; gap: 4px; padding: 0 16px 8px; }
+.dc-distill-fields label { font-size: 11px; color: var(--text-3); }
+.dc-distill-fields input { font-size: 12px; padding: 6px 8px; }
+.dc-distill-actions { display: flex; gap: 8px; padding: 0 16px 10px; }
+.dc-distill-hint { display: block; padding: 0 16px 10px; font-size: 11px; color: var(--text-3); }
+.dc-distill-error { display: block; padding: 0 16px 10px; font-size: 11px; color: var(--danger, #c0392b); }
+.dc-distill-result { display: flex; flex-direction: column; gap: 2px; padding: 0 16px 12px; }
+.dc-distill-result small { font-size: 11px; color: var(--text-2); }
 
 /* ---------- 脚本库（Hypium 脚本 Tab） ---------- */
 .script-library { display: flex; flex-direction: column; }

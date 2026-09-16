@@ -34,8 +34,11 @@ class GenerationCoverage:
 class HypiumGenerator:
     """从轨迹生成确定性初始化、业务步骤、断言及完整性元数据。"""
 
-    def __init__(self, artifacts: ArtifactStore):
+    def __init__(self, artifacts: ArtifactStore, min_observed_rounds: int = 3):
         self.artifacts = artifacts
+        # 动态 key 前缀泛化所需的跨轮观察门槛；资产流水线精简后由
+        # settings.profile_verification_rounds 注入（默认 1 轮），此处默认 3 保持向后兼容。
+        self.min_observed_rounds = max(int(min_observed_rounds), 1)
 
     def generate(self, trace: RunTrace, profile: TargetAppProfile | None = None) -> GeneratedArtifact:
         """从冻结 Profile 生成脚本；旧 Trace 只允许显式提供一次兼容快照。"""
@@ -142,7 +145,13 @@ class HypiumGenerator:
                     )
                     coverage.coordinate_fallbacks += 1
                 else:
-                    selector = self._selector(action.locator, action.params.get("target"), coverage.warnings, profile)
+                    selector = self._selector(
+                        action.locator,
+                        action.params.get("target"),
+                        coverage.warnings,
+                        profile,
+                        self.min_observed_rounds,
+                    )
                     coverage.lines.append(f"        driver.touch({selector})")
                 coverage.generated_actions += 1
             elif tool == ToolName.CLICK_COORDINATE:
@@ -154,7 +163,11 @@ class HypiumGenerator:
                 coverage.generated_actions += 1
             elif tool == ToolName.INPUT_TEXT:
                 selector = self._selector(
-                    action.locator, action.params.get("target") or "输入框", coverage.warnings, profile
+                    action.locator,
+                    action.params.get("target") or "输入框",
+                    coverage.warnings,
+                    profile,
+                    self.min_observed_rounds,
                 )
                 coverage.lines.append(f"        driver.input_text({selector}, {action.params.get('text', '')!r})")
                 coverage.generated_actions += 1
@@ -177,12 +190,19 @@ class HypiumGenerator:
                 target = action.params.get("target") or action.params.get("text")
                 coverage.lines.append(
                     "        driver.check_component_exist("
-                    f"{self._selector(action.locator, target, coverage.warnings, profile)}, expect_exist=True)"
+                    f"{self._selector(action.locator, target, coverage.warnings, profile, self.min_observed_rounds)},"
+                    " expect_exist=True)"
                 )
                 coverage.generated_assertions += 1
                 coverage.explicit_assertions += 1
             elif tool == ToolName.ASSERT_NOT_VISIBLE:
-                selector = self._selector(action.locator, action.params.get("target"), coverage.warnings, profile)
+                selector = self._selector(
+                    action.locator,
+                    action.params.get("target"),
+                    coverage.warnings,
+                    profile,
+                    self.min_observed_rounds,
+                )
                 coverage.lines.append(f"        driver.check_component_exist({selector}, expect_exist=False)")
                 coverage.generated_assertions += 1
                 coverage.explicit_assertions += 1
@@ -279,6 +299,7 @@ class HypiumGenerator:
         target: str | None,
         warnings: list[str],
         profile: TargetAppProfile,
+        min_observed_rounds: int = 3,
     ) -> str:
         if locator:
             if locator.kind in {LocatorKind.KEY, LocatorKind.ID}:
@@ -286,14 +307,15 @@ class HypiumGenerator:
                 dynamic = re.fullmatch(r"(.+_)\d{8,}", locator.value)
                 if dynamic:
                     prefix = dynamic.group(1)
+                    threshold = max(int(min_observed_rounds), 1)
                     validated = next(
                         (
                             item
                             for item in profile.stable_locator_inventory
                             if getattr(item, method) == locator.value
                             and item.dynamic_pattern == prefix
-                            and item.observed_rounds >= 3
-                            and item.unique_match_rounds >= 3
+                            and item.observed_rounds >= threshold
+                            and item.unique_match_rounds >= threshold
                         ),
                         None,
                     )

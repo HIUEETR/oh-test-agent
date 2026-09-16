@@ -9,7 +9,7 @@ import json
 import sys
 from typing import Any
 
-RUN_MODES = ("regression", "exploration", "stability", "reproduction")
+RUN_MODES = ("regression",)  # 历史模式仅用于 trace 读取；新 Run 一律 regression
 ALLOW_FLAGS = ("login", "permission", "submit", "publish", "download")
 _SMOKE_TASK = "启动应用，探索可达页面，验证返回和重启恢复。"
 
@@ -52,10 +52,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-generate", action="store_true")
     run.add_argument("--execute", action="store_true")
 
-    discover = sub.add_parser("discover", help="resolve, explore and verify an installed application Profile")
-    _add_target_options(discover, task_required=False)
-    discover.add_argument("--provider", choices=["auto", "mock", "openai"])
-
     profiles = sub.add_parser("profiles", help="list, show, verify or lock application Profiles")
     profile_sub = profiles.add_subparsers(dest="profile_command", required=True)
     profile_sub.add_parser("list")
@@ -80,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _request_payload(args: argparse.Namespace, *, discover_only: bool = False) -> dict[str, Any]:
+    """构造 RunRequest 载荷。
+
+    ``discover_only`` 保留（默认 False）：CLI 不再提供 discover 子命令，该参数只为
+    ``bootstrap_only`` 字段的历史契约留位，不再影响 ``mode``。
+    """
     target = {key: value for key, value in {"app_name": args.app, "bundle_name": args.bundle_name}.items() if value}
     discovery = {
         "enabled": not args.no_discovery,
@@ -92,7 +93,7 @@ def _request_payload(args: argparse.Namespace, *, discover_only: bool = False) -
     data: dict[str, Any] = {
         "target": target or None,
         "task": args.task,
-        "mode": "exploration" if discover_only else args.mode,
+        "mode": args.mode,
         "device_id": args.device,
         "exploration_policy": discovery,
         "temporary_test": args.temporary_test,
@@ -136,7 +137,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     raw_args = list(sys.argv[1:] if argv is None else argv)
-    commands = {"dev", "preflight", "run", "discover", "profiles", "generate", "execute", "serve"}
+    commands = {"dev", "preflight", "run", "profiles", "generate", "execute", "serve"}
     if raw_args and raw_args[0] not in commands and raw_args[0] not in {"-h", "--help"}:
         raw_args.insert(0, "dev")
     args = build_parser().parse_args(raw_args)
@@ -170,13 +171,13 @@ def main(argv: list[str] | None = None) -> None:
         print(report.model_dump_json(indent=2))
         raise SystemExit(0 if report.status == "pass" else 1)
 
-    if command in {"run", "discover"}:
+    if command == "run":
         from .agents import AgentOrchestrator
         from .models import RunState
 
         if args.provider:
             settings.agent_provider = args.provider
-        request = _make_run_request(_request_payload(args, discover_only=command == "discover"))
+        request = _make_run_request(_request_payload(args, discover_only=False))
         orchestrator = AgentOrchestrator(settings)
 
         async def execute_run():
@@ -282,7 +283,9 @@ def main(argv: list[str] | None = None) -> None:
         from .reporting import ReportBuilder
 
         trace = repository.get_trace(args.run_id) or artifacts.load_trace(args.run_id)
-        trace.generated = HypiumGenerator(artifacts).generate(trace)
+        trace.generated = HypiumGenerator(artifacts, min_observed_rounds=settings.profile_verification_rounds).generate(
+            trace
+        )
         repository.save_trace(trace)
         artifacts.save_trace(trace)
         ReportBuilder(artifacts).build(trace)
