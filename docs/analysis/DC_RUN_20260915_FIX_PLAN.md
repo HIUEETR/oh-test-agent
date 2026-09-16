@@ -587,3 +587,158 @@ Live Mode 的 `AgentOrchestrator`、`runtime/*`、既有 Live SSE 或 Hypium 生
 - 最新 DC 实机三组验收有保存证据；
 - 按仓库 `AGENTS.md` 完成要求的静态检查、测试、构建和 `git diff --check`；
 - 完成报告明确列出分支、文件、检查结果、未验证项和是否合并到 `main`。
+
+## 12. 追加归因：run `dc-20260916T160556Z-d23f9684`（`UsageLimitExceeded: request_limit of 30`）
+
+### 12.1 现象与证据
+
+证据来自 `artifacts/runs/dc-20260916T160556Z-d23f9684/dc_session.json`。
+
+| 事实 | 值 |
+| --- | --- |
+| session / turn | `dc-20260916T160556Z-d23f9684` / `turn-3fc7f2f0` |
+| 用户目标 | 打开日历 → 切月视图 → 打开 9 月 22 日 → 为该日创建生日日程（提示时间下午 1 点）→ 返回日历首页 |
+| 轮次起止 | `16:07:07Z` → `16:14:05Z`（7 分 58 秒） |
+| 轮次状态 | `failed` |
+| `turn.error` | `UsageLimitExceeded: The next request would exceed the request_limit of 30` |
+| 工具调用 | 正好 30 次且全部 `succeeded`：`screenshot`×14、`click`×7、`swipe`×6、`list_apps`×1、`dump_ui_hierarchy`×1、`wait`×1 |
+| 模型步骤 | 22 条 `thinking`，0 条 `agent_text`，无终态回答 |
+| UI 层级规模 | 打开「新建日程」后 `103~105 elements`，摘要只展示 `top 60` |
+| 平均单请求耗时 | ≈14 秒（最长空档 37 秒；`AGENT_MODEL_TIMEOUT=90` 从未触发） |
+
+### 12.2 根因链
+
+1. `request_limit=30` 统计的是 **pydantic-ai 的模型 HTTP 请求次数**
+   （`.venv/.../pydantic_ai/_agent_graph.py:804` 每次模型请求前调用
+   `UsageLimits.check_before_request`），而 DC 系统提示词强制「每轮一个工具」，
+   于是 **1 次请求 = 1 次工具往返**。预算在 30 次工具往返后耗尽，第 31 次请求被拒。
+2. 该上限当时是 `dc/provider.py` 里的硬编码字面量，不可配置，也没有任何地方
+   说明它和 `DC_TURN_TIMEOUT` 的关系。
+3. 30 次预算之所以会用光，是因为模型在**盲操作**：`dc/session.py` 注入 prompt 的
+   UI 树摘要按**树的前 `dc_ui_tree_top_k`（当时默认 60）个元素**截断；该页 105 个
+   元素中，导航栏 + 侧边栏 + 背景月历占了前约 52 个，底部弹窗表单的字段、类型页签
+   文案、确定按钮全部落在第 60 名之后。模型自己的思考原文即为此：
+   "the 60-element cap hides the form"、"without visibility this is guesswork"。
+   于是它用 14 次截图 + 7 次盲点坐标反复试探，预算耗尽时连日历都没打开成功。
+4. 异常处理缺口：`provider.chat()` 的推进循环只捕获
+   `StopAsyncIteration / TimeoutError / CancelledError`，`UsageLimitExceeded`
+   裸穿（且抛点在 `_advance_with_progress` 之前，连 `MODEL_CALL_FAILED` 都没发），
+   最后由 `session.py` 的兜底 `except Exception` 写成
+   `f"{type(exc).__name__}: {exc}"` —— 用户看到的是英文裸异常，既无处置提示，
+   前端「当前活动区」也没有任何失败迹象。
+
+### 12.3 修复
+
+- `config.py`：新增 `DC_MODEL_REQUEST_LIMIT`（默认 120）与
+  `DC_MODEL_TOOL_CALLS_LIMIT`（默认 200）；删除从未被读取、语义与真实预算不一致的
+  死配置 `dc_max_turn_steps`；`dc_ui_tree_top_k` 默认 60 → 200。
+- `dc/provider.py`：上限改为读配置；`UsageLimitExceeded` 转为
+  `DcUsageLimitReached` 并补发 `MODEL_CALL_FAILED(error_code="usage_limit")`；
+  系统提示词新增「先看清再动手」规则，明确禁止连续截图同一界面与盲点推测坐标。
+- `dc/models.py`：新增 `DcUsageLimitReached`（携带命中的 `request_limit` /
+  `tool_calls_limit`）。
+- `dc/session.py`：该异常归为 `blocked`，`turn.error` 为中文可读文案并点名可调大的
+  环境变量，`ERROR` 事件带 `error_code=usage_limit`。
+- `web/src/stores/dc-console.ts`：`model_call_failed(error_code=usage_limit)` 映射为
+  专用阶段文案「本轮请求预算已用尽」。
+
+### 12.4 复现与核对方式
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -c "import json,collections;d=json.load(open(r'artifacts/runs/dc-20260916T160556Z-d23f9684/dc_session.json',encoding='utf-8'));print(collections.Counter(i['tool'] for i in d['invocations']));print(d['turns'][0]['error'])"
+```
+
+预期输出：工具计数共 30 次、`turn.error` 为上述 `UsageLimitExceeded` 文案。
+
+用该 run 保存的真实 UI dump 复算 top-K 截断（`layouts/dc_1789575210_snap-489040651c22.json`，
+共 105 个元素）可以量化「模型看不见什么」：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -c "import json;from harmony_test_agent.perception.normalizer import normalize_layout;h=json.load(open(r'artifacts/runs/dc-20260916T160556Z-d23f9684/layouts/dc_1789575210_snap-489040651c22.json',encoding='utf-8'));els=normalize_layout(h,1320,2232);print('total',len(els));print('top60 last=',els[59].type,els[59].key);print('hidden clickable/editable@60:',len([e for e in els[60:] if e.clickable or e.editable]))"
+```
+
+实测结果：
+
+- `top 60` 的最后一个元素是 `Column key='tab_controller'`，即摘要恰好在类型页签那一行被切断；
+- `top_k=60` 时**完全不可见**的可交互元素有 **14 个**，全部是本次任务真正要操作的表单控件：
+  `tabs_schedule`（日程）/ `tabs_important_event`（重要日）、`add_agenda_location`、
+  `全天` 行与其 `Toggle`、`add_agenda_start_time`、`add_agenda_end_time`、
+  `add_agenda_add_remind`（添加提醒）、`重要提醒` 行与其 `Toggle`、
+  `add_agenda_select_account`、`agenda_remark`，以及底部按钮行；
+- `top_k=200` 时 105 个元素全部进入摘要。
+
+也就是说，模型不是「不会操作」，而是「看不到要操作的东西」——这正是它把 30 次预算
+全部烧在截图与盲点坐标上的原因，也解释了 12.3 中提高 `DC_UI_TREE_TOP_K` 的必要性。
+
+**未验证项**：修复后的实机重放（同一日历任务）尚未执行；默认 120/200 的充分性需要
+下一次真实 run 的证据，若仍不足则按实测调大（已配置化，无需改代码）。
+
+## 13. Token 用量与缓存命中率：数据源修复与展示
+
+### 13.1 上游丢数据的两个原因（实测）
+
+自建 OpenAI 兼容端点（`commandcode.ai`）返回的 usage 是完整的：
+
+```json
+"usage": {
+  "prompt_tokens": 1721, "completion_tokens": 16, "total_tokens": 1737,
+  "prompt_tokens_details": {"cached_tokens": 1536, "audio_tokens": 0, "video_tokens": 0},
+  "completion_tokens_details": {"reasoning_tokens": 16, "image_tokens": 0},
+  "cache_creation_input_tokens": 0
+}
+```
+
+但 `pydantic-ai 1.73.0` 的 `Agent.run().usage()` 返回的 `RunUsage` 里
+`input_tokens / output_tokens / cache_read_tokens` **全是 0**，原因有两个：
+
+1. `OpenAIChatModel._map_usage` 只保留顶层且 `isinstance(v, int)` 的字段，
+   `prompt_tokens_details` 是嵌套 dict 被直接丢弃 → 缓存命中数永远为 0；
+2. 真正赋值 input/output tokens 的 `RequestUsage.extract()` 依赖 genai-prices 的
+   provider 快照，自建端点不在快照里，兜底到 `openai` 后一个字段都没提取到
+   → token 数永远为 0。
+
+**结论：不改 provider 就做不出用量展示（数据源是 0）。**
+
+### 13.2 缓存命中率的分母（实测语义）
+
+共享 1721 token 前缀连发两次请求：
+
+| | `prompt_tokens` | `cached_tokens` |
+| --- | --- | --- |
+| 冷启 | 1721 | 0 |
+| 热启 | 1721 | 1536 |
+
+`prompt_tokens` **包含**缓存命中部分（`1721 - 1536 = 185` 恰为新增部分），因此：
+
+```
+缓存命中率 = cached_tokens / prompt_tokens = cache_read_tokens / input_tokens
+```
+
+用 `input + cached` 作分母会得到 47% 这种系统性低估的错误值，测试中已锁定该语义。
+
+### 13.3 实现
+
+- `agents/providers.py`：新增惰性定义的 `OpenAIChatModel` 子类（只覆盖上游留作扩展点的
+  `_map_usage`），直接从响应对象取 `prompt_tokens` / `completion_tokens` /
+  `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens`，不再经过
+  genai-prices；没有 `usage` 时委托 `super()`。DC 与 Live 模式的用量口径同时被修正。
+- `dc/models.py`：新增 `DcTokenUsage`（含 `cache_hit_rate`、`plus`、`minus`、
+  `from_run_usage`）、事件 `token_usage_updated`、`DcChatResponse.usage/usage_delta`、
+  `DcSessionView/DcSessionSnapshot.token_usage`。
+- `dc/provider.py`：在 `agent.iter()` 上下文内读取 `run.usage()`（块外不可用），
+  以「本次累计 − 上次累计」得到本轮增量；超时/取消/预算耗尽路径用块内快照兜底，
+  增量带 `turn_id` 标记，避免上一轮的增量被重复入账。
+- `dc/session.py`：`self.token_usage` 累计并在 `TOKEN_USAGE_UPDATED` 事件里下发权威值
+  （前端整值覆盖，SSE 重连重复投递天然幂等）。
+- 前端：`DcTokenStatsBar` 挂在输入框下方，显示本会话总量、缓存命中率、输入/输出/缓存读、
+  请求进度与（仅在单请求轮次）上下文占用率；无数据显示「尚无用量数据」。
+- 配置：新增 `DC_MODEL_CONTEXT_WINDOW`（默认 128000），仅用于展示占用比例。
+
+### 13.4 复现
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -c "import asyncio,sys,httpx;sys.path.insert(0,'src');from harmony_test_agent.config import get_settings;s=get_settings();r=httpx.post(s.openai_base_url.rstrip('/')+'/chat/completions',json={'model':s.agent_model,'messages':[{'role':'user','content':'hi'}],'max_tokens':8},headers={'Authorization':'Bearer '+s.openai_api_key.get_secret_value()},timeout=90);print(r.json()['usage'])"
+```
+
+**未验证项**：真实会话下统计行的实机显示（需要设备 + 模型）尚未执行；数字口径已由
+provider 层单测锁定（`tests/unit/test_provider.py`）。

@@ -75,6 +75,15 @@ function visitSession(): DcSessionView {
       },
     ],
     latest_snapshot_path: "screens/dc_test.jpeg",
+    token_usage: {
+      requests: 5,
+      tool_calls: 3,
+      input_tokens: 4000,
+      output_tokens: 200,
+      cache_read_tokens: 1000,
+      cache_write_tokens: 0,
+      details: {},
+    },
   };
 }
 
@@ -199,6 +208,63 @@ describe("dc-console store appendEvent", () => {
     const messages = useDcConsole.getState().messages;
     expect(messages.map((m) => m.role)).toEqual(["narration", "assistant"]);
   });
+
+  it("模型请求预算耗尽时活动区显示专用阶段，而不是通用模型失败", () => {
+    // 后端 UsageLimitExceeded → provider 发 model_call_failed(error_code=usage_limit)
+    useDcConsole.getState().appendEvent(
+      event("model_call_failed", {
+        model_call_id: "model-call-9",
+        turn_id: "turn-1",
+        attempt: 31,
+        error_code: "usage_limit",
+        request_limit: 30,
+        tool_calls_limit: 50,
+        error: "The next request would exceed the request_limit of 30",
+      }),
+    );
+
+    const activity = useDcConsole.getState().activity;
+    expect(activity.phase).toBe("usage_limit");
+    expect(activity.phaseLabel).toBe("本轮请求预算已用尽");
+    expect(activity.operationId).toBe("model-call-9");
+  });
+
+  it("模型超时仍映射为 model_timeout，其他错误回落到 model_failed", () => {
+    const { appendEvent } = useDcConsole.getState();
+    appendEvent(event("model_call_failed", { model_call_id: "m1", error_code: "model_timeout" }));
+    expect(useDcConsole.getState().activity.phase).toBe("model_timeout");
+
+    appendEvent(event("model_call_failed", { model_call_id: "m2", error_code: "provider_error" }));
+    expect(useDcConsole.getState().activity.phase).toBe("model_failed");
+  });
+
+  it("token_usage_updated 整值覆盖，重复投递不会把用量翻倍", () => {
+    const payload = {
+      session: {
+        requests: 2,
+        tool_calls: 1,
+        input_tokens: 1721,
+        output_tokens: 16,
+        cache_read_tokens: 1536,
+        cache_write_tokens: 0,
+        details: {},
+      },
+      turn: { requests: 2, input_tokens: 1721, output_tokens: 16, cache_read_tokens: 1536 },
+      context_window: 128000,
+      request_limit: 120,
+    };
+    const same = event("token_usage_updated", payload);
+    useDcConsole.getState().appendEvent(same);
+    useDcConsole.getState().appendEvent({ ...same, event_id: same.event_id + 1 });
+
+    const state = useDcConsole.getState();
+    // 覆盖而非累加：仍是服务端权威值
+    expect(state.tokenUsage?.input_tokens).toBe(1721);
+    expect(state.tokenUsage?.requests).toBe(2);
+    expect(state.contextWindow).toBe(128000);
+    expect(state.requestLimit).toBe(120);
+    expect(state.lastTurnRequests).toBe(2);
+  });
 });
 
 describe("dc-console store refreshSession", () => {
@@ -213,7 +279,6 @@ describe("dc-console store refreshSession", () => {
     getDcSession.mockResolvedValue(visitSession());
 
     await useDcConsole.getState().refreshSession();
-
     const messages = useDcConsole.getState().messages;
     expect(messages.map((m) => m.role)).toEqual(["user", "thinking", "narration", "tool", "assistant"]);
     expect(messages[1].content).toBe("先看看界面");
@@ -250,6 +315,16 @@ describe("dc-console store refreshSession", () => {
     const roles = useDcConsole.getState().messages.map((m) => m.role);
     expect(roles).toEqual(["user", "thinking", "tool", "assistant"]);
     expect(useDcConsole.getState().messages.filter((m) => m.content === "我来截图")).toHaveLength(1);
+  });
+
+  it("用会话快照回填 token 用量；reset 后清空", async () => {
+    getDcSession.mockResolvedValue(visitSession());
+
+    await useDcConsole.getState().refreshSession();
+    expect(useDcConsole.getState().tokenUsage?.input_tokens).toBe(4000);
+
+    useDcConsole.getState().reset();
+    expect(useDcConsole.getState().tokenUsage).toBeNull();
   });
 });
 

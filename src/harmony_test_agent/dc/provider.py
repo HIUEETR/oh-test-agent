@@ -13,11 +13,20 @@ from datetime import timedelta
 from typing import Any
 
 from pydantic_ai import Agent, BinaryContent, UsageLimits
+from pydantic_ai.exceptions import UsageLimitExceeded
 
 from ..agents.providers import MockAgentProvider, OpenAICompatibleProvider
 from ..config import Settings
 from ..models import utc_now
-from .models import DcChatRequest, DcChatResponse, DcEventType, DcModelTimeout, DcTurnTimeout
+from .models import (
+    DcChatRequest,
+    DcChatResponse,
+    DcEventType,
+    DcModelTimeout,
+    DcTokenUsage,
+    DcTurnTimeout,
+    DcUsageLimitReached,
+)
 
 # ---------------------------------------------------------------------------
 # 系统提示词
@@ -43,6 +52,10 @@ DC_SYSTEM_PROMPT = """\
 6. **完成任务后**：返回结构化总结，说明完成了什么、遇到了什么问题、建议用户下一步做什么。\
 然后等待用户的下一条消息。
 7. **禁止编造**：不要在回复中编造工具结果。所有设备状态必须通过工具调用获取。
+8. **先看清再动手**：只能在 UI 控件树摘要里真实出现过的控件上操作。如果目标控件不在摘要中\
+（例如底部弹窗的表单元素被 top-K 截断），先降低不确定性：用 dump_ui_hierarchy 取完整层级，\
+或先滚动/收起遮挡层让目标控件进入摘要；**不要连续对同一界面反复 screenshot，也不要盲点推测出来的坐标**。\
+若多步观测后仍无法确认控件位置，以"需要帮助"停下来说明缺什么，而不是继续盲试烧掉预算。
 
 ## 回复格式
 - 调用工具时：简要说明你要做什么，然后调用工具。
@@ -61,6 +74,41 @@ DC_TURN_TEMPLATE = """\
 # 视为「工具调用」的 part_kind（含 pydantic-ai 内建工具）
 _TOOL_CALL_PART_KINDS = frozenset({"tool-call", "builtin-tool-call"})
 
+# 预算耗尽时的用户可读文案（前端 ERROR 事件与 turn.error 共用）
+_USAGE_LIMIT_MESSAGE = "本轮模型请求预算已用尽（request_limit={request_limit}，tool_calls={tool_calls_limit}）"
+
+
+def _usage_limits(settings: Settings) -> UsageLimits:
+    """按配置构造 pydantic-ai 用量上限。
+
+    两个上限都必须可配置：此前 ``request_limit=30`` 被硬编码，而 DC 每轮只调一个工具，
+    30 次请求 ≈ 30 次工具往返，真实多步任务（例如在日历底部弹窗里填表单）会先把预算
+    烧在观测上，第 31 次请求直接抛 ``UsageLimitExceeded``。
+    """
+    return UsageLimits(
+        request_limit=settings.dc_model_request_limit,
+        tool_calls_limit=settings.dc_model_tool_calls_limit,
+    )
+
+
+def _usage_limit_exceeded(
+    exc: UsageLimitExceeded,
+    settings: Settings,
+    *,
+    turn_id: str,
+    attempt: int,
+) -> DcUsageLimitReached:
+    """把 pydantic-ai 的裸用量异常转成携带上限值的 DC 领域异常。"""
+    message = _USAGE_LIMIT_MESSAGE.format(
+        request_limit=settings.dc_model_request_limit,
+        tool_calls_limit=settings.dc_model_tool_calls_limit,
+    )
+    return DcUsageLimitReached(
+        f"[turn={turn_id}] {message}；在第 {attempt} 次模型请求前被拒绝；命中原因：{exc}",
+        request_limit=settings.dc_model_request_limit,
+        tool_calls_limit=settings.dc_model_tool_calls_limit,
+    )
+
 
 # ---------------------------------------------------------------------------
 # DcChatProvider — OpenAICompatibleProvider 子类
@@ -73,6 +121,33 @@ class DcChatProvider(OpenAICompatibleProvider):
     复用 ``_model(vision=True)`` 构造视觉模型，``_model_settings()`` 构造
     兼容参数（如 ``AGENT_DISABLE_THINKING``）。
     """
+
+    def __init__(self, settings: Settings):
+        super().__init__(settings)
+        # 用量是会话级状态：DcChatProvider 每个会话一个实例（见 DcSessionManager），
+        # 而 pydantic-ai 的 run 会带上历史消息，故 RunUsage 累计值跨轮次单调递增，
+        # 相邻两轮的差值就是本轮真实消耗。
+        self._last_run_usage = DcTokenUsage()
+        self._last_usage_delta = DcTokenUsage()
+        # 本轮已发生的用量：超时/取消/预算耗尽时用它兜底入账
+        self._progress_usage = DcTokenUsage()
+        # 增量归属的轮次：会话层据此避免把上一轮的增量重复入账
+        self._usage_delta_turn_id: str | None = None
+
+    @property
+    def last_usage(self) -> DcTokenUsage:
+        """最近一次 run 的累计用量（会话内累计）。"""
+        return self._last_run_usage
+
+    @property
+    def last_usage_delta(self) -> DcTokenUsage:
+        """相对上一次 run 的增量。"""
+        return self._last_usage_delta
+
+    @property
+    def usage_delta_turn_id(self) -> str | None:
+        """``last_usage_delta`` 归属的轮次；None 表示尚未产生任何增量。"""
+        return self._usage_delta_turn_id
 
     async def chat(self, request: DcChatRequest) -> DcChatResponse:
         """执行一轮多步工具对话，并实时 emit 模型侧的思考/叙述事件。
@@ -121,41 +196,85 @@ class DcChatProvider(OpenAICompatibleProvider):
         emitted: set[tuple[str, str]] = set()
 
         attempt = 0
-        async with agent.iter(
-            user_content,
-            message_history=history or None,
-            model_settings=self._model_settings(),
-            deps=request.tool_context,
-            usage_limits=UsageLimits(
-                request_limit=30,
-                tool_calls_limit=50,
-            ),
-        ) as run:
-            iterator = run.__aiter__()
-            while True:
-                attempt += 1
-                timeout = _advance_timeout(request)
-                if timeout <= 0:
-                    raise DcTurnTimeout(
-                        f"DC turn budget exhausted before model call {attempt} (dc_turn_timeout reached)"
-                    )
-                node = await _advance_with_progress(iterator, request, attempt, timeout, emit)
-                if node is _EXHAUSTED:
-                    break
+        try:
+            async with agent.iter(
+                user_content,
+                message_history=history or None,
+                model_settings=self._model_settings(),
+                deps=request.tool_context,
+                usage_limits=_usage_limits(self.settings),
+            ) as run:
+                iterator = run.__aiter__()
+                while True:
+                    attempt += 1
+                    timeout = _advance_timeout(request)
+                    if timeout <= 0:
+                        raise DcTurnTimeout(
+                            f"DC turn budget exhausted before model call {attempt} (dc_turn_timeout reached)"
+                        )
+                    node = await _advance_with_progress(iterator, request, attempt, timeout, emit)
+                    # 每个节点后刷新一次「已发生用量」，使超时/取消路径也有数字可入账
+                    self._progress_usage = DcTokenUsage.from_run_usage(run.usage())
+                    if node is _EXHAUSTED:
+                        break
+                    messages = run.all_messages()
+                    if len(messages) <= seen:
+                        continue
+                    for message in messages[seen:]:
+                        step = _emit_message_parts(message, step, emit, emitted)
+                    seen = len(messages)
                 messages = run.all_messages()
-                if len(messages) <= seen:
-                    continue
-                for message in messages[seen:]:
-                    step = _emit_message_parts(message, step, emit, emitted)
-                seen = len(messages)
+                result = run.result
+                # 必须在 iter 上下文内读取：块外 run 的累计用量不再可用
+                cumulative = DcTokenUsage.from_run_usage(run.usage())
+        except UsageLimitExceeded as exc:
+            # pydantic-ai 在进入 ModelRequestNode 前就拒绝请求，此时
+            # ``_advance_with_progress`` 尚未发出 started/finished，必须在这里补一条
+            # MODEL_CALL_FAILED，否则前端「当前活动区」看不到任何失败迹象。
+            # 预算耗尽前已经发生的请求同样要计入用量，否则最需要看数字的场景反而没有数据。
+            cumulative = self._progress_usage
+            self._record_usage(cumulative, request.turn_id)
+            _emit_model_event(
+                emit,
+                DcEventType.MODEL_CALL_FAILED,
+                "模型请求预算已用尽",
+                {
+                    "turn_id": request.turn_id,
+                    "attempt": attempt,
+                    "phase": "waiting_model",
+                    "error_code": "usage_limit",
+                    "request_limit": self.settings.dc_model_request_limit,
+                    "tool_calls_limit": self.settings.dc_model_tool_calls_limit,
+                    "error": str(exc),
+                },
+            )
+            raise _usage_limit_exceeded(exc, self.settings, turn_id=request.turn_id, attempt=attempt) from exc
+        except DcModelTimeout, DcTurnTimeout, asyncio.CancelledError:
+            # 超时/取消同样保留已发生的用量，避免统计面板在一轮失败后归零
+            cumulative = self._progress_usage
+            self._record_usage(cumulative, request.turn_id)
+            raise
 
-        messages = run.all_messages()
-        result = run.result
+        self._record_usage(cumulative, request.turn_id)
         return DcChatResponse(
             output_text=result.output if result else "",
             history=messages,
             tool_call_count=_count_tool_calls_from_messages(messages),
+            usage=self._last_run_usage,
+            usage_delta=self._last_usage_delta,
         )
+
+    def _record_usage(self, cumulative: DcTokenUsage, turn_id: str) -> None:
+        """把一次 run 的累计用量换算成会话累计与「本轮增量」。
+
+        pydantic-ai 的 ``RunUsage`` 在带历史消息时是**跨轮次累计**的，因此
+        本轮真实消耗 = 本次累计 − 上一次累计。同一轮内多次调用本方法是幂等的
+        （增量由差值定义，不会被重复累加）。
+        """
+        self._last_usage_delta = cumulative.minus(self._last_run_usage)
+        self._last_run_usage = cumulative
+        self._progress_usage = cumulative
+        self._usage_delta_turn_id = turn_id
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +336,9 @@ class MockDcChatProvider(MockAgentProvider):
             ),
             history=list(request.history or []),
             tool_call_count=0,
+            # Mock 不调用真实模型：显式返回空用量，前端据此显示「尚无用量数据」
+            usage=DcTokenUsage(),
+            usage_delta=DcTokenUsage(),
         )
 
 

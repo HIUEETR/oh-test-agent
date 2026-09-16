@@ -119,6 +119,7 @@ export type DcEventType =
   | "tool_call_started" | "tool_call_progress" | "tool_call_finished"
   | "screenshot_captured" | "ui_tree_captured"
   | "assistant_message" | "thinking" | "agent_text"
+  | "token_usage_updated"
   | "script_generated" | "tier_changed" | "needs_attention" | "error";
 
 /** DC 事件类型列表（用于 SSE 订阅） */
@@ -131,6 +132,7 @@ export const DC_EVENT_TYPES: DcEventType[] = [
   "tool_call_started", "tool_call_progress", "tool_call_finished",
   "screenshot_captured", "ui_tree_captured",
   "assistant_message", "thinking", "agent_text",
+  "token_usage_updated",
   "script_generated", "tier_changed", "needs_attention", "error",
 ];
 
@@ -163,6 +165,17 @@ export interface DcScriptArtifact {
   omitted_operations: Array<{ invocation_id: string; tool: string; reason: string }>;
 }
 
+/** 会话内累计 token 用量（与后端 DcTokenUsage 同名同义） */
+export interface DcTokenUsage {
+  requests: number;
+  tool_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  details: Record<string, number>;
+}
+
 /** 会话视图（GET /api/dc/sessions/{id} 响应） */
 export interface DcSessionView {
   session_id: string;
@@ -182,6 +195,8 @@ export interface DcSessionView {
   active_turn_id?: string | null;
   /** 最近一轮的公开连续性摘要（取消/中断后用于提示可继续） */
   continuation?: DcContinuationContext | null;
+  /** 会话内累计 token 用量（Mock 或旧快照可能为 null） */
+  token_usage?: DcTokenUsage | null;
 }
 
 /** 会话摘要（GET /api/dc/sessions 列表项；active=false 表示可从磁盘恢复） */

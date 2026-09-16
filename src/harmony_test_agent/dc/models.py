@@ -179,6 +179,105 @@ class DcToolInvocation(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Token 用量
+# ---------------------------------------------------------------------------
+
+
+class DcTokenUsage(BaseModel):
+    """一次会话/一轮的 token 用量累计值。
+
+    全部数值来自 provider 的真实响应，不做任何推测或估算。字段命名与
+    ``pydantic_ai.usage.RunUsage`` 对齐，便于 `from_run_usage` 单点转换，
+    其余代码不直接依赖 pydantic-ai 类型。
+
+    **缓存命中率的分母语义（实测确认）**：该 provider 的 ``prompt_tokens``
+    **包含**缓存命中的部分（共享前缀的两次请求：冷启 ``prompt_tokens=1721,
+    cached_tokens=0``，热启 ``prompt_tokens=1721, cached_tokens=1536``）。
+    因此命中率 = ``cache_read_tokens / input_tokens``。
+    """
+
+    requests: int = 0
+    tool_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    details: dict[str, int] = Field(default_factory=dict[str, int])
+
+    @property
+    def total_tokens(self) -> int:
+        """输入 + 输出；``details``（如 reasoning_tokens）不重复计入。"""
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def has_values(self) -> bool:
+        """是否已有任何可用数字（用于前端决定显示数值还是空态）。"""
+        return any((self.requests, self.input_tokens, self.output_tokens, self.cache_read_tokens))
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        """缓存命中率 = cache_read_tokens / input_tokens。
+
+        ``input_tokens`` 为 0 时返回 ``None``（无数据），而不是 0 或除零，
+        避免前端把「没有数据」显示成「0% 命中」。
+        """
+        if self.input_tokens <= 0:
+            return None
+        return self.cache_read_tokens / self.input_tokens
+
+    def plus(self, other: DcTokenUsage) -> DcTokenUsage:
+        """累加两份用量（会话级累计）。``details`` 按 key 求和。"""
+        details = dict(self.details)
+        for key, value in other.details.items():
+            details[key] = details.get(key, 0) + value
+        return DcTokenUsage(
+            requests=self.requests + other.requests,
+            tool_calls=self.tool_calls + other.tool_calls,
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            details=details,
+        )
+
+    @classmethod
+    def from_run_usage(cls, usage: Any) -> DcTokenUsage:
+        """从 ``pydantic_ai.usage.RunUsage``（或同形对象）构造；未知字段安全忽略。"""
+        if usage is None:
+            return cls()
+        raw_details = getattr(usage, "details", None) or {}
+        details = {
+            str(key): int(value)
+            for key, value in raw_details.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+        return cls(
+            requests=int(getattr(usage, "requests", 0) or 0),
+            tool_calls=int(getattr(usage, "tool_calls", 0) or 0),
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+            cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(usage, "cache_write_tokens", 0) or 0),
+            details=details,
+        )
+
+    def minus(self, other: DcTokenUsage) -> DcTokenUsage:
+        """差值（本轮增量 = 本次 run 累计 − 上一次 run 累计）；负值截断为 0。"""
+        details: dict[str, int] = {}
+        for key in self.details.keys() | other.details.keys():
+            details[key] = max(0, self.details.get(key, 0) - other.details.get(key, 0))
+        return DcTokenUsage(
+            requests=max(0, self.requests - other.requests),
+            tool_calls=max(0, self.tool_calls - other.tool_calls),
+            input_tokens=max(0, self.input_tokens - other.input_tokens),
+            output_tokens=max(0, self.output_tokens - other.output_tokens),
+            cache_read_tokens=max(0, self.cache_read_tokens - other.cache_read_tokens),
+            cache_write_tokens=max(0, self.cache_write_tokens - other.cache_write_tokens),
+            details=details,
+        )
+
+
+# ---------------------------------------------------------------------------
 # 对话轮次
 # ---------------------------------------------------------------------------
 
@@ -259,6 +358,7 @@ class DcEventType(StrEnum):
     ASSISTANT_MESSAGE = "assistant_message"
     THINKING = "thinking"  # 模型原生推理（reasoning_content / ThinkingPart）
     AGENT_TEXT = "agent_text"  # 模型可见叙述文本（每步 TextPart，非最终总结）
+    TOKEN_USAGE_UPDATED = "token_usage_updated"  # 会话 token 用量/缓存命中率更新
     SCRIPT_GENERATED = "script_generated"
     TIER_CHANGED = "tier_changed"
     NEEDS_ATTENTION = "needs_attention"
@@ -397,6 +497,8 @@ class DcSessionView(BaseModel):
     # 实时可观测字段：当前轮次与公开连续性摘要
     active_turn_id: str | None = None
     continuation: DcContinuationContext | None = None
+    # 会话内累计 token 用量与缓存命中率（来自 provider 真实响应）
+    token_usage: DcTokenUsage | None = None
 
 
 class DcSessionSummary(BaseModel):
@@ -440,6 +542,8 @@ class DcSessionSnapshot(BaseModel):
     has_snapshot: bool = True
     # 公开连续性摘要：取消/中断后下一轮仍能继承目标与已完成状态
     continuation: DcContinuationContext | None = None
+    # 会话内累计 token 用量；旧快照缺该字段时按 None 处理（schema_version 不变）
+    token_usage: DcTokenUsage | None = None
 
     def summary(self, *, active: bool) -> DcSessionSummary:
         """投影为列表项。"""
@@ -501,6 +605,10 @@ class DcChatResponse(BaseModel):
     output_text: str = ""
     history: list[Any] = Field(default_factory=list)
     tool_call_count: int = 0
+    # 本次 run 的累计用量（pydantic-ai 会带上历史消息，故累计值跨轮次递增）
+    usage: DcTokenUsage = Field(default_factory=DcTokenUsage)
+    # 相对上一轮的增量（= 本次 usage − 上一次 usage），即「本轮真实消耗」
+    usage_delta: DcTokenUsage = Field(default_factory=DcTokenUsage)
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +638,21 @@ class DcTurnTimeout(DcError):
 
 class DcModelTimeout(DcError):
     """单次模型调用超出 ``AGENT_MODEL_TIMEOUT``。"""
+
+
+class DcUsageLimitReached(DcError):
+    """单轮模型请求/工具调用预算耗尽（``DC_MODEL_REQUEST_LIMIT`` / ``DC_MODEL_TOOL_CALLS_LIMIT``）。
+
+    pydantic-ai 的 ``UsageLimitExceeded`` 是裸的运行时异常，冒泡到轮次层会变成用户看不懂的
+    英文异常（历史事故：一轮真实任务在第 31 次请求前被打断，turn.error 只记录
+    ``UsageLimitExceeded: The next request would exceed the request_limit of 30``）。
+    这里携带命中的上限值，便于上层构造可读文案并提示「调大哪个环境变量后继续」。
+    """
+
+    def __init__(self, message: str, *, request_limit: int | None = None, tool_calls_limit: int | None = None) -> None:
+        super().__init__(message)
+        self.request_limit = request_limit
+        self.tool_calls_limit = tool_calls_limit
 
 
 class DcDeviceReconciling(DcError):

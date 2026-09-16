@@ -893,6 +893,21 @@ button.icon-button {
 .dc-input-row textarea:focus { outline: none; border-color: var(--brand); }
 .dc-input-row textarea:disabled { opacity: 0.6; }
 
+/* 输入框下方：本会话 token 用量与缓存命中率 */
+.dc-token-stats {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 16px 8px;
+  border-top: 1px solid var(--glass-line-soft);
+  font-size: 10.5px; color: var(--text-3); flex: none;
+}
+.dc-token-item { white-space: nowrap; }
+.dc-token-item strong {
+  font-family: var(--font-mono); font-weight: 600; color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.dc-token-detail { color: var(--text-3); opacity: 0.85; }
+.dc-token-empty { color: var(--text-3); }
+
 /* 截图面板 */
 .dc-screen .device-stage { min-height: 180px; }
 
@@ -1073,4 +1088,6 @@ button.icon-button {
   .dc-activity-id { max-width: 96px; }
   .dc-activity-status { margin-left: 0; }
   .dc-input-row { padding: 10px; }
+  .dc-token-stats { padding: 6px 10px 8px; gap: 8px; }
+  .dc-token-detail { display: none; }
 }

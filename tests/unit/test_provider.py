@@ -1,4 +1,8 @@
-from harmony_test_agent.agents.providers import OpenAICompatibleProvider, align_plan_with_task
+from harmony_test_agent.agents.providers import (
+    OpenAICompatibleProvider,
+    align_plan_with_task,
+    usage_aware_chat_model_class,
+)
 from harmony_test_agent.config import Settings
 from harmony_test_agent.models import PlannedStep, ToolName
 
@@ -102,3 +106,93 @@ def test_plan_alignment_treats_search_keyword_as_explicit_submission() -> None:
     aligned = align_plan_with_task("搜索 OpenHarmony 并确认结果", steps, max_steps=4)
 
     assert [step.step_id for step in aligned] == ["1", "2", "3", "finish"]
+
+
+# ---------------------------------------------------------------------------
+# usage 映射：pydantic-ai 1.73.0 会丢掉自建 OpenAI 兼容端点的 token 与缓存计数
+# ---------------------------------------------------------------------------
+
+USAGE_RESPONSE = {
+    "id": "chatcmpl-test",
+    "object": "chat.completion",
+    "created": 1789575000,
+    "model": "test-model",
+    "choices": [
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "pong"},
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 1721,
+        "completion_tokens": 16,
+        "total_tokens": 1737,
+        "prompt_tokens_details": {"cached_tokens": 1536, "audio_tokens": 0, "video_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 16, "image_tokens": 0},
+        "cache_creation_input_tokens": 0,
+    },
+}
+
+
+def _model() -> object:
+    """构造 usage-aware 模型实例（不发起任何网络请求）。"""
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    settings = make_settings(disable_thinking=False)
+    provider = OpenAIProvider(
+        base_url=settings.openai_base_url,
+        api_key=settings.openai_api_key.get_secret_value(),
+    )
+    return usage_aware_chat_model_class()("test-model", provider=provider)
+
+
+def _map(response_payload: dict) -> object:
+    from openai.types.chat import ChatCompletion
+
+    model = _model()
+    return model._map_usage(ChatCompletion.model_validate(response_payload))  # type: ignore[attr-defined]
+
+
+def test_usage_mapping_recovers_tokens_and_cache_reads() -> None:
+    """上游会把 input/output/cache 全部丢成 0，这里必须如实取到。"""
+    usage = _map(USAGE_RESPONSE)
+
+    assert usage.input_tokens == 1721
+    assert usage.output_tokens == 16
+    assert usage.cache_read_tokens == 1536
+    # prompt_tokens 已包含缓存命中部分：不能用 input + cached 作为分母
+    assert usage.cache_read_tokens < usage.input_tokens
+    assert usage.details["reasoning_tokens"] == 16
+    assert usage.details["cached_tokens"] == 1536
+
+
+def test_usage_mapping_cache_hit_rate_semantics() -> None:
+    """命中率 = cache_read / input（实测语义，锁定不被改成 input + cached）。"""
+    usage = _map(USAGE_RESPONSE)
+
+    assert abs(usage.cache_read_tokens / usage.input_tokens - 0.8925) < 0.001
+
+
+def test_usage_mapping_handles_missing_details() -> None:
+    """provider 不返回 *_details 时不抛错，缓存计数为 0。"""
+    payload = dict(USAGE_RESPONSE)
+    payload["usage"] = {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105}
+
+    usage = _map(payload)
+
+    assert usage.input_tokens == 100
+    assert usage.output_tokens == 5
+    assert usage.cache_read_tokens == 0
+    assert usage.cache_write_tokens == 0
+
+
+def test_usage_mapping_without_usage_falls_back_to_upstream() -> None:
+    """没有 usage 字段时委托上游，不把「无数据」伪装成 0 成本。"""
+    payload = dict(USAGE_RESPONSE)
+    payload.pop("usage")
+
+    usage = _map(payload)
+
+    assert usage.input_tokens == 0
+    assert usage.details == {}

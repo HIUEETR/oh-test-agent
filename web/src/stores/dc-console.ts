@@ -29,6 +29,7 @@ import type {
   DcScriptArtifact,
   DcSessionSummary,
   DcSessionView,
+  DcTokenUsage,
   DcToolInvocation,
   DcToolStatus,
   DcToolTier,
@@ -87,6 +88,7 @@ const PHASE_LABELS: Record<string, string> = {
   cancelling: "正在停止执行",
   capturing_context: "正在采集上下文",
   context: "正在采集上下文",
+  usage_limit: "本轮请求预算已用尽",
   finished: "已结束",
 };
 
@@ -124,6 +126,14 @@ interface DcState {
   /** needs_attention 的处置选项 */
   attentionOptions: string[];
   attentionReason: string;
+  /** 本会话累计 token 用量（来自 provider 真实响应；null 表示尚无数据） */
+  tokenUsage: DcTokenUsage | null;
+  /** 展示用上下文窗口大小（后端事件下发） */
+  contextWindow: number;
+  /** 本轮请求预算上限（后端事件下发；0 表示未知） */
+  requestLimit: number;
+  /** 最近一轮的请求次数（用于判断上下文占用率是否可信） */
+  lastTurnRequests: number;
 
   /* 动作 */
   loadSessions: () => Promise<void>;
@@ -169,6 +179,10 @@ export const useDcConsole = create<DcState>()((set, get) => ({
   continuation: null,
   attentionOptions: [],
   attentionReason: "",
+  tokenUsage: null,
+  contextWindow: 0,
+  requestLimit: 0,
+  lastTurnRequests: 0,
 
   loadSessions: async () => {
     try {
@@ -248,6 +262,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
             syncing: false,
             lastSyncedAt: new Date().toISOString(),
             continuation: view.continuation ?? null,
+            tokenUsage: view.token_usage ?? null,
             liveInvocations: ledger,
             liveInvocationIndex: buildLedgerIndex(ledger),
           }));
@@ -285,6 +300,8 @@ export const useDcConsole = create<DcState>()((set, get) => ({
         liveInvocations: ledger,
         liveInvocationIndex: buildLedgerIndex(ledger),
         continuation: session.continuation ?? get().continuation,
+        // 会话切换/刷新时以服务端快照为准（权威累计值）
+        tokenUsage: session.token_usage ?? get().tokenUsage,
         syncing: false,
         lastSyncedAt: new Date().toISOString(),
         ...(quiet ? {} : { error: "" }),
@@ -487,9 +504,15 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           break;
         }
         case "model_call_failed": {
+          const errorCode = p.error_code as string | undefined;
           patch.activity = nextActivity(state.activity, {
             kind: "model",
-            phase: (p.error_code as string) === "model_timeout" ? "model_timeout" : "model_failed",
+            phase:
+              errorCode === "model_timeout"
+                ? "model_timeout"
+                : errorCode === "usage_limit"
+                  ? "usage_limit"
+                  : "model_failed",
             operationId: (p.model_call_id as string) ?? state.activity.operationId,
             lastProgressAt: event.timestamp,
             elapsedMs: numberOrNull(p.duration_ms),
@@ -666,6 +689,19 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           }
           break;
         }
+        case "token_usage_updated": {
+          // 后端下发的是会话累计的权威值：整值覆盖（而非累加），
+          // 因此 SSE 重连重复投递同一事件天然幂等，不会把用量翻倍。
+          const session = p.session as DcTokenUsage | undefined;
+          if (session) patch.tokenUsage = session;
+          const turn = p.turn as DcTokenUsage | undefined;
+          if (turn) patch.lastTurnRequests = turn.requests ?? 0;
+          const window = p.context_window as number | undefined;
+          if (typeof window === "number" && window > 0) patch.contextWindow = window;
+          const limit = p.request_limit as number | undefined;
+          if (typeof limit === "number" && limit > 0) patch.requestLimit = limit;
+          break;
+        }
         case "turn_finished": {
           const status = (p.status as string) ?? "";
           patch.status = "idle";
@@ -751,6 +787,10 @@ function emptyLivePatch(): Partial<DcState> {
     continuation: null,
     attentionOptions: [],
     attentionReason: "",
+    tokenUsage: null,
+    contextWindow: 0,
+    requestLimit: 0,
+    lastTurnRequests: 0,
   };
 }
 
@@ -1237,6 +1277,100 @@ export function selectActivitySnapshot(state: DcState): DcActivitySnapshot {
     activity.epoch,
   ].join("|");
   return { activity, activityKey: key, busy: true, cancelStatus, cancelHint: hint };
+}
+
+/** 输入框下方统计行的展示数据。 */
+export interface DcTokenStats {
+  /** 是否有可用数字（Mock/旧会话为 false → 显示空态） */
+  hasData: boolean;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** 缓存命中率（0~1）；无输入 token 时为 null，前端隐藏该项而不是显示 0% */
+  cacheHitRate: number | null;
+  requests: number;
+  toolCalls: number;
+  /** 请求预算上限；<=0 表示未知 */
+  requestLimit: number;
+  /** 本轮只有一次请求时才给出上下文占用率，否则多次请求之和会误导 */
+  contextFillRate: number | null;
+}
+
+/** 空统计：引用稳定，避免 selector 每次产生新对象导致重渲染。 */
+export const EMPTY_TOKEN_STATS: DcTokenStats = {
+  hasData: false,
+  totalTokens: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  cacheHitRate: null,
+  requests: 0,
+  toolCalls: 0,
+  requestLimit: 0,
+  contextFillRate: null,
+};
+
+/**
+ * 输入框下方统计行数据源。
+ *
+ * 命中率分母用 `input_tokens`：该 provider 的 prompt_tokens **包含**缓存命中部分
+ * （实测共享前缀两次请求均为 1721，第二次 cached_tokens=1536），
+ * 用 `input + cached` 作分母会系统性低估。
+ *
+ * **返回值必须引用稳定**：zustand 用 useSyncExternalStore，selector 每次返回新对象
+ * 会触发无限重渲染（已实测踩到 "Maximum update depth exceeded"），因此按输入缓存。
+ */
+let TOKEN_STATS_CACHE: { usage: DcTokenUsage | null; requestLimit: number; contextWindow: number; lastTurnRequests: number; value: DcTokenStats } | null =
+  null;
+
+export function selectTokenStats(state: DcState): DcTokenStats {
+  const usage = state.tokenUsage;
+  const cached = TOKEN_STATS_CACHE;
+  if (
+    cached &&
+    cached.usage === usage &&
+    cached.requestLimit === state.requestLimit &&
+    cached.contextWindow === state.contextWindow &&
+    cached.lastTurnRequests === state.lastTurnRequests
+  ) {
+    return cached.value;
+  }
+  const value = computeTokenStats(state);
+  TOKEN_STATS_CACHE = {
+    usage,
+    requestLimit: state.requestLimit,
+    contextWindow: state.contextWindow,
+    lastTurnRequests: state.lastTurnRequests,
+    value,
+  };
+  return value;
+}
+
+function computeTokenStats(state: DcState): DcTokenStats {
+  const usage = state.tokenUsage;
+  if (!usage) return EMPTY_TOKEN_STATS;
+  const hasData = Boolean(usage.requests || usage.input_tokens || usage.output_tokens || usage.cache_read_tokens);
+  if (!hasData) return EMPTY_TOKEN_STATS;
+  return {
+    hasData: true,
+    totalTokens: usage.input_tokens + usage.output_tokens,
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheReadTokens: usage.cache_read_tokens,
+    cacheWriteTokens: usage.cache_write_tokens,
+    cacheHitRate: usage.input_tokens > 0 ? usage.cache_read_tokens / usage.input_tokens : null,
+    requests: usage.requests,
+    toolCalls: usage.tool_calls,
+    requestLimit: state.requestLimit,
+    // 一轮内多次请求时，input_tokens 是多次之和，不能当作单次上下文占用
+    contextFillRate:
+      state.lastTurnRequests === 1 && state.contextWindow > 0 && usage.input_tokens > 0
+        ? Math.min(1, usage.input_tokens / state.contextWindow)
+        : null,
+  };
 }
 
 /** 停止按钮两阶段文案：请求 → 确认设备状态；长时间无终态也要给出可读状态。 */
