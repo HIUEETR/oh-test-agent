@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     dc_default_tier: int = Field(default=2, ge=1, le=5)
     dc_ui_tree_top_k: int = Field(default=60, ge=10, le=200)
     dc_screenshot_cache_frames: int = Field(default=3, ge=1, le=10)
+    # 轮次总预算：必须 >= 单次模型超时，超时后轮次进入 failed/needs_attention
+    dc_turn_timeout: float = Field(default=600, gt=0, le=3600)
+    # 进度心跳间隔（工具与模型等待期间）
+    dc_progress_interval: float = Field(default=1.5, ge=0.2, le=30)
+    # 工具开始/结束时写 checkpoint 的最小间隔
+    dc_checkpoint_interval: float = Field(default=2.0, ge=0, le=60)
+    # 关闭/淘汰会话时等待轮次收尾的上限
+    dc_close_timeout: float = Field(default=8.0, gt=0, le=120)
 
     @field_validator("harmony_cors_origins", mode="before")
     @classmethod

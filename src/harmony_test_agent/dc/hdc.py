@@ -15,12 +15,16 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image
 
 from ..devices.base import DeviceError
 from ..models import CommandResult
+
+# Windows 下用独立进程组启动子进程，便于超时时按进程树终止
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 
 class DcHdcExecutor:
@@ -55,39 +59,25 @@ class DcHdcExecutor:
         """执行一条 HDC 命令并返回标准化结果。
 
         与 ``HarmonyDeviceAdapter._run`` 行为一致但独立实现，避免依赖私有方法。
+        与旧实现的关键差别：使用 ``Popen`` + ``communicate(timeout)``，超时后
+        **主动终止进程（Windows 下含子进程树）**，避免「等待被取消但底层 HDC
+        仍在跑」的静默副作用。
         """
         command = [self.hdc_path]
         if device:
             command.extend(["-t", self.device_id])
         command.extend(args)
         started = time.monotonic()
+        effective_timeout = timeout or self.timeout
         try:
-            process = subprocess.run(
+            process = subprocess.Popen(
                 command,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout or self.timeout,
-                check=False,
-            )
-            return CommandResult(
-                command=subprocess.list2cmdline(command),
-                args=command,
-                returncode=process.returncode,
-                stdout=process.stdout,
-                stderr=process.stderr,
-                duration_ms=round((time.monotonic() - started) * 1000),
-            )
-        except subprocess.TimeoutExpired as exc:
-            return CommandResult(
-                command=subprocess.list2cmdline(command),
-                args=command,
-                returncode=None,
-                stdout=exc.stdout if isinstance(exc.stdout, str) else "",
-                stderr=exc.stderr if isinstance(exc.stderr, str) else "",
-                timed_out=True,
-                duration_ms=round((time.monotonic() - started) * 1000),
+                creationflags=_CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
         except OSError as exc:
             return CommandResult(
@@ -97,6 +87,64 @@ class DcHdcExecutor:
                 stderr=str(exc),
                 duration_ms=round((time.monotonic() - started) * 1000),
             )
+
+        try:
+            stdout, stderr = process.communicate(timeout=effective_timeout)
+        except subprocess.TimeoutExpired:
+            terminated = self._terminate(process)
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except Exception:  # noqa: BLE001 - 收尾读取失败不影响超时结论
+                stdout, stderr = "", ""
+            note = "" if terminated else "; process tree may still be running"
+            return CommandResult(
+                command=subprocess.list2cmdline(command),
+                args=command,
+                returncode=None,
+                stdout=stdout or "",
+                stderr=f"{stderr or ''}timeout after {effective_timeout}s{note}".strip(),
+                timed_out=True,
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
+
+        return CommandResult(
+            command=subprocess.list2cmdline(command),
+            args=command,
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
+
+    @staticmethod
+    def _terminate(process: subprocess.Popen[str]) -> bool:
+        """终止进程（Windows 下连同子进程树）；返回是否成功确认退出。"""
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+            except OSError, subprocess.SubprocessError:
+                pass
+        else:  # pragma: no cover - 非 Windows 分支仅作兼容
+            import signal
+
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except OSError, ProcessLookupError:
+                pass
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+            return process.poll() is not None
+        except subprocess.TimeoutExpired:
+            return False
 
     # ------------------------------------------------------------------
     # L1 补充：key_event（泛化 HarmonyDeviceAdapter.back）
@@ -175,7 +223,12 @@ class DcHdcExecutor:
     # JPEG 快速路径（不转 PNG，用于 LLM 上传和 SSE 推送）
     # ------------------------------------------------------------------
 
-    def screenshot_jpeg(self, output_dir: Path, label: str = "screen") -> tuple[Path, bytes, int, int]:
+    def screenshot_jpeg(
+        self,
+        output_dir: Path,
+        label: str = "screen",
+        on_phase: Callable[[str], None] | None = None,
+    ) -> tuple[Path, bytes, int, int]:
         """采集设备截图并直接返回 JPEG 字节，不经过 PNG 转换。
 
         Returns:
@@ -184,36 +237,51 @@ class DcHdcExecutor:
         相比 ``HarmonyDeviceAdapter.screenshot``（5 次子进程 + PNG 转换），
         此方法仅 3 次子进程（snapshot_display → file recv → rm），
         节省 PIL PNG 编码时间和 3-8× 传输带宽。
+
+        ``on_phase`` 会在每个子步骤前回调（``snapshot_display`` / ``file_recv`` /
+        ``decode`` / ``remote_cleanup`` / ``retry_wait``），使 8-16 秒的慢截图
+        能定位到具体步骤，而不是一段静默。
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         snapshot_id = f"dc-{uuid.uuid4().hex[:12]}"
         remote_path = f"/data/local/tmp/{snapshot_id}.jpeg"
         local_path = output_dir / f"{label}_{snapshot_id}.jpeg"
 
+        def phase(name: str) -> None:
+            if on_phase is not None:
+                on_phase(name)
+
         errors: list[str] = []
         for attempt in range(3):
             local_path.unlink(missing_ok=True)
+            phase("snapshot_display")
             capture = self._run("shell", "snapshot_display", "-i", "0", "-f", remote_path)
             if not capture.ok or "success:" not in capture.stdout.casefold():
                 errors.append(f"capture[{attempt + 1}]: {capture.stderr or capture.stdout}")
+                phase("retry_wait")
                 time.sleep(0.5)
                 continue
+            phase("file_recv")
             received = self._run("file", "recv", remote_path, str(local_path))
             if not received.ok or not local_path.exists() or local_path.stat().st_size == 0:
                 errors.append(f"recv[{attempt + 1}]: {received.stderr or received.stdout}")
+                phase("retry_wait")
                 time.sleep(0.5)
                 continue
             try:
+                phase("decode")
                 with Image.open(local_path) as image:
                     image.load()
                     if image.width <= 0 or image.height <= 0:
                         raise ValueError(f"invalid image size: {image.size}")
                     width, height = image.size
                 jpeg_bytes = local_path.read_bytes()
+                phase("remote_cleanup")
                 self._run("shell", "rm", "-f", remote_path)
                 return local_path, jpeg_bytes, width, height
             except Exception as exc:
                 errors.append(f"decode[{attempt + 1}]: {exc}")
+                phase("retry_wait")
                 time.sleep(0.5)
 
         local_path.unlink(missing_ok=True)

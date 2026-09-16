@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -56,6 +56,12 @@ class SendMessageResponse(BaseModel):
 
 class SetTierRequest(BaseModel):
     tier: int = Field(ge=1, le=5)
+
+
+class ResolveAttentionRequest(BaseModel):
+    """处置未确认设备副作用的动作。"""
+
+    action: Literal["reobserve", "confirm_effect", "retry", "terminate"] = "reobserve"
 
 
 class GenerateScriptRequest(BaseModel):
@@ -155,10 +161,12 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
             session = manager.get(session_id)
         except DcSessionNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        if session.status == "closed":
-            raise HTTPException(status_code=409, detail="session is closed")
-        if session.status in ("thinking", "acting"):
-            raise HTTPException(status_code=409, detail="session is busy processing a previous message")
+        blocked = session.turn_gate()
+        if blocked is not None:
+            # 设备副作用未确认时返回 409 + needs_attention 事件，不静默排队
+            if session.pending_attention is not None:
+                session._emit(DcEventType.NEEDS_ATTENTION, blocked, session.attention_payload())
+            raise HTTPException(status_code=409, detail=blocked)
 
         turn_id = f"turn-pending-{session_id[-8:]}"
 
@@ -179,15 +187,30 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
 
     @router.post("/sessions/{session_id}/stop")
     async def stop_turn(session_id: str):
-        """取消当前正在执行的 turn。"""
+        """请求取消当前正在执行的 turn（先置取消标记，再取消任务）。"""
         try:
             session = manager.get(session_id)
         except DcSessionNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        if session._current_task and not session._current_task.done():
-            session._current_task.cancel()
-            return {"session_id": session_id, "status": "cancelling"}
-        return {"session_id": session_id, "status": "idle"}
+        cancelled = session.request_stop()
+        attention = session.pending_attention is not None
+        return {
+            "session_id": session_id,
+            "status": "cancelling" if cancelled else "idle",
+            "attention_required": attention,
+        }
+
+    @router.post("/sessions/{session_id}/resolve")
+    async def resolve_attention(session_id: str, body: ResolveAttentionRequest):
+        """处置未确认的设备副作用（reobserve / confirm_effect / retry / terminate）。"""
+        try:
+            session = manager.get(session_id)
+        except DcSessionNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            return await session.resolve_attention(body.action)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.patch("/sessions/{session_id}/tier")
     async def set_tier(session_id: str, body: SetTierRequest):

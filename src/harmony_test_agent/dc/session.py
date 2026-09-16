@@ -11,6 +11,7 @@ import logging
 import time
 import uuid
 from collections import deque
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,8 +24,11 @@ from .hdc import DcHdcExecutor
 from .models import (
     DcChatRequest,
     DcChatResponse,
+    DcContinuationContext,
+    DcEffectStatus,
     DcEvent,
     DcEventType,
+    DcModelTimeout,
     DcProviderUnsupported,
     DcScriptArtifact,
     DcSessionNotFound,
@@ -34,10 +38,13 @@ from .models import (
     DcStepKind,
     DcStepRecord,
     DcToolInvocation,
+    DcToolName,
+    DcToolStatus,
     DcToolTier,
     DcTurnBudgetExceeded,
     DcTurnRecord,
     DcTurnStatus,
+    DcTurnTimeout,
 )
 from .provider import DcChatProvider, MockDcChatProvider, create_dc_provider
 from .safety import DcShellPolicy
@@ -205,7 +212,7 @@ class DcSession:
         self.safety = DcShellPolicy()
 
         # 录制与事件
-        self.recorder = DcActionRecorder()
+        self.recorder = DcActionRecorder(progress_interval=settings.dc_progress_interval)
         self.bus = DcEventBus(buffer_size=settings.dc_event_buffer_size)
         self.recorder.set_emitter(self._emit)
 
@@ -216,6 +223,18 @@ class DcSession:
         self.latest_snapshot: ScreenSnapshot | None = None
         self.snapshot_holder = DcSnapshotHolder()
         self.script: DcScriptArtifact | None = None
+
+        # 公开连续性摘要与实时可观测状态（Phase 3）
+        self.continuation: DcContinuationContext | None = None
+        self.active_turn_id: str | None = None
+        self.last_page_path: str | None = None
+        self.last_foreground_app: str | None = None
+        # 副作用未确认的动作：新轮次必须先对账（Phase 4）
+        self.pending_attention: DcToolInvocation | None = None
+        self.cancel_requested = False
+        self._last_checkpoint = 0.0
+        self._context_version = 0
+        self._checkpoint_futures: set[Any] = set()
 
         # 历史恢复标记（供前端提示上下文还原方式）
         self._restored = False
@@ -233,8 +252,64 @@ class DcSession:
         self.dir: Path = artifacts.run_dir(session_id)
 
     def _emit(self, event_type: DcEventType, message: str, payload: dict[str, Any] | None = None) -> None:
-        """发射事件到总线。"""
+        """发射事件到总线，并维护实时可观测状态与有界 checkpoint。"""
+        payload = payload or {}
+        if event_type == DcEventType.UI_TREE_CAPTURED:
+            self.last_page_path = payload.get("page_path") or self.last_page_path
+        if event_type == DcEventType.TOOL_CALL_FINISHED:
+            self._track_invocation_outcome(payload.get("invocation_id"))
         self.bus.emit(self.session_id, event_type, message, payload)
+        if event_type in (DcEventType.TOOL_CALL_STARTED, DcEventType.TOOL_CALL_FINISHED):
+            # 工具开始/结束都写一个有界 checkpoint，进程中断后仍保留可继续的事实
+            self._schedule_checkpoint()
+
+    def _track_invocation_outcome(self, invocation_id: Any) -> None:
+        """工具结束后更新前台应用/副作用状态，决定是否需要人工对账。"""
+        if not isinstance(invocation_id, str):
+            return
+        invocation = self.recorder.by_id(invocation_id)
+        if invocation is None:
+            return
+        if invocation.tool == DcToolName.FOREGROUND_APP and invocation.success:
+            summary = invocation.result_summary
+            if summary.startswith("bundle="):
+                self.last_foreground_app = summary.split(",", 1)[0].removeprefix("bundle=").strip()
+        if invocation.effect_status == DcEffectStatus.UNKNOWN and invocation.status != DcToolStatus.RUNNING:
+            self.pending_attention = invocation
+
+    def _schedule_checkpoint(self, *, force: bool = False) -> None:
+        """按最小间隔写快照；写盘放到线程池，避免阻塞事件循环。"""
+        now = time.monotonic()
+        interval = float(self.settings.dc_checkpoint_interval)
+        if not force and now - self._last_checkpoint < interval:
+            return
+        self._last_checkpoint = now
+        self._context_version += 1
+        self._emit_context_checkpoint()
+        snapshot = self.snapshot()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._write_snapshot(snapshot)
+            return
+        future = loop.run_in_executor(None, self._write_snapshot, snapshot)
+        self._checkpoint_futures.add(future)
+        future.add_done_callback(self._checkpoint_futures.discard)
+
+    def _write_snapshot(self, snapshot: DcSessionSnapshot) -> None:
+        if self.store is None:
+            return
+        try:
+            self.store.save(snapshot)
+        except (OSError, ValueError) as exc:  # noqa: BLE001 - 持久化失败不影响对话
+            logger.warning("failed to checkpoint DC session %s: %s", self.session_id, exc)
+
+    def _emit_context_checkpoint(self) -> None:
+        self._emit(
+            DcEventType.CONTEXT_CHECKPOINT,
+            "已保存上下文检查点",
+            {"turn_id": self.active_turn_id, "context_version": self._context_version},
+        )
 
     def _rel_artifact(self, abs_path: Path | None) -> str | None:
         """把绝对产物路径转为会话目录相对 POSIX 路径（供前端 artifact URL 使用）。"""
@@ -265,6 +340,8 @@ class DcSession:
         async with self.lock:
             if self.status == "closed":
                 raise DcSessionNotFound(f"session {self.session_id} is closed")
+            if self.pending_attention is not None:
+                return self._reject_needs_attention(text, self.pending_attention)
             device_lock = self.device_lock
             if device_lock is not None and device_lock.locked():
                 return self._reject_busy_device(text)
@@ -272,6 +349,54 @@ class DcSession:
                 return await self._execute_turn(text)
             async with device_lock:
                 return await self._execute_turn(text)
+
+    def turn_gate(self) -> str | None:
+        """返回阻止新轮次的原因（``None`` 表示可以开始）。"""
+        if self.status == "closed":
+            return "session is closed"
+        if self.status in ("thinking", "acting"):
+            return "session is busy processing a previous message"
+        if self.pending_attention is not None:
+            invocation = self.pending_attention
+            return (
+                f"device effect of {invocation.tool.value} ({invocation.invocation_id}) is unconfirmed; "
+                "resolve it before starting a new turn"
+            )
+        return None
+
+    def attention_payload(self) -> dict[str, Any]:
+        """构造 needs_attention 事件载荷（含可处置选项）。"""
+        invocation = self.pending_attention
+        return {
+            "turn_id": invocation.turn_id if invocation else self.active_turn_id,
+            "invocation_id": invocation.invocation_id if invocation else None,
+            "tool": invocation.tool.value if invocation else None,
+            "reason": (
+                f"{invocation.tool.value} 的结果未确认（{invocation.status.value}），设备状态可能与最后一次观测不一致"
+            )
+            if invocation
+            else "上一轮存在未确认的设备副作用",
+            "options": ["reobserve", "confirm_effect", "retry", "terminate"],
+        }
+
+    def _reject_needs_attention(self, text: str, invocation: DcToolInvocation) -> DcTurnRecord:
+        """设备副作用未确认：记录一轮 NEEDS_ATTENTION 并发事件，不驱动设备。"""
+        turn = DcTurnRecord(
+            turn_id=f"turn-{uuid.uuid4().hex[:8]}",
+            user_message=text,
+            status=DcTurnStatus.NEEDS_ATTENTION,
+            ended_at=utc_now(),
+        )
+        turn.error = f"{invocation.tool.value} ({invocation.invocation_id}) 的副作用未确认，请先重新观测或确认设备状态"
+        self.turns.append(turn)
+        self._emit(DcEventType.NEEDS_ATTENTION, turn.error, self.attention_payload())
+        self._emit(
+            DcEventType.TURN_FINISHED,
+            "轮次未开始：需要人工确认设备状态",
+            {"turn_id": turn.turn_id, "status": turn.status.value},
+        )
+        self.save_state()
+        return turn
 
     def _reject_busy_device(self, text: str) -> DcTurnRecord:
         """设备已被其他会话的轮次占用：记录并发出可读错误，不排队。"""
@@ -295,16 +420,34 @@ class DcSession:
         self.status = "thinking"
         self.last_active_at = utc_now()
         self.cancel_event.clear()
+        self.cancel_requested = False
+        self.active_turn_id = turn_id
+        turn_deadline = utc_now() + timedelta(seconds=self.settings.dc_turn_timeout)
 
         self._emit(
             DcEventType.TURN_STARTED,
             f"用户消息：{text[:100]}",
-            {"turn_id": turn_id, "user_message": text},
+            {
+                "turn_id": turn_id,
+                "user_message": text,
+                "turn_deadline_at": turn_deadline.isoformat(),
+            },
         )
 
+        outcome = DcTurnStatus.FAILED
         try:
-            # 采集当前截图和 UI 树
+            # 采集当前截图和 UI 树（恢复/继续时这一步就是「先重新观测」）
+            self._emit(
+                DcEventType.CONTEXT_CAPTURE_STARTED,
+                "正在采集当前设备上下文",
+                {"turn_id": turn_id},
+            )
             jpeg_bytes, ui_tree_digest = await self._capture_context()
+            self._emit(
+                DcEventType.CONTEXT_CAPTURE_FINISHED,
+                "设备上下文采集完成",
+                {"turn_id": turn_id, "page_path": self.last_page_path},
+            )
 
             # 历史裁剪
             pruned_history = _prune_history(self.history, self.settings.dc_history_turns)
@@ -323,6 +466,7 @@ class DcSession:
                 turn_id=turn_id,
                 ui_tree_top_k=self.settings.dc_ui_tree_top_k,
                 action_timeout=self.settings.agent_action_timeout,
+                progress_interval=self.settings.dc_progress_interval,
             )
 
             # 构造工具列表
@@ -338,11 +482,23 @@ class DcSession:
                 tools=tools,
                 tool_context=tool_context,
                 emit=lambda etype, msg, payload: self._emit_from_provider(turn, etype, msg, payload),
+                turn_id=turn_id,
+                model_timeout=self.settings.agent_model_timeout,
+                progress_interval=self.settings.dc_progress_interval,
+                turn_deadline=turn_deadline,
+                continuation_prompt=self._continuation_prompt(),
             )
 
-            # 调用 provider
+            # 调用 provider（外层再用轮次剩余预算兜底）
             self.status = "acting"
-            response: DcChatResponse | None = await self.provider.chat(request)
+            remaining = max(0.1, (turn_deadline - utc_now()).total_seconds())
+            try:
+                response: DcChatResponse | None = await asyncio.wait_for(
+                    self.provider.chat(request),
+                    timeout=remaining,
+                )
+            except TimeoutError as exc:
+                raise DcTurnTimeout(f"DC turn exceeded {self.settings.dc_turn_timeout}s budget") from exc
 
             if response is None:
                 raise DcProviderUnsupported(
@@ -354,53 +510,189 @@ class DcSession:
             self.history = response.history
 
             # 更新 turn 记录
-            turn.status = DcTurnStatus.COMPLETED
             turn.agent_summary = response.output_text
-            turn.ended_at = utc_now()
-            turn.invocation_ids = [inv.invocation_id for inv in self.recorder.invocations if inv.turn_id == turn_id]
+            outcome = DcTurnStatus.COMPLETED
 
             self._emit(
                 DcEventType.ASSISTANT_MESSAGE,
                 response.output_text[:200],
                 {"turn_id": turn_id, "summary": response.output_text, "tool_calls": response.tool_call_count},
             )
-            self._emit(
-                DcEventType.TURN_FINISHED,
-                f"轮次完成：{response.tool_call_count} 次工具调用",
-                {"turn_id": turn_id, "status": turn.status.value, "tool_calls": response.tool_call_count},
-            )
 
         except DcProviderUnsupported:
-            turn.status = DcTurnStatus.FAILED
             turn.error = "provider does not support DC chat"
-            turn.ended_at = utc_now()
             self._emit(DcEventType.ERROR, turn.error, {"turn_id": turn_id})
             raise
 
         except DcTurnBudgetExceeded as exc:
-            turn.status = DcTurnStatus.BLOCKED
+            outcome = DcTurnStatus.BLOCKED
             turn.error = str(exc)
-            turn.ended_at = utc_now()
             self._emit(DcEventType.ERROR, str(exc), {"turn_id": turn_id})
 
+        except (DcModelTimeout, DcTurnTimeout) as exc:
+            outcome = DcTurnStatus.FAILED
+            turn.error = f"{type(exc).__name__}: {exc}"
+            self._emit(
+                DcEventType.ERROR,
+                turn.error,
+                {
+                    "turn_id": turn_id,
+                    "error_code": ("model_timeout" if isinstance(exc, DcModelTimeout) else "turn_timeout"),
+                },
+            )
+
         except asyncio.CancelledError:
-            turn.status = DcTurnStatus.CANCELLED
-            turn.ended_at = utc_now()
-            self._emit(DcEventType.TURN_FINISHED, "轮次已取消", {"turn_id": turn_id, "status": "cancelled"})
+            outcome = DcTurnStatus.CANCELLED if self.cancel_requested else DcTurnStatus.INTERRUPTED
+            turn.error = "轮次已取消" if outcome == DcTurnStatus.CANCELLED else "轮次被中断"
+            self._emit(
+                DcEventType.TURN_INTERRUPTED,
+                turn.error,
+                {"turn_id": turn_id, "reason": outcome.value},
+            )
+            self._finalize_turn(turn, outcome)
             raise
 
         except Exception as exc:
-            turn.status = DcTurnStatus.FAILED
+            outcome = DcTurnStatus.FAILED
             turn.error = f"{type(exc).__name__}: {exc}"
-            turn.ended_at = utc_now()
             self._emit(DcEventType.ERROR, turn.error, {"turn_id": turn_id})
 
-        finally:
-            self.status = "idle"
-            self.last_active_at = utc_now()
-            self.save_state()
-
+        self._finalize_turn(turn, outcome)
         return turn
+
+    def _finalize_turn(self, turn: DcTurnRecord, outcome: DcTurnStatus) -> None:
+        """统一收尾：invocation_ids、连续性摘要、终态事件、落盘。
+
+        正常完成、失败、超时、取消、异常五条路径都走这里，因此
+        ``turn.invocation_ids`` 与实际发生的工具调用始终一致。
+        """
+        turn.ended_at = utc_now()
+        turn.invocation_ids = [inv.invocation_id for inv in self.recorder.turn_invocations(turn.turn_id)]
+        self._flag_unresolved_effects(turn.turn_id)
+        turn.status = DcTurnStatus.NEEDS_ATTENTION if self.pending_attention is not None else outcome
+        self.continuation = self._build_continuation(turn)
+        self.active_turn_id = None
+        self.status = "idle"
+        self.last_active_at = utc_now()
+
+        if self.pending_attention is not None:
+            self._emit(DcEventType.NEEDS_ATTENTION, "存在未确认的设备副作用", self.attention_payload())
+        self._emit(
+            DcEventType.TURN_FINISHED,
+            f"轮次结束：{turn.status.value}",
+            {
+                "turn_id": turn.turn_id,
+                "status": turn.status.value,
+                "tool_calls": len(turn.invocation_ids),
+                "error": turn.error,
+            },
+        )
+        self._schedule_checkpoint(force=True)
+        self.save_state()
+
+    def _flag_unresolved_effects(self, turn_id: str) -> None:
+        """兜底扫描：本轮仍存在运行中或副作用未知的调用时必须人工对账。
+
+        事件驱动的 ``_track_invocation_outcome`` 覆盖正常路径；这里再按账本兜底，
+        避免取消/进程中断导致事件缺失时把未知副作用当成可以继续。
+        """
+        if self.pending_attention is not None:
+            return
+        for invocation in reversed(self.recorder.turn_invocations(turn_id)):
+            if invocation.status == DcToolStatus.RUNNING or invocation.effect_status == DcEffectStatus.UNKNOWN:
+                self.pending_attention = invocation
+                return
+
+    def _continuation_prompt(self) -> str:
+        """返回注入下一轮 prompt 的公开连续性摘要。"""
+        if self.continuation is None:
+            return ""
+        return self.continuation.to_prompt()
+
+    def _build_continuation(self, turn: DcTurnRecord) -> DcContinuationContext:
+        """从轮次记录与工具账本生成公开连续性摘要（不含隐藏推理）。"""
+        invocations = self.recorder.turn_invocations(turn.turn_id)
+        completed = [
+            f"{inv.tool.value}({_format_args(inv.args)}) -> {inv.status.value}"
+            for inv in invocations
+            if inv.status == DcToolStatus.SUCCEEDED
+        ]
+        unresolved = [
+            inv
+            for inv in invocations
+            if inv.status == DcToolStatus.RUNNING or inv.effect_status == DcEffectStatus.UNKNOWN
+        ]
+        unknown_effect = next((inv for inv in unresolved if inv.effect_status == DcEffectStatus.UNKNOWN), None)
+        marker = unknown_effect or (unresolved[0] if unresolved else None)
+        steps = [rec.text for rec in turn.steps if rec.kind == DcStepKind.AGENT_TEXT and rec.text.strip()]
+        if unknown_effect is not None:
+            effect = DcEffectStatus.UNKNOWN
+        elif completed:
+            effect = DcEffectStatus.CONFIRMED
+        else:
+            effect = DcEffectStatus.NONE
+        return DcContinuationContext(
+            previous_turn_id=turn.turn_id,
+            previous_status=turn.status,
+            original_user_goal=turn.user_message,
+            public_agent_summary=turn.agent_summary,
+            public_agent_steps=steps[-12:],
+            completed_operations=completed[-20:],
+            active_or_unknown_operation=(
+                f"{marker.tool.value}({_format_args(marker.args)}) 状态={marker.status.value}" if marker else None
+            ),
+            last_snapshot_path=self._rel_artifact(self.snapshot_holder.latest_path),
+            last_page_path=self.last_page_path,
+            last_foreground_app=self.last_foreground_app,
+            last_progress_at=utc_now(),
+            effect_status=effect,
+            reconcile_required=unknown_effect is not None,
+            context_version=self._context_version,
+        )
+
+    def request_stop(self) -> bool:
+        """请求停止当前轮次：先置取消标记，再取消任务。
+
+        Returns:
+            True 表示确实取消了一个正在执行的轮次。
+        """
+        self.cancel_requested = True
+        self._emit(
+            DcEventType.TURN_CANCEL_REQUESTED,
+            "已请求停止当前轮次",
+            {"turn_id": self.active_turn_id, "requested_at": utc_now().isoformat()},
+        )
+        task = self._current_task
+        if task is not None and not task.done():
+            task.cancel()
+            return True
+        return False
+
+    async def resolve_attention(self, action: str) -> DcSessionView:
+        """处置未确认的设备副作用（Phase 4）。
+
+        ``reobserve`` 会重新采集截图/UI 层级并清除阻塞；其余动作只清除阻塞
+        （``confirm_effect``/``retry``/``terminate`` 由用户语义决定下一步）。
+        """
+        if action not in ("reobserve", "confirm_effect", "retry", "terminate"):
+            raise ValueError(f"unsupported attention action: {action}")
+        if action == "reobserve":
+            self._emit(DcEventType.CONTEXT_CAPTURE_STARTED, "正在重新观测设备", {"turn_id": None})
+            await self._capture_context()
+            self._emit(
+                DcEventType.CONTEXT_CAPTURE_FINISHED,
+                "设备重新观测完成",
+                {"turn_id": None, "page_path": self.last_page_path},
+            )
+        self.pending_attention = None
+        if self.continuation is not None:
+            self.continuation = self.continuation.model_copy(
+                update={"reconcile_required": False, "effect_status": DcEffectStatus.CONFIRMED}
+            )
+        self._emit(DcEventType.CONTEXT_CHECKPOINT, f"已处置未确认动作：{action}", {"turn_id": None})
+        self._schedule_checkpoint(force=True)
+        self.save_state()
+        return self.to_view()
 
     def _emit_from_provider(self, turn: DcTurnRecord, event_type: str, message: str, payload: dict[str, Any]) -> None:
         """Provider 执行期回调：附加 turn_id 后发射，并把步骤记入 turn。
@@ -522,7 +814,7 @@ class DcSession:
         self.save_state()
 
     def to_view(self) -> DcSessionView:
-        """返回公开投影。"""
+        """返回公开投影（含运行中的工具记录与连续性摘要）。"""
         return DcSessionView(
             session_id=self.session_id,
             device_id=self.device_id,
@@ -535,6 +827,8 @@ class DcSession:
             script=self.script,
             restored=self._restored,
             restored_context=self._restored_context,
+            active_turn_id=self.active_turn_id,
+            continuation=self.continuation,
         )
 
     # ------------------------------------------------------------------
@@ -557,6 +851,20 @@ class DcSession:
             latest_snapshot_path=self._rel_artifact(self.snapshot_holder.latest_path),
             history=history,
             history_kind="model_messages" if history else "none",
+            continuation=self._synced_continuation(),
+        )
+
+    def _synced_continuation(self) -> DcContinuationContext | None:
+        """把会话级实时状态同步进连续性摘要后再落盘，保证恢复后面板/提示一致。"""
+        if self.continuation is None:
+            return None
+        return self.continuation.model_copy(
+            update={
+                "last_snapshot_path": self._rel_artifact(self.snapshot_holder.latest_path),
+                "last_page_path": self.last_page_path,
+                "last_foreground_app": self.last_foreground_app,
+                "context_version": self._context_version,
+            }
         )
 
     def _history_payload(self) -> list[Any]:
@@ -584,11 +892,28 @@ class DcSession:
         self.turns = list(snapshot.turns)
         self.recorder.invocations = list(snapshot.invocations)
         self.script = snapshot.script
+        self.continuation = snapshot.continuation
+        self._context_version = snapshot.continuation.context_version if snapshot.continuation else 0
         self.history = self._restore_history(snapshot)
         self._restored = True
+        # 恢复的最后一帧截图只是历史证据，不代表当前设备状态：恢复后必须先重新观测
+        self.last_page_path = snapshot.continuation.last_page_path if snapshot.continuation else None
+        self.last_foreground_app = snapshot.continuation.last_foreground_app if snapshot.continuation else None
+        self.pending_attention = self._restore_unresolved(snapshot)
+        if self.continuation is not None and self.pending_attention is not None:
+            self.continuation = self.continuation.model_copy(update={"reconcile_required": True})
         # 恢复最近一帧截图：相对路径 → 会话目录内的绝对路径（供 to_view 复用）
         self.snapshot_holder.latest = None
         self.snapshot_holder.latest_path = self._restore_snapshot_path(snapshot.latest_snapshot_path)
+
+    def _restore_unresolved(self, snapshot: DcSessionSnapshot) -> DcToolInvocation | None:
+        """恢复时把「副作用未知」的调用重新列为待对账，禁止自动重放。"""
+        for invocation in reversed(snapshot.invocations):
+            if invocation.effect_status == DcEffectStatus.UNKNOWN and invocation.status != DcToolStatus.RUNNING:
+                return invocation
+            if invocation.status == DcToolStatus.RUNNING:
+                return invocation
+        return None
 
     def _restore_snapshot_path(self, relative_path: str | None) -> Path | None:
         if not relative_path or self.store is None:
@@ -634,23 +959,44 @@ class DcSession:
         return "工具调用记录：\n" + "\n".join(lines)
 
     async def close(self) -> None:
-        """关闭会话：释放设备、落盘快照、发射事件。"""
+        """关闭会话：有界等待当前轮次收尾、释放设备、落盘快照、发射事件。
+
+        等待超时后把仍在运行的轮次明确标为 ``interrupted``，不伪装成正常结束。
+        """
         if self.status == "closed":
             return
         self.status = "closed"
-        if self._current_task and not self._current_task.done():
-            self._current_task.cancel()
+        task = self._current_task
+        if task is not None and not task.done():
+            self.cancel_requested = True
+            task.cancel()
             try:
-                await self._current_task
-            except asyncio.CancelledError, Exception:
-                pass
+                await asyncio.wait_for(asyncio.shield(task), timeout=self.settings.dc_close_timeout)
+            except TimeoutError, asyncio.CancelledError, Exception:  # noqa: BLE001 - 关闭路径不抛出
+                self._mark_interrupted()
         try:
             await asyncio.to_thread(self.device.close)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 设备已断开时忽略
             pass
         # 保留磁盘快照：关闭后仍可从历史会话列表选择并恢复
         self.save_state()
         self._emit(DcEventType.SESSION_CLOSED, "DC 会话已关闭", {"session_id": self.session_id})
+
+    def _mark_interrupted(self) -> None:
+        """把仍在运行的轮次标为 interrupted 并记录连续性摘要。"""
+        turn = next(
+            (item for item in reversed(self.turns) if item.status == DcTurnStatus.RUNNING),
+            None,
+        )
+        if turn is None:
+            return
+        turn.error = "会话关闭时轮次未在等待时间内收尾"
+        self._finalize_turn(turn, DcTurnStatus.INTERRUPTED)
+        self._emit(
+            DcEventType.TURN_INTERRUPTED,
+            "轮次被中断（会话关闭）",
+            {"turn_id": turn.turn_id, "reason": "interrupted"},
+        )
 
 
 # ---------------------------------------------------------------------------

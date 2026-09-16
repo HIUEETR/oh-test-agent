@@ -14,6 +14,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import threading
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,8 @@ class DcSessionStore:
     def __init__(self, runtime_dir: Path, default_tier: DcToolTier = DcToolTier.L2):
         self.runtime_dir = Path(runtime_dir)
         self.default_tier = default_tier
+        # 后台 checkpoint 线程与会话收尾可能并发保存同一会话，串行化写入
+        self._write_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 路径
@@ -63,15 +67,24 @@ class DcSessionStore:
     # ------------------------------------------------------------------
 
     def save(self, snapshot: DcSessionSnapshot) -> Path:
-        """原子写入快照；命令输出超限时截断后再落盘。"""
+        """原子写入快照；命令输出超限时截断后再落盘。
+
+        临时文件名带随机后缀：后台 checkpoint 线程与会话收尾可能并发保存，
+        共用固定的 ``.tmp`` 名字会互相 rename 失败（Windows 上表现为 WinError 32）。
+        """
         path = self.path_for(snapshot.session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         trimmed = snapshot.model_copy(
             update={"invocations": [self._trim_invocation(inv) for inv in snapshot.invocations]}
         )
-        temporary = path.with_name(f"{self.FILE_NAME}.tmp")
-        temporary.write_text(trimmed.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
+        temporary = path.with_name(f"{self.FILE_NAME}.{uuid.uuid4().hex[:8]}.tmp")
+        with self._write_lock:
+            try:
+                temporary.write_text(trimmed.model_dump_json(indent=2) + "\n", encoding="utf-8")
+                temporary.replace(path)
+            except OSError:
+                temporary.unlink(missing_ok=True)
+                raise
         return path
 
     def _trim_invocation(self, invocation: DcToolInvocation) -> DcToolInvocation:
