@@ -17,14 +17,19 @@ from typing import Any, Literal
 
 from ..config import Settings
 from ..devices.harmony import HarmonyDeviceAdapter
-from ..models import ScreenSnapshot, utc_now
+from ..discovery import ProfileVerifier
+from ..models import ResolvedTarget, ScreenSnapshot, StableLocator, utc_now
+from ..profiles import ProfileRegistry, ProfileRegistryError
+from ..runner import HypiumRunner
 from ..storage.artifacts import ArtifactStore
+from .distill import DcProfileDistiller
 from .generator import DcHypiumGenerator, _format_args
 from .hdc import DcHdcExecutor
 from .models import (
     DcChatRequest,
     DcChatResponse,
     DcContinuationContext,
+    DcDistillResult,
     DcEffectStatus,
     DcEvent,
     DcEventType,
@@ -197,6 +202,7 @@ class DcSession:
         artifacts: ArtifactStore,
         provider: DcChatProvider | MockDcChatProvider,
         store: DcSessionStore | None = None,
+        profile_registry: ProfileRegistry | None = None,
     ):
         self.session_id = session_id
         self.device_id = device_id
@@ -205,6 +211,8 @@ class DcSession:
         self.artifacts = artifacts
         self.provider = provider
         self.store = store
+        # Profile 资产访问：断言工具读稳定定位器，蒸馏写 Profile（2026-09-17 重构）。
+        self.profile_registry = profile_registry
         self.created_at = utc_now()
         self.last_active_at = utc_now()
 
@@ -473,6 +481,7 @@ class DcSession:
                 ui_tree_top_k=self.settings.dc_ui_tree_top_k,
                 action_timeout=self.settings.agent_action_timeout,
                 progress_interval=self.settings.dc_progress_interval,
+                stable_locators=self._linked_stable_locators(),
             )
 
             # 构造工具列表
@@ -842,13 +851,37 @@ class DcSession:
 
         return jpeg_bytes, ui_tree_digest
 
+    @property
+    def snapshots(self) -> list[ScreenSnapshot]:
+        """会话内采集过的帧（有界历史）；DC 蒸馏据此重建可回放核心流。"""
+        return self.snapshot_holder.history
+
+    def _linked_stable_locators(self) -> list[StableLocator]:
+        """返回当前会话关联 Profile 的稳定定位器；无 registry/Profile 时为空列表。
+
+        关联键是最近一次 ``foreground_app`` 观测到的 bundle name：会话尚未观测前台
+        应用时无从判断关联 Profile，此时断言语义退化为模糊文本匹配（与 Live Mode
+        在没有稳定定位器时的行为一致）。
+        """
+        registry = self.profile_registry
+        bundle_name = self.last_foreground_app
+        if registry is None or not bundle_name:
+            return []
+        try:
+            profile = registry.get_any(bundle_name=bundle_name)
+        except ProfileRegistryError:
+            return []
+        if profile is None:
+            return []
+        return list(profile.stable_locator_inventory)
+
     def generate_script(
         self,
         bundle_name: str = "com.example.app",
         main_ability: str = "EntryAbility",
     ) -> DcScriptArtifact:
         """从录制的操作生成 Hypium 脚本。"""
-        generator = DcHypiumGenerator(self.artifacts)
+        generator = DcHypiumGenerator(self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds)
         snapshots = [self.snapshot_holder.latest] if self.snapshot_holder.latest else []
         self.script = generator.generate(
             session_id=self.session_id,
@@ -865,6 +898,53 @@ class DcSession:
         )
         self.save_state()
         return self.script
+
+    async def distill_profile(self, bundle_name: str, main_ability: str) -> DcDistillResult:
+        """从当前会话蒸馏 Profile 资产（1 轮设备验证 + 1 次 Hypium 回放）。
+
+        与用户轮次互斥（``self.lock``）：蒸馏要驱动设备，不能与正在执行的轮次并发。
+        任何失败都会发射 ``PROFILE_DISTILL_FAILED`` 并向上抛 ``DcError``。
+        """
+        self._emit(
+            DcEventType.PROFILE_DISTILL_STARTED,
+            "开始蒸馏 Profile",
+            {"session_id": self.session_id, "bundle_name": bundle_name, "main_ability": main_ability},
+        )
+        try:
+            async with self.lock:
+                distiller = DcProfileDistiller(
+                    self.artifacts,
+                    self.profile_registry,
+                    self.settings,
+                    verifier_factory=self._profile_verifier,
+                    runner=HypiumRunner(self.settings.resolved_runtime_home),
+                )
+                result = await distiller.distill(self, bundle_name, main_ability)
+        except Exception as exc:
+            self._emit(
+                DcEventType.PROFILE_DISTILL_FAILED,
+                f"Profile 蒸馏失败：{exc}",
+                {"session_id": self.session_id, "error": str(exc), "error_type": type(exc).__name__},
+            )
+            raise
+        self._emit(
+            DcEventType.PROFILE_DISTILL_FINISHED,
+            f"Profile 蒸馏完成：{result.profile_id}（{result.status}）",
+            result.model_dump(mode="json"),
+        )
+        self.save_state()
+        return result
+
+    def _profile_verifier(self, target: ResolvedTarget, output_dir: Path, run_id: str) -> ProfileVerifier:
+        """构造绑定本会话设备的 ProfileVerifier（轮次取 Settings）。"""
+        return ProfileVerifier(
+            self.device,
+            target,
+            output_dir,
+            run_id,
+            rounds=self.settings.profile_verification_rounds,
+            should_stop=lambda: self.cancel_requested,
+        )
 
     def change_tier(self, tier: DcToolTier) -> None:
         """变更工具层级（下轮生效）。"""
@@ -1086,6 +1166,12 @@ class DcSessionManager:
         self.artifacts = artifacts
         self.sessions: dict[str, DcSession] = {}
         self.store = DcSessionStore(artifacts.runtime_dir, DcToolTier(settings.dc_default_tier))
+        # Profile 资产访问：断言工具读取稳定定位器；DC 蒸馏写入 Profile（2026-09-17 重构）。
+        self.profile_registry = ProfileRegistry(
+            settings.resolved_profiles_dir,
+            promotion_replay_attempts=settings.hypium_replay_attempts,
+            min_evidence_rounds=settings.profile_verification_rounds,
+        )
         self._device_locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task | None = None
 
@@ -1137,6 +1223,7 @@ class DcSessionManager:
             artifacts=self.artifacts,
             provider=provider or create_dc_provider(self.settings),
             store=self.store,
+            profile_registry=self.profile_registry,
         )
         session.device_lock = self.device_turn_lock(device_id)
         return session

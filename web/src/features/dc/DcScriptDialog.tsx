@@ -74,7 +74,11 @@ export function DcScriptDialog() {
             >
               <div className="dc-script-dialog-header">
                 <strong>生成的 Hypium 脚本</strong>
-                <small>诊断回放专用 · replay_eligible=False</small>
+                <small>
+                  {script.replay_eligible
+                    ? `可作为验收脚本执行 · 断言 ${script.explicit_assertions ?? 0} 条`
+                    : "诊断回放专用 · 未包含断言"}
+                </small>
                 <button type="button" className="secondary compact" onClick={closeDialog} aria-label="关闭">
                   <X size={14} />
                 </button>

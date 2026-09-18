@@ -1,7 +1,7 @@
 // 深链与流水线推导的单元测试。
 
 import { describe, expect, it } from "vitest";
-import { readDeepLink, writeDeepLink, TAB_KEYS } from "./deep-links";
+import { readDeepLink, writeDeepLink, LEGACY_TAB_ALIASES, TAB_KEYS } from "./deep-links";
 import { derivePipeline } from "../utils/pipeline";
 import type { RunEvent, RunTrace } from "../api/types";
 
@@ -11,25 +11,32 @@ describe("deep-links", () => {
     expect(readDeepLink()).toEqual({ runId: "run-9", tab: "graph" });
   });
 
-  it("非法 tab 回退为 live；缺失 run_id 为空串", () => {
+  it("非法 tab 回退为 session；缺失 run_id 为空串", () => {
     window.history.replaceState(null, "", "/?tab=hacker");
     const { runId, tab } = readDeepLink();
-    expect(tab).toBe("live");
+    expect(tab).toBe("session");
     expect(runId).toBe("");
   });
 
-  it("全部旧版 tab 值保持兼容", () => {
-    for (const legacy of ["live", "graph", "script", "profiles", "report"] as const) {
+  it("顶层 Tab 收敛为 5 个（2026-09-17 重构）", () => {
+    expect([...TAB_KEYS]).toEqual(["session", "graph", "script", "profiles", "runs"]);
+  });
+
+  it("全部旧版 tab 值映射到新的 5 Tab（深链不失效）", () => {
+    for (const [legacy, expected] of Object.entries(LEGACY_TAB_ALIASES)) {
       window.history.replaceState(null, "", `/?tab=${legacy}`);
-      expect(readDeepLink().tab).toBe(legacy);
+      expect(readDeepLink().tab).toBe(expected);
     }
-    expect(TAB_KEYS).toContain("advisor");
+    for (const current of ["session", "graph", "script", "profiles", "runs"] as const) {
+      window.history.replaceState(null, "", `/?tab=${current}`);
+      expect(readDeepLink().tab).toBe(current);
+    }
   });
 
   it("writeDeepLink 把状态同步回地址栏", () => {
     window.history.replaceState(null, "", "/");
-    writeDeepLink("advisor", "run-3");
-    expect(window.location.search).toContain("tab=advisor");
+    writeDeepLink("session", "run-3");
+    expect(window.location.search).toContain("tab=session");
     expect(window.location.search).toContain("run_id=run-3");
   });
 });
@@ -40,7 +47,7 @@ describe("derivePipeline", () => {
   }
   function trace(overrides: Partial<RunTrace>): RunTrace {
     return {
-      run_id: "r", target_app_id: "t", task: "", state: "discovering", mode: "exploration",
+      run_id: "r", target_app_id: "t", task: "", state: "discovering", mode: "regression",
       model_used: "m", model_mock: false, plan: [], snapshots: [], actions: [], assertions: [],
       graph: { nodes: [], edges: [] }, replays: [], ...overrides,
     };
@@ -69,7 +76,8 @@ describe("derivePipeline", () => {
       event("profile_verification_round_finished", 6), event("script_generated", 7),
       event("hypium_replay_started", 8), event("hypium_replay_finished", 9),
     ];
-    const phases = derivePipeline(events, trace({}), false);
+    // 3 次门禁（HYPIUM_REPLAY_ATTEMPTS=3）：只完成 1 次时回放阶段仍为 active。
+    const phases = derivePipeline(events, trace({ replay_total: 3 }), false);
     const byKey = Object.fromEntries(phases.map((phase) => [phase.key, phase.state]));
     expect(byKey.explore).toBe("done");
     expect(byKey.verify).toBe("done");
@@ -78,15 +86,22 @@ describe("derivePipeline", () => {
     expect(byKey.replay).toBe("active");
   });
 
-  it("三次准入回放完成后回放阶段完成", () => {
+  it("单次内联准入回放完成即回放阶段完成（默认门禁 HYPIUM_REPLAY_ATTEMPTS=1）", () => {
     const events = [
       event("script_generated", 1), event("hypium_replay_started", 2), event("hypium_replay_finished", 3),
-      event("hypium_replay_started", 4), event("hypium_replay_finished", 5),
-      event("hypium_replay_started", 6), event("hypium_replay_finished", 7),
     ];
     const phases = derivePipeline(events, trace({}), false);
     const byKey = Object.fromEntries(phases.map((phase) => [phase.key, phase.state]));
     expect(byKey.replay).toBe("done");
+  });
+
+  it("三次回放门禁按 trace.replay_total 判定完成（不再硬编码 3）", () => {
+    const events = [
+      event("script_generated", 1), event("hypium_replay_started", 2), event("hypium_replay_finished", 3),
+    ];
+    const phases = derivePipeline(events, trace({ replay_total: 3 }), false);
+    const byKey = Object.fromEntries(phases.map((phase) => [phase.key, phase.state]));
+    expect(byKey.replay).toBe("active");
   });
 
   it("脚本与回放完成后报告就绪", () => {

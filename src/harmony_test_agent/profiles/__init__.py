@@ -2,6 +2,7 @@
 
 from .compat import load_compatible_profile, migrate_legacy_profile
 from .registry import (
+    MAX_REPLAY_EVIDENCE,
     ProfileLockedError,
     ProfileNotFoundError,
     ProfileRegistry,
@@ -10,6 +11,7 @@ from .registry import (
 )
 
 __all__ = [
+    "MAX_REPLAY_EVIDENCE",
     "ProfileLockedError",
     "ProfileNotFoundError",
     "ProfileRegistry",

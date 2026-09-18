@@ -123,9 +123,8 @@ stopped_by_user
 
 ### 6.1 结构化输出
 
-- Planning 和 Vision 使用 Pydantic AI 的 Pydantic 输出模型。
-- Tool Decision 使用 `PromptedOutput(ToolDecision)`，降低不同 OpenAI-compatible 端点对原生 tool choice 的兼容差异。
-- `AGENT_DISABLE_THINKING=true` 时增加端点兼容参数，解决 thinking 与结构化工具输出冲突。
+- Planning、Vision、Tool Decision 与探索顾问统一使用 `PromptedOutput`（`OpenAICompatibleProvider._structured_output`），不注册工具、不发送 `tool_choice`，规避 thinking 端点对强制 tool choice 的拒绝。
+- `AGENT_DISABLE_THINKING=true` 时追加 `extra_body.thinking.type=disabled`；该字段只对 DeepSeek 官方端点有效，对 OpenAI 兼容自建端点会被忽略，因此不能作为 `tool_choice` 冲突的兜底。
 - 规划、截图分析、工具决策统一使用 `AGENT_MODEL_TIMEOUT`；HDC 动作使用独立的 `AGENT_ACTION_TIMEOUT`。
 
 ### 6.2 计划对齐
@@ -334,3 +333,50 @@ SSE 从 SQLite 按事件 ID 增量读取，终止状态且没有新事件后关�
 无 verified Profile 且探索关闭、或探索/验证失败（候选保存前的阶段）时，运行降级为**实时模式**（`trace.live_mode` + `profile_status_at_start=absent`）：跳过 Profile 引导，用 `LaunchSpec` + 无定位器辅助的 `ToolExecutor` 和 `PlanningContext.from_resolved` 直接执行任务，强制关闭脚本生成/回放；候选已保存后的 Hypium 回放门控失败与晋级失败仍按原语义失败。`bootstrap_only` 运行不降级，失败即失败。
 
 启动时若命中 verified Profile，先做**快速复验**：`core_flows.pages` 与验证定位器使用同一哈希空间（结构身份 `structural_identity`）建立页面→定位器映射并逐页回放路径；旧格式 Profile（发现期整树签名）映射失败时回退入口页强定位器检查。复验失败**不再自动失效**——保留既有 verified 文件，仅在 provenance 记录 `quick_verification` 失败证据并转入完整探索重新验证，新探索晋级时原子覆盖旧文件；`registry.invalidate` 保留为控制台手动操作。
+
+## 16. 2026-09-17 资产流水线重构
+
+### 16.1 架构收敛
+
+系统收敛为「DC 会话面 + Asset Pipeline 资产流水线」两层：
+
+- **DC 会话面**是唯一交互入口：26 个 DC 工具（含 `assert_visible` / `assert_not_visible` / `assert_text` 3 个断言工具）、push-based SSE、可恢复会话、脚本生成与 Profile 蒸馏。用户在同一段会话里完成探索、复现、断言录制与脚本产出。
+- **Asset Pipeline 资产流水线**是唯一 Profile 晋级通道：1 轮设备验证 + 1 次 Hypium 回放门禁（主流程内联），剩余 2 次由 `POST /api/profiles/{id}/replay` 异步追加。锚定 Profile 生命周期与资产沉淀，不再依赖 CLI 侧的探索子命令。
+
+两条链路共用 `profiles/registry.py` 的 draft → candidate → verified 状态机与准入门禁；准入门槛本身不变（3 个稳定定位器、3 个页面、2 个应用级断言、核心流 ≥3 页、`min_interaction_kinds` 类交互）。
+
+### 16.2 精简项
+
+| 精简项 | 重构前 | 重构后 | 回滚方式 |
+| --- | --- | --- | --- |
+| RunMode 枚举 | `regression` / `exploration` / `stability` / `reproduction` 四值可用 | 只有 `regression` 是有效值；其余三值仅用于反序列化历史 `trace.json`，解析时静默降级为 `regression`（`models.py` 的 `field_validator(mode="before")`） | 无（历史读取兼容内建） |
+| Profile 验证轮次 | 3 轮独立启动验证 | 1 轮（`Settings.profile_verification_rounds`，`ProfileVerifier(rounds=N)` / `StabilityAnalyzer(required_rounds=N)` 参数化） | `PROFILE_VERIFICATION_ROUNDS=3` |
+| Hypium 回放次数 | 3 次全部内联执行 | 1 次内联（`Settings.hypium_replay_attempts`）+ 2 次异步追加 | `HYPIUM_REPLAY_ATTEMPTS=3` |
+| CLI `discover` 子命令 | `python main.py discover ...` 可用 | 子命令删除，调用直接报错 | 无（`bootstrap_only` 字段与 `/api/profiles/{id}/verify` 端点保留） |
+| 前端运行模式下拉 | 启动器提供运行模式下拉，CLI `--mode` 接受四值 | 下拉删除，改为固定徽章「回归测试」；CLI `--mode` 只剩 `{regression}` | 无 |
+| 前端 Tab | 8 个 Tab | 5 个 Tab（会话 / 页面关系图 / 脚本与回放 / Profile 资产 / 历史运行） | 旧深链 tab 值兼容映射（live / advisor / dc → session，report → script），见 `web/src/app/deep-links.ts` |
+
+### 16.3 保留项
+
+- `bootstrap_only` 字段与 orchestrator 的 3 处分支保留，语义不变。
+- `discovery/` 模块（explorer / advisor / stability / verification）保留：不再通过 CLI 暴露，只被 `dc/distill.py`、`agents/orchestrator.py` 和 `POST /api/profiles/{id}/verify` 消费。
+- Live Mode 的四个前端组件保留，作为「会话」Tab 内的「资产流水线降级」子视图。
+- `profile_verification_started` / `profile_verification_round_started` / `profile_verification_round_finished` 事件保留，验证阶段仍逐轮推送。
+
+### 16.4 比赛硬性要求映射
+
+| 命题要求 | 新架构承载方式 |
+| --- | --- |
+| 脚本含明确步骤 / 断言 / 检查点 | DC 断言工具（`assert_visible` / `assert_not_visible` / `assert_text`，渲染为 Hypium `driver.check_component_exist(...)`）+ Hypium 检查点渲染 + Live 兜底断言 |
+| 至少 2 类测试场景 | 资产流水线（回归）+ DC 会话历史（探索 / 问题复现）+ 脚本目录（多场景沉淀）+ 手动追加回放（稳定性） |
+| 至少 3 个页面 / 核心流程 | registry `_validate_admission_assets` 保留 `candidate_pages >= 3` 与核心流 `pages >= 3`；DC 蒸馏前校验 `len(page_paths) >= 3` |
+| 用例沉淀与复用 | Profile 生命周期 draft / candidate / verified / history / locked + DC 蒸馏新路径 |
+| 页面状态图 | `graph/page_graph.py` + 前端「页面关系图」Tab |
+| 3 次连续成功 | 主流程内联 1 次 + `POST /api/profiles/{id}/replay` 异步追加 2 次 |
+
+### 16.5 新增端点与事件
+
+- `POST /api/dc/sessions/{session_id}/profile/distill`：请求体 `{"bundle_name": ..., "main_ability": ...}`，响应 `DcDistillResult{profile_id, status, pages_covered, stable_locators, assertions, replay_run_id, replay_passed, warnings}`。前置条件：会话覆盖 ≥3 个不同 `page_path`，且 bundle / ability 非占位值（否则 422）；无录制操作 → 409。流程：纯 CPU 提取（<1s）→ 1 轮设备验证 → 1 次 Hypium 回放 → promote。前端 DC 面板提供「蒸馏为 Profile」按钮。
+- `POST /api/profiles/{profile_id}/replay`：请求体 `{"attempts": 2}`（1—3 的整数），异步追加回放证据。candidate 累计满门禁次数且全部通过后自动晋级 verified；已 verified 的 Profile 只追加审计证据、状态与门禁资产不变；锁定 / draft / invalid 一律拒绝（409 / 422）。Profile 卡片显示「已记录回放数/3」进度条。
+- DC 蒸馏 SSE 事件：`profile_distill_started` / `profile_distill_finished` / `profile_distill_failed`。
+- 26 个 DC 工具（原 23 个 + 3 个断言工具）由 `dc/tools.py` 定义，`dc/generator.py` 负责 Hypium 渲染。`DcScriptArtifact.replay_eligible` 改为条件判定（`explicit_assertions >= 1` 且 bundle ≠ `com.example.app` 且 main_ability ≠ `EntryAbility` 且 `included_count > 0`），`purpose` 相应为 `acceptance` / `dc_recording`。

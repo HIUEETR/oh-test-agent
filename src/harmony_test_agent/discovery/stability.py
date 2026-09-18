@@ -1,4 +1,13 @@
-"""Cross-restart stability analysis for locators and application assertions."""
+"""Cross-restart stability analysis for locators and application assertions.
+
+INTERNAL CAPABILITY (2026-09-17 重构后): 不再通过 CLI/API/Web 直接暴露。
+
+消费方：
+- agents/orchestrator.py（经 discovery/verification.py 内部使用）
+- dc/distill.py::DcProfileDistiller（DC 会话蒸馏 Profile 时复用稳定性分析）
+
+禁止从 cli.py 或 web/ 反向依赖本模块。
+"""
 
 from __future__ import annotations
 
@@ -9,6 +18,17 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from ..models import LocatorKind, ScreenSnapshot, UIElement
+
+# 显式导出（2026-09-17 重构 §8.7）：verification 与 dc/distill 消费的公开能力。
+__all__ = [
+    "AssertionObservation",
+    "LocatorObservation",
+    "StabilityAnalyzer",
+    "StabilityLevel",
+    "StabilityReport",
+    "StableAssertionEvidence",
+    "StableLocatorEvidence",
+]
 
 
 class StabilityLevel(StrEnum):
@@ -74,9 +94,17 @@ class StabilityReport(BaseModel):
 
 
 class StabilityAnalyzer:
-    """Accept only unique locator and assertion observations from three rounds."""
+    """Accept only unique locator and assertion observations from N rounds.
 
-    required_rounds: int = 3
+    2026-09-17 重构：``required_rounds`` 从类常量改为构造参数。资产流水线精简后
+    Profile 只做 1 轮设备验证，因此默认值仍为 3（向后兼容），调用方传入
+    ``settings.profile_verification_rounds``。
+    ``_reject_reason`` 与 ``analyze`` 都读取同一实例属性：只改轮次生成方而不改
+    本类会导致所有定位器被拒绝（``promotable_locator_count == 0``）。
+    """
+
+    def __init__(self, required_rounds: int = 3) -> None:
+        self.required_rounds = max(int(required_rounds), 1)
 
     def locator_observations(
         self, snapshot: ScreenSnapshot, round_number: int, page_signature: str

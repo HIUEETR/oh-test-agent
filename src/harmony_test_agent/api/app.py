@@ -24,6 +24,7 @@ from ..generation import HypiumGenerator
 from ..models import (
     TERMINAL_STATES,
     CommandResult,
+    GeneratedArtifact,
     ProfileStatus,
     ReplayError,
     ReplayResult,
@@ -34,6 +35,7 @@ from ..models import (
     utc_now,
 )
 from ..profiles import (
+    MAX_REPLAY_EVIDENCE,
     ProfileLockedError,
     ProfileNotFoundError,
     ProfileRegistryError,
@@ -57,6 +59,9 @@ class RunManager:
         self.tasks: dict[str, asyncio.Task] = {}
         self.replay_tasks: dict[str, asyncio.Task] = {}
         self.replay_locks: dict[str, asyncio.Lock] = {}
+        # 手动追加回放（POST /api/profiles/{id}/replay）的 per-Profile 锁：
+        # 避免同一 Profile 并发追加导致回放证据乱序或重复。
+        self.profile_replay_locks: dict[str, asyncio.Lock] = {}
         self.orchestrators: dict[str, AgentOrchestrator] = {}
         self.profile_registry = _build_optional_service(
             (
@@ -68,6 +73,10 @@ class RunManager:
             artifacts=self.artifacts,
             repository=self.repository,
             profile_dir=_profile_dir(settings),
+            # 门禁参数必须跟随本实例的 Settings，而不是进程级 get_settings() 缓存：
+            # 否则 API 与编排器会用不同的轮次/次数判定同一份 Profile。
+            promotion_replay_attempts=settings.hypium_replay_attempts,
+            min_evidence_rounds=settings.profile_verification_rounds,
         )
         self.target_resolver = None
 
@@ -403,6 +412,100 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"run_id": manager.start(request), "state": RunState.CREATED, "profile_id": profile_id}
 
+    @app.post("/api/profiles/{profile_id}/replay")
+    async def replay_profile(profile_id: str, payload: Annotated[dict[str, Any] | None, Body()] = None):
+        """向 candidate/verified Profile 异步追加 Hypium 回放证据。
+
+        比赛「3 次连续成功」要求：主流程内联 1 次（``HYPIUM_REPLAY_ATTEMPTS``），
+        剩余 2 次由用户/CI 通过本端点在设备空闲时追加，主流程因此不被阻塞。
+
+        candidate 累计满门禁次数且全部通过后自动晋级 verified；已 verified 的 Profile
+        只追加审计证据，状态与门禁资产不变。锁定或 draft/invalid 的 Profile 一律拒绝。
+        """
+        payload = payload or {}
+        attempts = payload.get("attempts", 1)
+        if not isinstance(attempts, int) or isinstance(attempts, bool) or not 1 <= attempts <= 3:
+            raise HTTPException(status_code=422, detail="attempts must be an integer between 1 and 3")
+        if not manager.profile_registry:
+            raise HTTPException(status_code=501, detail="Profile registry is unavailable")
+
+        target_app_id, _ = _split_profile_identifier(profile_id)
+        try:
+            profile = manager.profile_registry.get_any(target_app_id=target_app_id)
+        except (ProfileNotFoundError, KeyError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ProfileTransitionError, ProfileRegistryError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if profile is None:
+            raise HTTPException(status_code=404, detail=f"profile {profile_id} not found")
+
+        script_path = profile.provenance.generated_script_path
+        if not script_path or not Path(script_path).is_file():
+            raise HTTPException(
+                status_code=409,
+                detail="no generated Hypium script recorded for this Profile; run the pipeline first",
+            )
+
+        lock = manager.profile_replay_locks.setdefault(target_app_id, asyncio.Lock())
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="replay is already running for this Profile")
+
+        runner = HypiumRunner(manager.settings.resolved_runtime_home)
+        generated = GeneratedArtifact(
+            python_path=Path(script_path),
+            config_path=Path(script_path).with_suffix(".json"),
+            metadata_path=Path(script_path).with_suffix(".json"),
+            purpose="acceptance",
+            replay_eligible=True,
+        )
+        results: list[dict[str, Any]] = []
+        async with lock:
+            for offset in range(attempts):
+                before = manager.profile_registry.get_any(target_app_id=target_app_id)
+                known_ids = list(before.provenance.hypium_replay_run_ids) if before is not None else []
+                try:
+                    replay = await asyncio.to_thread(runner.execute, generated, offset + 1)
+                except (OSError, ValueError) as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                try:
+                    # 证据 ID 由 registry 统一命名（{discovery_run_id}:profile-attempt-N）：
+                    # 只有该命名空间内的 ID 才能被 promote 接受，因此这里不自定义 run_id。
+                    updated = await asyncio.to_thread(
+                        manager.profile_registry.append_replay_evidence,
+                        target_app_id,
+                        passed=replay.passed,
+                        evidence_refs=replay.evidence_paths,
+                    )
+                except ProfileLockedError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                except (ProfileTransitionError, ProfileRegistryError) as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                except (ProfileNotFoundError, KeyError, FileNotFoundError) as exc:
+                    raise HTTPException(status_code=404, detail=str(exc)) from exc
+                recorded = [item for item in updated.provenance.hypium_replay_run_ids if item not in known_ids]
+                results.append(
+                    {
+                        "attempt": offset + 1,
+                        "run_id": recorded[-1] if recorded else None,
+                        "passed": replay.passed,
+                        "status": replay.status,
+                        "evidence_paths": list(replay.evidence_paths),
+                        "profile_status": updated.status.value,
+                        "total_replays": len(updated.provenance.hypium_replay_run_ids),
+                    }
+                )
+                if not replay.passed:
+                    break
+
+        final = manager.profile_registry.get_any(target_app_id=target_app_id)
+        return {
+            "profile_id": target_app_id,
+            "results": results,
+            "status": final.status.value if final is not None else None,
+            "total_replays": len(final.provenance.hypium_replay_run_ids) if final is not None else 0,
+            "max_replays": MAX_REPLAY_EVIDENCE,
+        }
+
     @app.post("/api/profiles/{profile_id}/lock")
     async def lock_profile(profile_id: str, payload: Annotated[dict[str, Any] | None, Body()] = None):
         payload = payload or {}
@@ -595,7 +698,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def generate(run_id: str):
         """仅使用不可变 RunTrace 重新生成，不读取当前磁盘 Profile。"""
         trace = _trace_or_404(manager, run_id)
-        trace.generated = await asyncio.to_thread(HypiumGenerator(manager.artifacts).generate, trace)
+        trace.generated = await asyncio.to_thread(
+            HypiumGenerator(
+                manager.artifacts, min_observed_rounds=manager.settings.profile_verification_rounds
+            ).generate,
+            trace,
+        )
         manager.repository.save_trace(trace)
         manager.artifacts.save_trace(trace)
         ReportBuilder(manager.artifacts).build(trace)
@@ -806,6 +914,11 @@ def _profile_summary(profile: Any, registry: Any | None = None) -> dict[str, Any
         "locked": bool(data.get("locked", False)),
         "quick_verification": evidence.get("quick_verification"),
         "history": history,
+        # 比赛「3 次连续成功」进度：主流程内联 1 次 + 异步追加 2 次。
+        "hypium_replay_run_ids": list(provenance.get("hypium_replay_run_ids") or []),
+        "max_replays": MAX_REPLAY_EVIDENCE,
+        "consecutive_replay_passes": evidence.get("consecutive_replay_passes"),
+        "generated_script_path": provenance.get("generated_script_path"),
     }
 
 

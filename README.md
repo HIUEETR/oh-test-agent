@@ -2,9 +2,9 @@
 
 一个面向 OpenHarmony/HarmonyOS 的受控多模态 UI 测试 Agent：把自然语言任务转换为结构化计划，使用 HDC 采集截图与 UI 层级，通过 LLM/VLM 每轮选择一个类型化工具，保存可复盘 Run Trace，并从已验证动作确定性生成和回放 Hypium Driver 用例。
 
-项目于 2026-09-09 完成真实模型、真实设备、Hypium 三次回放和 Web 全链路验收。详细安装与排错见 [docs/STARTUP_GUIDE.md](docs/STARTUP_GUIDE.md)。
+项目于 2026-09-09 完成真实模型、真实设备、Hypium 回放和 Web 全链路验收。详细安装与排错见 [docs/STARTUP_GUIDE.md](docs/STARTUP_GUIDE.md)。
 
-Web 控制台于 2026-09 完全重写（浅色玻璃拟态界面，旧版冻结在 `web-legacy/`）：实时展示大模型的规划、视觉理解、逐步决策与探索顾问对话留痕，配闭环流水线状态条、探索页面状态图、历史运行回看与 Profile 资产管理，详见 [web/README.md](web/README.md)。
+Web 控制台于 2026-09 完全重写（浅色玻璃拟态界面，旧版冻结在 `web-legacy/`）：实时展示大模型的规划、视觉理解、逐步决策与探索顾问对话留痕，配闭环流水线状态条、探索页面状态图、历史运行回看与 Profile 资产管理，收敛为 5 个 Tab（会话 / 页面关系图 / 脚本与回放 / Profile 资产 / 历史运行），详见 [web/README.md](web/README.md)。
 
 ## 核心原则
 
@@ -37,9 +37,9 @@ uv run main.py run --app "示例应用" --task "打开设置并验证版本信�
 uv run main.py run --bundle-name com.example.app --task "验证首页" --execute
 ```
 
-已有 `TARGET_PROFILE_PATH` 和 `--target-app` 继续作为兼容入口，并会输出弃用提示。Profile 验证要求三轮独立启动下至少 3 个可重复页面、`min_interaction_kinds`（默认 2，可配置至 3）类交互、3 个稳定定位器和 2 个应用级断言；随后三次 Hypium Driver 回放全部通过才自动晋级 `verified`。运行轨迹冻结目标与 Profile 快照，历史 Run 重新生成时不会读取后来变化的全局 Profile。
+已有 `TARGET_PROFILE_PATH` 和 `--target-app` 继续作为兼容入口，并会输出弃用提示。Profile 验证要求单轮设备验证下至少 3 个可重复页面、`min_interaction_kinds`（默认 2，可配置至 3）类交互、3 个稳定定位器和 2 个应用级断言；随后 1 次 Hypium Driver 回放通过即自动晋级 `verified`（剩余 2 次由用户/CI 通过 `POST /api/profiles/{id}/replay` 异步追加，累计 3 次连续成功）。运行轨迹冻结目标与 Profile 快照，历史 Run 重新生成时不会读取后来变化的全局 Profile。
 
-**实时模式（无 Profile 执行）**：不再强制"先有 verified Profile 才能执行任务"。没有可用 Profile 且探索关闭、或探索/验证失败时，运行自动降级为实时模式——每步现取截图决策继续执行任务，但不生成/回放 Hypium 脚本，前端显示"实时模式"徽章；`bootstrap_only` 显式生成 Profile 的运行仍会如实失败。
+**资产流水线降级（无 Profile 执行，内部字段 `trace.live_mode` 不变）**：不再强制"先有 verified Profile 才能执行任务"。没有可用 Profile 且探索关闭、或探索/验证失败时，运行自动降级为资产流水线降级路径——每步现取截图决策继续执行任务，但不生成/回放 Hypium 脚本，前端在「会话」Tab 的「资产流水线降级」子视图中展示；`bootstrap_only` 显式生成 Profile 的运行仍会如实失败。
 
 ## 已实现能力
 
@@ -50,7 +50,8 @@ uv run main.py run --bundle-name com.example.app --task "验证首页" --execute
 - Agent 状态机、安全白名单、模型/设备独立超时、有限重试、停止和失败即停。
 - 探索治理：结构身份去重、内容候选抑制、类型配额、back 优先恢复节奏与可配置准入门槛。
 - LLM 视觉探索顾问：连续会话逐页约束点击范围与次数，启发式兜底，事件流留痕。
-- 实时模式：无 Profile 直接执行任务（探索失败自动降级），不生成/回放 Hypium 脚本。
+- 资产流水线降级：无 Profile 直接执行任务（探索失败自动降级），不生成/回放 Hypium 脚本。
+- DC 会话 → 蒸馏 Profile：`POST /api/dc/sessions/{session_id}/profile/distill` 把覆盖 ≥3 个页面的 DC 会话经 1 轮设备验证 + 1 次 Hypium 回放蒸馏为 Profile；DC 工具由 23 个扩展到 26 个（新增 `assert_visible` / `assert_not_visible` / `assert_text` 断言工具）。
 - SQLite + JSON/PNG/日志/HTML 报告、SSE 事件流和页面关系图。
 - Hypium Python、JSON 与元数据生成；动态 key 前缀化；坐标降级显式告警。
 - FastAPI 后端与 React/Vite/TypeScript 控制台。
@@ -72,11 +73,7 @@ uv run main.py dev --install
 
 `pyproject.toml` 的 `[project.scripts]` 会在 `uv sync` 时生成 `.venv\Scripts\harmony-test-agent.exe`，它只是转发到 `harmony_test_agent.cli:main` 的 Windows 包装器。Windows 会锁定正在运行的 `.exe`，导致另一个 uv 同步进程无法替换它，因此源码检出环境推荐使用不会锁定包装器的 `uv run main.py ...`。
 
-在 `.env` 中填写模型、VLM、HDC 和设备配置。若兼容端点报 thinking/tool choice 冲突，设置：
-
-```dotenv
-AGENT_DISABLE_THINKING=true
-```
+在 `.env` 中填写模型、VLM、HDC 和设备配置。若兼容端点报 `Thinking mode does not support this tool_choice`，说明该端点的 thinking 模式拒绝强制 `tool_choice`：本项目所有结构化输出都已统一使用 `PromptedOutput`，请勿新增裸 `BaseModel` 的 `output_type`。`AGENT_DISABLE_THINKING=true` 只对 DeepSeek 官方端点有效，对 OpenAI 兼容自建端点会被忽略，不能用来规避该错误（详见 `docs/STARTUP_GUIDE.md` 5.2 节）。
 
 ### 2. 预检
 
@@ -128,7 +125,7 @@ dev         同时启动 FastAPI 与 Vite，可安装前端依赖并统一管理
 serve       只启动 FastAPI/SSE
 ```
 
-`dev` 支持 `--api-host`、`--api-port`、`--web-host`、`--web-port`、`--reload` 和 `--install`。运行模式枚举为 `regression`、`exploration`、`stability`、`reproduction`；当前完整验收链路是 `regression`。
+`dev` 支持 `--api-host`、`--api-port`、`--web-host`、`--web-port`、`--reload` 和 `--install`。运行模式固定为 `regression`（`exploration`、`stability`、`reproduction` 仅用于读取旧 `trace.json`）；当前完整验收链路是 `regression`。
 
 ## 架构
 
@@ -231,5 +228,5 @@ $env:RUN_LIVE_TESTS = '1'
 - Hypium Driver 模式已真实验证；DevEco Testing 测试工程模式仍为 `not_validated`。
 - 探索按"逻辑页身份"去重后，信息流抖动不再拆分页面；页面签名仍受 VLM 标题变化影响，仅作快照证据而非去重键。
 - 无稳定 key/id 的控件会降级为经过边界验证的坐标，并在代码、元数据和 Web 中持续告警。
-- 实时模式不产出 Hypium 脚本与回放证据；需要回归脚本时仍需先完成 Profile 引导。
+- 资产流水线降级不产出 Hypium 脚本与回放证据；需要回归脚本时仍需先完成 Profile 引导。
 - FastAPI 当前是本机开发服务，没有鉴权，不应直接暴露到不受信任网络。

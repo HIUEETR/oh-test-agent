@@ -144,6 +144,56 @@ class TestDcSSEEndpoint:
         assert response.status_code == 404
 
 
+class TestDcAssertionToolsExposed:
+    """Phase 3（2026-09-17）：断言工具必须进入 agent 可见的 L1 工具集。"""
+
+    def test_dc_tools_list_includes_assertions(self, client: TestClient) -> None:
+        response = client.get("/api/dc/tools", params={"tier": 1})
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        names = {tool["name"] for tool in body["tools"]}
+        assert {"assert_visible", "assert_not_visible", "assert_text"} <= names
+        assert body["assertion_tools"] == ["assert_not_visible", "assert_text", "assert_visible"]
+        # 断言是只读检查：不得标记设备副作用
+        assert all(not tool["side_effect"] for tool in body["tools"] if tool["name"].startswith("assert_"))
+
+    def test_dc_tools_list_defaults_to_all_tiers(self, client: TestClient) -> None:
+        response = client.get("/api/dc/tools")
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["tier"] == 5
+        assert body["total"] == 26
+        assert len(body["tools"]) == 26
+
+    def test_build_tools_returns_assertions(self) -> None:
+        from harmony_test_agent.dc.models import DcToolTier
+        from harmony_test_agent.dc.tools import build_tools
+
+        names = {tool.name for tool in build_tools(DcToolTier.L1)}
+
+        assert {"assert_visible", "assert_not_visible", "assert_text"} <= names
+
+    def test_default_dc_session_exposes_assertion_tools(self, client: TestClient) -> None:
+        """默认 tier（L2）会话同样能看到断言工具：L2 ⊇ L1。"""
+        from harmony_test_agent.dc.models import DcToolTier
+        from harmony_test_agent.dc.tools import build_tools
+
+        names = {tool.name for tool in build_tools(DcToolTier.L2)}
+
+        assert {"assert_visible", "assert_not_visible", "assert_text"} <= names
+
+    def test_assertion_tools_are_not_replay_omitted(self) -> None:
+        """断言工具必须可回放（不在 _NON_REPLAYABLE），否则脚本永远无法含检查点。"""
+        from harmony_test_agent.dc.generator import _NON_REPLAYABLE, _REPLAYABLE_MAP
+        from harmony_test_agent.dc.models import DcToolName
+
+        for name in (DcToolName.ASSERT_VISIBLE, DcToolName.ASSERT_NOT_VISIBLE, DcToolName.ASSERT_TEXT):
+            assert name in _REPLAYABLE_MAP
+            assert name not in _NON_REPLAYABLE
+
+
 class TestDcArtifactEndpoint:
     """产物下载端点。"""
 

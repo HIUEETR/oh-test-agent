@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # 资产流水线精简 Flag（2026-09-17 重构）
+    # ------------------------------------------------------------------
+    profile_verification_rounds: int = Field(default=1, ge=1, le=3)
+    """Profile 设备验证轮次；默认 1 轮，可通过 PROFILE_VERIFICATION_ROUNDS=3 恢复旧行为。"""
+
+    hypium_replay_attempts: int = Field(default=1, ge=1, le=3)
+    """主流程内联 Hypium 回放次数；默认 1 次，剩余由 POST /api/profiles/{id}/replay 异步追加。"""
+
+    enable_legacy_run_modes: bool = False
+    """是否允许 RunMode 使用 exploration/stability/reproduction；默认关闭，历史 trace 读取时静默降级为 regression。"""
+
+    # ------------------------------------------------------------------
     # 直流模式（DC Mode）配置
     # ------------------------------------------------------------------
     dc_max_sessions: int = Field(default=8, ge=1, le=64)

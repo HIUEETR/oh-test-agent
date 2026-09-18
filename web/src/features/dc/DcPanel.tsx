@@ -9,6 +9,7 @@ import { DcChat } from "./DcChat";
 import { DcScreen } from "./DcScreen";
 import { DcOperationLog } from "./DcOperationLog";
 import { DcScriptDialog } from "./DcScriptDialog";
+import { DcDistillButton } from "./DcDistillButton";
 import { DcTierPicker } from "./DcTierPicker";
 import { Badge, StatusDot } from "../../components/ui/primitives";
 import type { DcSessionSummary } from "../../api/dc-types";
@@ -134,6 +135,7 @@ export function DcPanel() {
           <DcTierPicker />
           <DcOperationLog />
           <DcScriptDialog />
+          <DcDistillButton />
         </div>
       </div>
     </div>

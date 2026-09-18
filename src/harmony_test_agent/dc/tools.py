@@ -14,7 +14,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -23,8 +23,9 @@ from pydantic_ai import RunContext, Tool
 
 from ..devices.base import DeviceError
 from ..devices.harmony import HarmonyDeviceAdapter
-from ..models import CommandResult, ScreenSnapshot, utc_now
+from ..models import CommandResult, ScreenSnapshot, StableLocator, ToolName, utc_now
 from ..perception.normalizer import normalize_layout, page_path
+from ..runtime.tools import evaluate_assertion
 from ..storage.artifacts import ArtifactStore
 from ..targets.catalog import parse_bundle_list
 from .hdc import DcHdcExecutor
@@ -61,12 +62,15 @@ class DcSnapshotHolder:
     """可变单元，持有最新 ScreenSnapshot 和 JPEG 字节缓存。
 
     SHA256 去重：连续相同截图不重复传输给 LLM。
+    ``history`` 保留会话内采集过的帧（有界），供 DC 蒸馏重建可回放核心流。
     """
 
     latest: ScreenSnapshot | None = None
     latest_jpeg: bytes | None = None
     latest_sha256: str | None = None
     latest_path: Path | None = None
+    history: list[ScreenSnapshot] = field(default_factory=list[ScreenSnapshot])
+    max_history: int = 60
 
     def update_jpeg(self, path: Path, jpeg_bytes: bytes, width: int, height: int) -> bool:
         """更新 JPEG 缓存；返回 True 表示内容变化（SHA 不同）。"""
@@ -76,6 +80,13 @@ class DcSnapshotHolder:
         self.latest_sha256 = sha
         self.latest_path = path
         return changed
+
+    def record(self, snapshot: ScreenSnapshot) -> None:
+        """记录一帧到有界历史并更新 ``latest``。"""
+        self.latest = snapshot
+        self.history.append(snapshot)
+        if len(self.history) > self.max_history:
+            del self.history[: len(self.history) - self.max_history]
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +111,8 @@ class DcToolContext:
     ui_tree_top_k: int = 60
     action_timeout: float = 30.0
     progress_interval: float = 1.0
+    stable_locators: list[StableLocator] = field(default_factory=list[StableLocator])
+    """当前会话关联 Profile 的稳定定位器证据；无 Profile 时为空列表（断言退化为模糊文本匹配）。"""
 
 
 def relative_artifact_path(abs_path: Path | None, base_dir: Path | None) -> str | None:
@@ -241,6 +254,10 @@ class DcActionRecorder:
         started_mono = time.monotonic()
         timeout = float(deps.action_timeout)
         has_side_effect = tool in SIDE_EFFECT_TOOLS
+        # 页面归属：取调用前已知的最新帧 page_path。DC 蒸馏 Profile 用它做页面覆盖校验，
+        # 因此必须在调用前补录（调用后的帧可能已切页）。
+        latest = getattr(deps, "snapshot_holder", None)
+        latest_snapshot = getattr(latest, "latest", None)
         invocation = DcToolInvocation(
             invocation_id=invocation_id,
             turn_id=deps.turn_id,
@@ -258,6 +275,7 @@ class DcActionRecorder:
             command_id=f"cmd-{invocation_id}",
             phase=phase or tool.value,
             cancellable=cancellable,
+            page_path=(latest_snapshot.page_path if latest_snapshot is not None else "") or "",
         )
         self.invocations.append(invocation)
         self._active = invocation
@@ -482,7 +500,7 @@ async def tool_screenshot(ctx: RunContext[DcToolContext]) -> str:
         # PNG 存档（用于产物）
         deps.recorder.note_phase("archive_png")
         snapshot = deps.device.screenshot(screens_dir, deps.session_id, f"dc_{int(time.time())}")
-        deps.snapshot_holder.latest = snapshot
+        deps.snapshot_holder.record(snapshot)
         # 发射截图事件（snapshot_path 为会话相对 POSIX 路径，供前端拼 artifact URL）
         deps.recorder._emit_event(
             DcEventType.SCREENSHOT_CAPTURED,
@@ -733,6 +751,56 @@ async def tool_file_list(ctx: RunContext[DcToolContext], remote_dir: str) -> str
 
 
 # ---------------------------------------------------------------------------
+# L1 工具 — 断言（3，2026-09-17 新增）
+# ---------------------------------------------------------------------------
+
+
+async def _run_assertion(
+    ctx: RunContext[DcToolContext],
+    tool: DcToolName,
+    kind: ToolName,
+    target: str,
+) -> str:
+    """断言工具公共路径：必要时自动采集帧 → 在 recorder chokepoint 内评估断言。
+
+    断言必须作为一条 ``DcToolInvocation`` 落账（``tool=assert_*``）：DC 脚本生成器
+    据此统计 ``explicit_assertions`` 并决定 ``replay_eligible``，Profile 蒸馏也据此
+    提取应用级断言证据。断言失败时设备调用函数抛错，账本记为 failed、``success=False``，
+    工具向模型返回错误摘要而不是静默通过。
+    """
+    deps = ctx.deps
+    if deps.snapshot_holder.latest is None:
+        # 无帧可判：先经 recorder 采集一帧（自动获得事件/账本/超时语义）。
+        await tool_screenshot(ctx)
+
+    def _assert() -> str:
+        result, _ = evaluate_assertion(deps.snapshot_holder.latest, kind, target, deps.stable_locators)
+        if not result.passed:
+            raise DeviceError(f"{tool.value} failed: {result.message}")
+        return result.message
+
+    return await deps.recorder.run(ctx, tool, {"target": target}, _assert)
+
+
+async def tool_assert_visible(ctx: RunContext[DcToolContext], target: str) -> str:
+    """Assert that a UI element matching target is visible on the current screen.
+
+    Uses the same fuzzy target variants and page-summary fallback as Live Mode.
+    """
+    return await _run_assertion(ctx, DcToolName.ASSERT_VISIBLE, ToolName.ASSERT_VISIBLE, target)
+
+
+async def tool_assert_not_visible(ctx: RunContext[DcToolContext], target: str) -> str:
+    """Assert that no UI element matching target is visible on the current screen."""
+    return await _run_assertion(ctx, DcToolName.ASSERT_NOT_VISIBLE, ToolName.ASSERT_NOT_VISIBLE, target)
+
+
+async def tool_assert_text(ctx: RunContext[DcToolContext], target: str) -> str:
+    """Assert that exact text target is present as a UI element (strict, no summary fallback)."""
+    return await _run_assertion(ctx, DcToolName.ASSERT_TEXT, ToolName.ASSERT_TEXT, target)
+
+
+# ---------------------------------------------------------------------------
 # L5 工具 — 受控 Shell (1)
 # ---------------------------------------------------------------------------
 
@@ -762,6 +830,9 @@ _TOOL_REGISTRY: dict[DcToolName, tuple[Callable[..., Any], str]] = {
     DcToolName.WAIT: (tool_wait, "Wait for given seconds (max 30)."),
     DcToolName.SCREENSHOT: (tool_screenshot, "Capture device screen and return UI element summary."),
     DcToolName.INSPECT_SCREEN: (tool_inspect_screen, "Inspect current screen: screenshot + UI hierarchy."),
+    DcToolName.ASSERT_VISIBLE: (tool_assert_visible, "Assert UI element matching target is visible."),
+    DcToolName.ASSERT_NOT_VISIBLE: (tool_assert_not_visible, "Assert no UI element matching target is visible."),
+    DcToolName.ASSERT_TEXT: (tool_assert_text, "Assert exact text target is present as a UI element."),
     DcToolName.DUMP_UI_HIERARCHY: (tool_dump_ui_hierarchy, "Dump UI hierarchy and return top-K interactive elements."),
     DcToolName.COLLECT_LOGS: (tool_collect_logs, "Collect device hilog and save to artifacts."),
     DcToolName.FOREGROUND_APP: (tool_foreground_app, "Return current foreground app bundle and ability."),

@@ -40,9 +40,24 @@ _REPLAYABLE_MAP: dict[DcToolName, ToolName] = {
     DcToolName.KEY_EVENT: ToolName.BACK,  # 仅 Back 键可映射；其他键省略
     DcToolName.WAIT: ToolName.WAIT,
     DcToolName.START_APP: ToolName.OPEN_APP,
+    # 2026-09-17 新增：断言工具渲染为 driver.check_component_exist，使 DC 脚本含检查点。
+    DcToolName.ASSERT_VISIBLE: ToolName.ASSERT_VISIBLE,
+    DcToolName.ASSERT_NOT_VISIBLE: ToolName.ASSERT_NOT_VISIBLE,
+    DcToolName.ASSERT_TEXT: ToolName.ASSERT_TEXT,
 }
 
+# 断言工具集合：replay_eligible 判定与 generator 统计共用同一数据源。
+_ASSERT_TOOLS: frozenset[DcToolName] = frozenset(
+    {DcToolName.ASSERT_VISIBLE, DcToolName.ASSERT_NOT_VISIBLE, DcToolName.ASSERT_TEXT}
+)
+
+# 占位应用身份：未显式提供 bundle/ability 时生成的脚本不得作为验收脚本。
+_PLACEHOLDER_BUNDLE = "com.example.app"
+_PLACEHOLDER_ABILITY = "EntryAbility"
+
 # 不可回放工具（生成 # skipped 注释）
+# 注意：断言工具**不在**此集合（它们在 _REPLAYABLE_MAP 中），因为它们可渲染为
+# driver.check_component_exist 检查点。
 _NON_REPLAYABLE: frozenset[DcToolName] = frozenset(
     {
         DcToolName.SCREENSHOT,
@@ -70,8 +85,11 @@ _SWIPE_DIRECTIONS = frozenset({"UP", "DOWN", "LEFT", "RIGHT"})
 class DcHypiumGenerator:
     """从 DC 会话录制的操作生成 Hypium Python 脚本。"""
 
-    def __init__(self, artifacts: ArtifactStore):
+    def __init__(self, artifacts: ArtifactStore, min_observed_rounds: int = 3):
         self.artifacts = artifacts
+        # 动态 key 前缀泛化所需的跨轮观察门槛；由调用方注入
+        # settings.profile_verification_rounds（精简后默认 1 轮）。
+        self.min_observed_rounds = max(int(min_observed_rounds), 1)
 
     def generate(
         self,
@@ -172,13 +190,30 @@ class DcHypiumGenerator:
                     {"invocation_id": inv.invocation_id, "tool": inv.tool.value, "reason": "no renderable output"}
                 )
 
-        # 无断言时不注入兜底断言（关键差异：跳过 hypium.py:191-199）
+        # DC 会话使用显式 assert_* 工具，因此**不注入** hypium.py:191-199 的兜底断言，
+        # 以免掩盖缺失的断言。若模型未调用任何 assert_* 工具（explicit_assertions == 0），
+        # 下面的 replay_eligible 判定会把脚本标记为不可回放。
         if included_count == 0:
             warnings.append("no replayable operations were recorded")
             body_lines.append("        pass  # no replayable operations")
 
         # 复用 HypiumGenerator._render_script 模板
         script_text = HypiumGenerator._render_script(trace, profile, body_lines)
+
+        # replay_eligible 条件判定（2026-09-17 重构：原来是硬编码 False）：
+        # 必须含显式断言 + 非占位应用身份 + 至少一条可回放操作。
+        explicit_assertions = sum(1 for inv in invocations if inv.success and inv.tool in _ASSERT_TOOLS)
+        replay_eligible = bool(
+            explicit_assertions >= 1
+            and bundle_name != _PLACEHOLDER_BUNDLE
+            and main_ability != _PLACEHOLDER_ABILITY
+            and included_count > 0
+        )
+        if not replay_eligible:
+            if explicit_assertions == 0:
+                warnings.append("no explicit assert_* tool call was recorded; script is diagnostic only")
+            if bundle_name == _PLACEHOLDER_BUNDLE or main_ability == _PLACEHOLDER_ABILITY:
+                warnings.append("placeholder bundle/ability supplied; script is diagnostic only")
 
         # 落盘
         output_dir = self.artifacts.run_dir(session_id) / "generated"
@@ -196,8 +231,9 @@ class DcHypiumGenerator:
             "target_app_id": profile.target_app_id,
             "bundle_name": bundle_name,
             "main_ability": main_ability,
-            "purpose": "dc_recording",
-            "replay_eligible": False,
+            "purpose": "acceptance" if replay_eligible else "dc_recording",
+            "replay_eligible": replay_eligible,
+            "explicit_assertions": explicit_assertions,
             "generated_from_session_id": session_id,
             "included_operations": included_count,
             "omitted_operations": len(omitted),
@@ -212,6 +248,8 @@ class DcHypiumGenerator:
             generated_at=utc_now(),
             included_operations=included_count,
             omitted_operations=omitted,
+            replay_eligible=replay_eligible,
+            explicit_assertions=explicit_assertions,
         )
 
     # ------------------------------------------------------------------
@@ -241,6 +279,15 @@ class DcHypiumGenerator:
                 coord = params.get("coordinate") or [params.get("x", 0), params.get("y", 0)]
                 params["coordinate"] = coord
 
+        # 断言：resolved_element 带 key/id 时生成结构化定位器（与 click 同一优先级），
+        # 否则退化为 BY.text(target) 诊断选择器。
+        if inv.tool in _ASSERT_TOOLS:
+            element = inv.resolved_element
+            if element and (element.key or element.id):
+                kind = LocatorKind.KEY if element.key else LocatorKind.ID
+                value = element.key or element.id
+                locator = LocatorCandidate(kind=kind, value=value)
+
         # swipe：确保 direction 大写
         if inv.tool == DcToolName.SWIPE:
             direction = str(params.get("direction", "")).upper()
@@ -268,6 +315,12 @@ class DcHypiumGenerator:
         if inv.tool == DcToolName.INPUT_TEXT:
             if "text" not in params:
                 params["text"] = ""
+
+        # 断言：target 是唯一目标载体；ASSERT_TEXT 的期望文案同样落在 target。
+        if inv.tool in _ASSERT_TOOLS:
+            target = str(params.get("target") or params.get("text") or "")
+            params["target"] = target
+            params["text"] = target
 
         # wait：确保有 wait_seconds
         if inv.tool == DcToolName.WAIT:
@@ -307,7 +360,7 @@ class DcHypiumGenerator:
             return f"        # start_app: {inv.args.get('bundle_name', '?')} (handled by script setup)"
 
         if tool == ToolName.CLICK_ELEMENT:
-            selector = HypiumGenerator._selector(action.locator, action.params.get("target"), warnings, profile)
+            selector = self._selector(action.locator, action.params.get("target"), profile, warnings)
             return f"        driver.touch({selector})"
 
         if tool == ToolName.CLICK_COORDINATE:
@@ -316,9 +369,7 @@ class DcHypiumGenerator:
             return f"        driver.touch({point})  # coordinate fallback"
 
         if tool == ToolName.INPUT_TEXT:
-            selector = HypiumGenerator._selector(
-                action.locator, action.params.get("target") or "输入框", warnings, profile
-            )
+            selector = self._selector(action.locator, action.params.get("target") or "输入框", profile, warnings)
             return f"        driver.input_text({selector}, {action.params.get('text', '')!r})"
 
         if tool == ToolName.SWIPE:
@@ -334,7 +385,32 @@ class DcHypiumGenerator:
             seconds = float(action.params.get("wait_seconds") or action.params.get("seconds") or 1)
             return f"        driver.wait({seconds!r})"
 
+        # 断言渲染：与 generation/hypium.py:176-188 的模板一致，
+        # 复用 driver.check_component_exist(selector, expect_exist=...)。
+        if tool == ToolName.ASSERT_VISIBLE:
+            selector = self._selector(action.locator, action.params.get("target"), profile, warnings)
+            return f"        driver.check_component_exist({selector}, expect_exist=True)"
+
+        if tool == ToolName.ASSERT_NOT_VISIBLE:
+            selector = self._selector(action.locator, action.params.get("target"), profile, warnings)
+            return f"        driver.check_component_exist({selector}, expect_exist=False)"
+
+        if tool == ToolName.ASSERT_TEXT:
+            target = action.params.get("target") or action.params.get("text")
+            selector = self._selector(action.locator, target, profile, warnings)
+            return f"        driver.check_component_exist({selector}, expect_exist=True)"
+
         return None
+
+    def _selector(
+        self,
+        locator: LocatorCandidate | None,
+        target: str | None,
+        profile: TargetAppProfile,
+        warnings: list[str],
+    ) -> str:
+        """复用 ``HypiumGenerator._selector``，并注入本会话的跨轮观察门槛。"""
+        return HypiumGenerator._selector(locator, target, warnings, profile, self.min_observed_rounds)
 
 
 def _format_args(args: dict[str, Any]) -> str:

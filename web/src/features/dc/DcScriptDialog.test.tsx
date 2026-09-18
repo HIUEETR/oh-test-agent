@@ -11,6 +11,7 @@ vi.mock("../../api/dc-client", () => ({
   closeDcSession: vi.fn(),
   createDcSession: vi.fn(),
   dcArtifactUrl: vi.fn((sessionId: string, path: string) => `/api/dc/sessions/${sessionId}/artifacts/${path}`),
+  distillDcProfile: vi.fn(),
   fetchDcScript: vi.fn(),
   generateDcScript: vi.fn(),
   getDcSession: vi.fn(),
@@ -81,5 +82,19 @@ describe("DcScriptDialog", () => {
 
     fireEvent.click(document.body.querySelector(".dc-script-overlay") as Element);
     expect(document.body.querySelector(".dc-script-overlay")).toBeNull();
+  });
+
+  it("无断言脚本显示「诊断回放专用」", () => {
+    openPreview();
+
+    expect(screen.getByText("诊断回放专用 · 未包含断言")).toBeInTheDocument();
+  });
+
+  it("有断言且非占位身份时显示「可作为验收脚本执行」并给出断言数", () => {
+    useDcConsole.setState({ script: { ...artifact(), replay_eligible: true, explicit_assertions: 3 } });
+
+    openPreview();
+
+    expect(screen.getByText("可作为验收脚本执行 · 断言 3 条")).toBeInTheDocument();
   });
 });

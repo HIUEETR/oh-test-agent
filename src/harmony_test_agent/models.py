@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
+
+_LEGACY_RUN_MODES = frozenset({"exploration", "stability", "reproduction"})
 
 
 def utc_now() -> datetime:
@@ -15,13 +20,38 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _legacy_run_modes_enabled() -> bool:
+    """读取 ``ENABLE_LEGACY_RUN_MODES`` 开关；延迟导入以避免 config ↔ models 循环依赖。"""
+    from .config import get_settings
+
+    return bool(get_settings().enable_legacy_run_modes)
+
+
+def _normalize_legacy_mode(value: Any) -> Any:
+    """把历史 RunMode 字符串静默降级为 ``regression``。
+
+    仅降级已知的 3 个历史值，其他取值仍交给枚举校验报错；``ENABLE_LEGACY_RUN_MODES=true``
+    时保留原值，作为重构回滚开关。
+    """
+    if isinstance(value, str) and value in _LEGACY_RUN_MODES:
+        if _legacy_run_modes_enabled():
+            return value
+        logger.warning("legacy RunMode %r normalized to 'regression' (2026-09-17 资产流水线重构)", value)
+        return RunMode.REGRESSION.value
+    return value
+
+
 class RunMode(StrEnum):
-    """列出测试运行支持的任务模式。"""
+    """列出测试运行支持的任务模式。
+
+    LEGACY: EXPLORATION/STABILITY/REPRODUCTION 仅用于历史 trace 反序列化兼容。
+    新代码一律使用 REGRESSION；业务分支不再读取 mode 字段。
+    """
 
     REGRESSION = "regression"
-    EXPLORATION = "exploration"
-    STABILITY = "stability"
-    REPRODUCTION = "reproduction"
+    EXPLORATION = "exploration"  # deprecated
+    STABILITY = "stability"  # deprecated
+    REPRODUCTION = "reproduction"  # deprecated
 
 
 class RunState(StrEnum):
@@ -313,6 +343,8 @@ class ProfileProvenance(BaseModel):
     verified_at: datetime | None = None
     hypium_replay_run_ids: list[str] = Field(default_factory=list)
     generator_version: str = "profile-discovery-v1"
+    generated_script_path: str | None = None
+    """Profile 晋级门禁所用 Hypium 脚本的绝对路径；供 POST /api/profiles/{id}/replay 追加回放。"""
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -394,8 +426,10 @@ class TargetAppProfile(BaseModel):
             if self.provenance.verified_at is None:
                 raise ValueError("verified Profile requires provenance.verified_at")
             replay_ids = self.provenance.hypium_replay_run_ids
-            if len(replay_ids) != 3 or len(set(replay_ids)) != 3:
-                raise ValueError("verified Profile requires three unique Hypium replay run IDs")
+            # 2026-09-17 重构：主流程内联 1 次回放即可晋级，剩余 2 次由
+            # POST /api/profiles/{id}/replay 异步追加，因此门禁只要求「至少一次」。
+            if len(replay_ids) < 1 or len(set(replay_ids)) != len(replay_ids):
+                raise ValueError("verified Profile requires at least one unique Hypium replay run ID")
             if not self.provenance.evidence.get("verification_passed"):
                 raise ValueError("verified Profile requires passed device verification evidence")
             if len({item.page_signature for item in self.stable_locator_inventory}) < 3:
@@ -664,6 +698,12 @@ class RunTrace(BaseModel):
     replay_passed: int = 0
     error: str | None = None
 
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_legacy_mode(cls, value: Any) -> Any:
+        """历史 trace.json 可能含 exploration/stability/reproduction；静默归一化为 regression。"""
+        return _normalize_legacy_mode(value)
+
     @model_validator(mode="after")
     def populate_compatibility_summary(self) -> RunTrace:
         """同步冻结 Profile，并从旧 Trace 补全 Agent 与独立回放汇总。"""
@@ -739,6 +779,15 @@ class RunRequest(BaseModel):
     exploration_policy: ExplorationPolicy = Field(default_factory=ExplorationPolicy)
     temporary_test: bool = False
     bootstrap_only: bool = False
+    """INTERNAL: 仅供 /api/profiles/{id}/verify 端点与 DC 蒸馏路径使用。
+
+    CLI discover 子命令已删除（2026-09-17 重构）。新代码不应直接设置此字段。"""
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_legacy_mode(cls, value: Any) -> Any:
+        """历史客户端可能发送 exploration/stability/reproduction；静默归一化为 regression。"""
+        return _normalize_legacy_mode(value)
 
     @model_validator(mode="after")
     def normalize_target_contract(self) -> RunRequest:

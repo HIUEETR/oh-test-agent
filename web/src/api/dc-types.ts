@@ -163,6 +163,39 @@ export interface DcScriptArtifact {
   generated_at: string;
   included_operations: number;
   omitted_operations: Array<{ invocation_id: string; tool: string; reason: string }>;
+  /** 脚本是否含显式断言且应用身份非占位值；旧脚本无此字段时按 false 处理 */
+  replay_eligible?: boolean;
+  /** 成功执行的 assert_* 调用数（replay_eligible 的判定依据之一） */
+  explicit_assertions?: number;
+}
+
+/** DC 会话蒸馏 Profile 的结果（POST /api/dc/sessions/{id}/profile/distill） */
+export interface DcDistillResult {
+  profile_id: string;
+  status: "draft" | "candidate" | "verified";
+  pages_covered: number;
+  stable_locators: number;
+  assertions: number;
+  replay_run_id?: string | null;
+  replay_passed?: boolean | null;
+  warnings: string[];
+}
+
+/** 手动追加 Hypium 回放结果（POST /api/profiles/{id}/replay） */
+export interface ProfileReplayResponse {
+  profile_id: string;
+  results: Array<{
+    attempt: number;
+    run_id: string | null;
+    passed: boolean;
+    status: string;
+    evidence_paths: string[];
+    profile_status: string;
+    total_replays: number;
+  }>;
+  status: string | null;
+  total_replays: number;
+  max_replays: number;
 }
 
 /** 会话内累计 token 用量（与后端 DcTokenUsage 同名同义） */

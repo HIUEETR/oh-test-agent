@@ -16,7 +16,7 @@
 → 单工具受控执行
 → Run Trace 与页面图
 → 确定性 Hypium Driver 用例
-→ 连续 3 次真机回放
+→ 1 次内联真机回放 + 2 次异步追加
 → FastAPI/SSE/React Web 展示与触发回放
 ```
 
@@ -32,7 +32,7 @@ src/harmony_test_agent/       正式 Python 包
   generation/                 Hypium Python/JSON/元数据生成
   graph/                      页面签名、节点和动作边
   perception/                 UI 层级标准化、VLM 融合和定位
-  runner/                     Hypium 子进程与三次回放
+  runner/                     Hypium 子进程与回放（1 次内联 + 异步追加）
   runtime/                    工具执行、安全策略、事件
   storage/                    SQLite 与本地产物
 web/                          React + Vite + TypeScript 控制台
@@ -141,7 +141,7 @@ VLM_MIN_CONFIDENCE=0.55
 | `AGENT_MODEL`            | 规划模型；必须支持当前 Provider 的结构化输出。                                       |
 | `AGENT_VISION_MODEL`     | 截图理解和工具决策模型；留空时回退到`AGENT_MODEL`。                                |
 | `AGENT_PROVIDER`         | `auto`、`openai` 或 `mock`。`auto` 在配置完整时使用真实模型，否则使用 Mock。 |
-| `AGENT_DISABLE_THINKING` | 某些兼容端点的 thinking 模式与结构化工具输出冲突时设为`true`。                     |
+| `AGENT_DISABLE_THINKING` | 追加 `extra_body.thinking.type=disabled`；**只对 DeepSeek 官方端点有效**，自建 OpenAI 兼容端点会忽略，不能用来规避 `tool_choice` 冲突（见 5.2 节）。                     |
 | `HDC_PATH`               | `hdc.exe` 的绝对路径；若 HDC 已在 `PATH` 中可留空。                              |
 | `HARMONY_DEVICE`         | 设备序列号，默认`127.0.0.1:5555`。                                                 |
 | `AGENT_ACTION_TIMEOUT`   | HDC/设备动作超时，默认 30 秒。                                                       |
@@ -150,10 +150,12 @@ VLM_MIN_CONFIDENCE=0.55
 | `UNCHANGED_SCREEN_LIMIT` | 连续可变动作截图不变化的停止阈值，默认 2。                                           |
 | `VLM_MIN_CONFIDENCE`     | VLM 视觉元素进入融合列表的最低置信度，默认 0.55。                                    |
 | `RUNTIME_HOME`           | Hypium/xdevice 的项目内隔离 Home，默认`.runtime-user`。                            |
+| `PROFILE_VERIFICATION_ROUNDS` | Profile 设备验证轮次，默认 1；设为 `3` 可回滚到重构前的三轮独立启动验证。       |
+| `HYPIUM_REPLAY_ATTEMPTS` | 主流程内联 Hypium 回放次数，默认 1；设为 `3` 可回滚到重构前的三次内联回放。剩余次数由 `POST /api/profiles/{id}/replay` 异步追加。 |
 
-自动探索的 LLM 视觉顾问在 `AGENT_VISION_MODEL`（或回退的 `AGENT_MODEL`）可用且 `AGENT_PROVIDER` 非 mock 时默认启用，逐页约束点击范围与次数；配置缺失或调用失败时自动回退纯启发式探索，无需额外环境变量。顾问的每次探索会话与逐页建议记录在 `artifacts/runs/<run_id>/discovery/summary.json` 的 `advisor_turns`/`advisor_verdicts` 中；每次 LLM 调用的输入（页面截图 + 编号候选 payload）与输出（结构化建议）还会以 `advisor_log` 留痕，并经 `discovery_progress`（`stage=advisor_turn`）事件实时推送，Web 控制台「顾问对话」页实时累积这些事件（探索进行中即可见），并与探索结束后的 `advisor_log` 按轮次合并展示。`advisor_verdicts` 每条附带 `candidates` 可读摘要（编号/kind/label/coordinate），把 recommended/avoid 下标映射回控件文本。
+自动探索的 LLM 视觉顾问在 `AGENT_VISION_MODEL`（或回退的 `AGENT_MODEL`）可用且 `AGENT_PROVIDER` 非 mock 时默认启用，逐页约束点击范围与次数；配置缺失或调用失败时自动回退纯启发式探索，无需额外环境变量。顾问的每次探索会话与逐页建议记录在 `artifacts/runs/<run_id>/discovery/summary.json` 的 `advisor_turns`/`advisor_verdicts` 中；每次 LLM 调用的输入（页面截图 + 编号候选 payload）与输出（结构化建议）还会以 `advisor_log` 留痕，并经 `discovery_progress`（`stage=advisor_turn`）事件实时推送，Web 控制台「会话」Tab 的「顾问对话」子视图实时累积这些事件（探索进行中即可见），并与探索结束后的 `advisor_log` 按轮次合并展示。`advisor_verdicts` 每条附带 `candidates` 可读摘要（编号/kind/label/coordinate），把 recommended/avoid 下标映射回控件文本。
 
-探索完成（如 `停止原因 admission_metrics_reached`，即"已达准入指标，探索提前完成"）后，编排器继续执行 Profile 验证、脚本生成与准入回放：验证阶段逐轮推送 `profile_verification_round_started/finished`，回放阶段逐次推送 `hypium_replay_started/finished`，实时视图全程有反馈，不会出现"已停止却仍在运行"的观感。
+探索完成（如 `停止原因 admission_metrics_reached`，即"已达准入指标，探索提前完成"）后，编排器继续执行 Profile 验证、脚本生成与准入回放：默认只做 1 轮设备验证（`PROFILE_VERIFICATION_ROUNDS`）和 1 次内联 Hypium 回放（`HYPIUM_REPLAY_ATTEMPTS`），验证阶段逐轮推送 `profile_verification_round_started/finished`，回放阶段逐次推送 `hypium_replay_started/finished`，实时视图全程有反馈，不会出现"已停止却仍在运行"的观感。剩余 2 次回放由用户/CI 通过 `POST /api/profiles/{id}/replay` 在设备空闲时异步追加，满足「3 次连续成功」要求而不阻塞主流程。
 
 ### 5.2 thinking 兼容性
 
@@ -163,13 +165,16 @@ VLM_MIN_CONFIDENCE=0.55
 Thinking mode does not support this tool_choice
 ```
 
-设置：
+说明该端点把模型路由到 thinking 模式，而请求里带了**强制 tool_choice**（`required` 或指定函数）。DeepSeek 侧明确拒绝这个组合，`isRetryable=false`，重试无用。
 
-```dotenv
-AGENT_DISABLE_THINKING=true
-```
+本项目所有结构化输出都已统一走 `PromptedOutput`（`prompted` 模式：不注册工具、不发送 `tool_choice`），因此**正常情况下不会再出现该错误**。仍然报错时按下面逐项排查：
 
-系统只会向模型请求增加兼容端点的 `extra_body.thinking.type=disabled`，不会修改设备工具或安全策略。2026-09-09 的 DeepSeek 兼容端点验收使用了该设置。
+| 成因 | 处置 |
+| --- | --- |
+| 代码里新写了 `output_type=<某个 BaseModel>` 裸传（pydantic-ai 会走 `tool` 模式并发 `tool_choice=required`） | 改回 `OpenAICompatibleProvider._structured_output(...)`，不要绕过它 |
+| 在 pydantic-ai 之外自行拼请求并设置了 `tool_choice` | 去掉强制值，最多用 `auto`；thinking 端点不接受 `required` 和指定函数 |
+
+`AGENT_DISABLE_THINKING=true` 只向端点追加 `extra_body.thinking.type=disabled`，**它只对 DeepSeek 官方端点有效**。对 OpenAI 兼容的自建端点（例如 `api.commandcode.ai/provider/v1`）该字段会被忽略，thinking 依然开启；这类端点也没有可用的关闭手段（其 `reasoning_effort` 只接受 `low`/`medium`/`high`/`xhigh`/`max`，没有 off）。因此**不要指望用它规避 `tool_choice` 冲突**，唯一正确的做法是结构化输出不使用工具。2026-09-09 的 DeepSeek 兼容端点验收使用了该设置。
 
 ## 6. 准备设备与应用
 
@@ -248,7 +253,7 @@ uv run main.py run `
   --task $task
 ```
 
-默认会在 Agent 成功后生成 Hypium Python、JSON 与元数据。加 `--no-generate` 可只执行 Agent；加 `--execute` 会在同一命令中生成并回放 3 次。
+默认会在 Agent 成功后生成 Hypium Python、JSON 与元数据。加 `--no-generate` 可只执行 Agent；加 `--execute` 会在同一命令中生成并内联回放 1 次（`HYPIUM_REPLAY_ATTEMPTS`，设为 `3` 恢复内联 3 次）。
 
 ### 8.2 Mock 模式
 
@@ -438,27 +443,28 @@ Stop-Process -Id $connection.OwningProcess
 
 Web 控制台（2026-09 重写，架构见 `web/README.md`）支持：
 
-- 左栏启动器：目标解析（应用名/bundleName）、自然语言任务、运行模式、探索策略编辑、启动/停止；
+- 左栏启动器：目标解析（应用名/bundleName）、自然语言任务、固定运行模式徽章「回归测试」、探索策略编辑、启动/停止；
 - 闭环流水线状态条：采集 → 感知 → 规划 → 探索 → 验证 → 脚本 → 回放 → 报告 随运行实时点亮；
-- 实时执行页：**思考流**（模型规划、视觉摘要、逐步工具决策、顾问建议的聚合时间线）
+- **Tab 收敛为 5 个**：会话（DC 为主 +「资产流水线降级」Live 子视图 +「顾问对话」子视图）、页面关系图、脚本与回放、Profile 资产、历史运行；
+- **会话页（DC）**：DC 工具调用与对话流、脚本生成、「蒸馏为 Profile」按钮；
+- 会话页内的资产流水线降级子视图（原 Live Mode）：**思考流**（模型规划、视觉摘要、逐步工具决策、顾问建议的聚合时间线）
   与**事件日志**（每条事件可展开查看原始 payload JSON）双视图切换、设备画面、当前元素表；
-- **顾问对话页**：探索顾问每轮 LLM 调用的输入（截图 + 候选列表）与输出（结构化建议）回放，
+- **顾问对话子视图**：探索顾问每轮 LLM 调用的输入（截图 + 候选列表）与输出（结构化建议）回放，
   探索进行中即实时累积，旧运行自动回退展示逐页结论；
 - 页面关系图：任务阶段 trace 图优先，探索型运行自动回退到探索页面状态图；
 - 历史运行列表（左栏 + 完整表格），点击任意历史 Run 即可回看轨迹/图/脚本/报告；
-- Profile 资产管理：快速复验、锁定/解锁、回退、失效（启动运行时对 verified Profile
-  自动快速复验，失败仅记录证据并转入完整探索重新验证，不再自动失效；失效为手动操作）；
-- Hypium Python、生成告警、验收回放（1/3 次）与回放进度；内嵌 HTML 报告与下载。
+- Profile 资产管理：快速复验、锁定/解锁、回退、失效、手动追加回放（回放进度显示「已记录回放数/3」）；
+  启动运行时对 verified Profile 自动快速复验，失败仅记录证据并转入完整探索重新验证，不再自动失效，失效为手动操作；
+- Hypium Python、生成告警、验收回放进度；内嵌 HTML 报告与下载。
 
-可用深链接直接查看 Run（旧 tab 值全部兼容，新增 advisor/runs）：
+可用深链接直接查看 Run（tab 值为会话/页面关系图/脚本与回放/Profile 资产/历史运行；旧值
+`live`、`advisor`、`dc` 兼容映射到 `session`，`report` 映射到 `script`）：
 
 ```text
-http://127.0.0.1:5173/?run_id=<run-id>&tab=live
+http://127.0.0.1:5173/?run_id=<run-id>&tab=session
 http://127.0.0.1:5173/?run_id=<run-id>&tab=graph
-http://127.0.0.1:5173/?run_id=<run-id>&tab=advisor
 http://127.0.0.1:5173/?run_id=<run-id>&tab=script
 http://127.0.0.1:5173/?run_id=<run-id>&tab=profiles
-http://127.0.0.1:5173/?run_id=<run-id>&tab=report
 http://127.0.0.1:5173/?run_id=<run-id>&tab=runs
 ```
 
@@ -492,6 +498,10 @@ GET  /api/runs/{run_id}/report
 POST /api/runs/{run_id}/generate
 POST /api/runs/{run_id}/execute?attempts=3
 GET  /api/runs/{run_id}/artifacts/{path}
+GET  /api/profiles
+POST /api/profiles/{profile_id}/verify
+POST /api/profiles/{profile_id}/replay
+POST /api/dc/sessions/{session_id}/profile/distill
 ```
 
 `GET /api/health/live` 是轻量进程存活探针，不访问设备或外部模型，适合启动器和自动化轮询。`GET /api/health` 返回模型配置、设备连通性和 Hypium 状态，检查范围更完整，响应时间也可能受 HDC 影响。
@@ -501,7 +511,19 @@ Invoke-RestMethod 'http://127.0.0.1:8000/api/health/live'
 Invoke-RestMethod 'http://127.0.0.1:8000/api/health'
 ```
 
-增量契约字段（2026-09，纯追加、不影响旧客户端）：`GET /api/runs/{id}/discovery` 返回 `advisor_log`（顾问逐轮输入/输出留痕）、`pages`/`transitions`（探索页面与跳转明细）；`advisor_verdicts[*]` 追加 `candidates` 摘要；`discovery_progress` 事件 payload 追加 `stage` 标识，`screen_captured` 事件 payload 追加 `summary`（视觉模型页面理解）。事件类型追加 `profile_verification_started`、`profile_verification_round_started`、`hypium_replay_started`（验证/回放过程逐轮逐次推送）；探索期每帧截图会实时发送 `screen_captured`/`elements_detected` 并追加 `trace.snapshots`，驱动实时页的设备画面与元素表。
+资产流水线（2026-09-17 重构）新增两个端点：
+
+- `POST /api/profiles/{profile_id}/replay`：请求体 `{"attempts": 1..3}`（默认 1），在设备空闲时**异步追加** Hypium 回放证据，不阻塞主流程。主流程已内联 1 次（`HYPIUM_REPLAY_ATTEMPTS`），因此再追加 2 次即可满足「3 次连续成功」。candidate 累计满门禁次数且全部通过后自动晋级 `verified`；已 `verified` 的 Profile 只追加审计证据，状态与门禁资产不变；`locked` / `draft` / `invalid` 一律拒绝（409 / 422）。Profile 卡片显示「已记录回放数/3」进度条。
+- `POST /api/dc/sessions/{session_id}/profile/distill`：请求体 `{"bundle_name": ..., "main_ability": ...}`，把 DC 会话蒸馏为 Profile，响应 `DcDistillResult{profile_id, status, pages_covered, stable_locators, assertions, replay_run_id, replay_passed, warnings}`。前置条件：会话覆盖 ≥3 个不同 `page_path`，且 bundle / ability 非占位值（否则 422）；无录制操作返回 409。流程为纯 CPU 提取（<1s）→ 1 轮设备验证 → 1 次 Hypium 回放 → promote。
+
+```powershell
+Invoke-RestMethod -Method Post 'http://127.0.0.1:8000/api/profiles/com.example.app/replay' `
+  -ContentType 'application/json' -Body '{"attempts": 2}'
+Invoke-RestMethod -Method Post 'http://127.0.0.1:8000/api/dc/sessions/<session-id>/profile/distill' `
+  -ContentType 'application/json' -Body '{"bundle_name":"com.example.app","main_ability":"EntryAbility"}'
+```
+
+增量契约字段（2026-09，纯追加、不影响旧客户端）：`GET /api/runs/{id}/discovery` 返回 `advisor_log`（顾问逐轮输入/输出留痕）、`pages`/`transitions`（探索页面与跳转明细）；`advisor_verdicts[*]` 追加 `candidates` 摘要；`discovery_progress` 事件 payload 追加 `stage` 标识，`screen_captured` 事件 payload 追加 `summary`（视觉模型页面理解）。事件类型追加 `profile_verification_started`、`profile_verification_round_started`、`hypium_replay_started`（验证/回放过程逐轮逐次推送）；探索期每帧截图会实时发送 `screen_captured`/`elements_detected` 并追加 `trace.snapshots`，驱动实时页的设备画面与元素表。2026-09-17 再追加 DC 蒸馏事件 `profile_distill_started` / `profile_distill_finished` / `profile_distill_failed`。
 
 SSE 示例：
 
@@ -649,7 +671,7 @@ $finalRun = 'run-20260909T140205Z-e9ada52e'
 
 ### 15.4 `Thinking mode does not support this tool_choice`
 
-设置 `AGENT_DISABLE_THINKING=true`，然后重启 CLI/API。
+该端点的 thinking 模式不接受任何强制 `tool_choice`。先确认没有代码把裸 `BaseModel` 传给 `Agent(output_type=...)`——所有结构化输出必须经 `OpenAICompatibleProvider._structured_output(...)`（内部是 `PromptedOutput`）。不要用 `AGENT_DISABLE_THINKING` 处理该错误：它只对 DeepSeek 官方端点有效，对 OpenAI 兼容的自建端点会被忽略，详见 5.2 节。
 
 ### 15.5 模型请求在 30 秒失败
 
@@ -719,9 +741,9 @@ uv run main.py run --bundle-name com.example.app --task "验证首页和设置�
 
 默认允许普通导航、滑动、返回、固定测试文本输入和只读断言。按需添加 `--allow-login`、`--allow-permission`、`--allow-submit`、`--allow-publish`、`--allow-download`；支付、删除、卸载和清除数据没有开放开关。可用 `--max-pages`、`--max-actions-per-page` 和 `--max-duration` 收紧探索上限。
 
-运行目录保存 catalog 原始输出、启动探测、截图、布局、页面图、动作与门禁结果。Profile 先写 draft，三轮设备验证后写 candidate，三次 Hypium Driver 回放均通过后自动写 verified。正式 Profile 可通过 API 锁定；更新时保存时间戳历史备份。`TARGET_PROFILE_PATH` 仍可显式使用旧 Profile。当前执行模式为 Hypium Driver；DevEco Testing 测试工程模式继续标记为 `not_validated`。
+运行目录保存 catalog 原始输出、启动探测、截图、布局、页面图、动作与门禁结果。Profile 先写 draft，1 轮设备验证后写 candidate，1 次内联 Hypium Driver 回放通过后自动写 verified；其余 2 次回放通过 `POST /api/profiles/{id}/replay` 异步追加（累计 3 次连续成功）。正式 Profile 可通过 API 锁定；更新时保存时间戳历史备份。`TARGET_PROFILE_PATH` 仍可显式使用旧 Profile。当前执行模式为 Hypium Driver；DevEco Testing 测试工程模式继续标记为 `not_validated`。
 
 
 ### Profile 管理 API
 
-`GET /api/profiles` 查看 draft、candidate、verified；`POST /api/profiles/{id}/verify` 发起复验 Run；`POST /api/profiles/{id}/lock` 切换自动覆盖锁；`POST /api/profiles/{id}/rollback` 从校验过的历史版本原子回退。名称消歧使用 `POST /api/runs/{run_id}/target-selection`，仅接受该 Run 已返回候选集合中的精确 `bundle_name`。
+`GET /api/profiles` 查看 draft、candidate、verified；`POST /api/profiles/{id}/verify` 发起复验 Run；`POST /api/profiles/{id}/replay` 异步追加 Hypium 回放证据（请求体 `{"attempts": 1..3}`）；`POST /api/profiles/{id}/lock` 切换自动覆盖锁；`POST /api/profiles/{id}/rollback` 从校验过的历史版本原子回退。名称消歧使用 `POST /api/runs/{run_id}/target-selection`，仅接受该 Run 已返回候选集合中的精确 `bundle_name`。DC 会话蒸馏 Profile 使用 `POST /api/dc/sessions/{session_id}/profile/distill`。

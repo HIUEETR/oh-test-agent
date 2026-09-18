@@ -67,6 +67,14 @@ export type ProfileSummary = {
   locked: boolean;
   quick_verification?: { passed?: boolean; checked_at?: string; reason?: string };
   history?: Array<{ backup_name: string; created_at?: string }>;
+  /** 已累计的 Hypium 回放证据 ID（比赛「3 次连续成功」进度） */
+  hypium_replay_run_ids?: string[];
+  /** 回放证据上限（默认 3） */
+  max_replays?: number;
+  /** 连续通过的回放次数（审计证据里的 consecutive_replay_passes） */
+  consecutive_replay_passes?: number;
+  /** 门禁 Hypium 脚本路径（存在时可追加异步回放） */
+  generated_script_path?: string | null;
 };
 
 export type DiscoveryPolicy = {
