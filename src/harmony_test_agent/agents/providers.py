@@ -400,9 +400,33 @@ class OpenAICompatibleProvider(AgentProvider):
         self.name = settings.agent_model
 
     def _model_settings(self) -> dict[str, object] | None:
+        """返回供应商兼容参数。
+
+        注意：``thinking.type=disabled`` 只有 DeepSeek 官方端点认识。对 OpenAI 兼容的
+        自建端点（例如 ``api.commandcode.ai/provider/v1``）它会被忽略，thinking 依然
+        开启，因此**不能**依赖本开关规避 ``tool_choice`` 冲突；结构化输出必须改用
+        :meth:`_structured_output`。详见 ``docs/STARTUP_GUIDE.md`` §15.4。
+        """
         if not self.settings.agent_disable_thinking:
             return None
         return {"extra_body": {"thinking": {"type": "disabled"}}}
+
+    @staticmethod
+    def _structured_output(output_type: type[BaseModel], description: str) -> Any:
+        """构造不使用工具的结构化输出规格（``PromptedOutput``）。
+
+        裸传 ``output_type=<BaseModel>`` 时 pydantic-ai 会走 ``tool`` 模式并注册
+        ``final_result`` 工具，OpenAI 适配层因而发送 ``tool_choice='required'``。
+        thinking 模型拒绝任何强制 tool_choice（``required`` 或指定函数），网关会返回
+        ``400 Thinking mode does not support this tool_choice``，整轮调用失败。
+
+        ``PromptedOutput`` 改为 ``prompted`` 模式：不注册工具、不发送 tool_choice，
+        由模型直接返回 JSON 文本、客户端解析校验。所有结构化输出都必须经由此方法。
+        详见 ``docs/STARTUP_GUIDE.md`` §15.4。
+        """
+        from pydantic_ai import PromptedOutput
+
+        return PromptedOutput(output_type, description=description)
 
     def _model(self, vision: bool = False):
         from pydantic_ai.providers.openai import OpenAIProvider
@@ -419,7 +443,14 @@ class OpenAICompatibleProvider(AgentProvider):
         """将用户任务规划为不超过上限的原子步骤。"""
         from pydantic_ai import Agent
 
-        agent = Agent(self._model(), output_type=PlanResult, system_prompt=PLANNING_PROMPT, retries=2)
+        agent = Agent(
+            self._model(),
+            output_type=self._structured_output(
+                PlanResult, "The plan as a JSON object with goal, steps, model_used and mock."
+            ),
+            system_prompt=PLANNING_PROMPT,
+            retries=2,
+        )
         prompt = (
             f"Planning context: {context.model_dump_json()}\n"
             f"Maximum steps: {max_steps}\nUser task: {task}\n"
@@ -436,7 +467,15 @@ class OpenAICompatibleProvider(AgentProvider):
         """分析屏幕快照并返回可选的视觉观察结果。"""
         from pydantic_ai import Agent, BinaryContent
 
-        agent = Agent(self._model(vision=True), output_type=VisionObservation, system_prompt=VISION_PROMPT, retries=2)
+        agent = Agent(
+            self._model(vision=True),
+            output_type=self._structured_output(
+                VisionObservation,
+                "The page observation as a JSON object with page_title, summary and elements.",
+            ),
+            system_prompt=VISION_PROMPT,
+            retries=2,
+        )
         hierarchy = [
             {
                 "element_id": item.element_id,
@@ -465,13 +504,13 @@ class OpenAICompatibleProvider(AgentProvider):
         feedback: str | None = None,
     ) -> ToolDecision:
         """结合计划步骤和当前快照选择一个受支持的工具动作。"""
-        from pydantic_ai import Agent, BinaryContent, PromptedOutput
+        from pydantic_ai import Agent, BinaryContent
 
         agent = Agent(
             self._model(vision=True),
-            output_type=PromptedOutput(
+            output_type=self._structured_output(
                 ToolDecision,
-                description="Return exactly one allowed UI tool decision as a JSON object.",
+                "Return exactly one allowed UI tool decision as a JSON object.",
             ),
             system_prompt=DECISION_PROMPT,
             retries=2,
@@ -514,7 +553,10 @@ class OpenAICompatibleProvider(AgentProvider):
 
         agent = Agent(
             self._model(vision=True),
-            output_type=AdvisorVerdict,
+            output_type=self._structured_output(
+                AdvisorVerdict,
+                "The exploration verdict as a JSON object with page_summary, recommended, avoid and reason.",
+            ),
             system_prompt=ADVISOR_PROMPT,
             retries=2,
         )

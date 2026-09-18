@@ -123,9 +123,8 @@ stopped_by_user
 
 ### 6.1 结构化输出
 
-- Planning 和 Vision 使用 Pydantic AI 的 Pydantic 输出模型。
-- Tool Decision 使用 `PromptedOutput(ToolDecision)`，降低不同 OpenAI-compatible 端点对原生 tool choice 的兼容差异。
-- `AGENT_DISABLE_THINKING=true` 时增加端点兼容参数，解决 thinking 与结构化工具输出冲突。
+- Planning、Vision、Tool Decision 与探索顾问统一使用 `PromptedOutput`（`OpenAICompatibleProvider._structured_output`），不注册工具、不发送 `tool_choice`，规避 thinking 端点对强制 tool choice 的拒绝。
+- `AGENT_DISABLE_THINKING=true` 时追加 `extra_body.thinking.type=disabled`；该字段只对 DeepSeek 官方端点有效，对 OpenAI 兼容自建端点会被忽略，因此不能作为 `tool_choice` 冲突的兜底。
 - 规划、截图分析、工具决策统一使用 `AGENT_MODEL_TIMEOUT`；HDC 动作使用独立的 `AGENT_ACTION_TIMEOUT`。
 
 ### 6.2 计划对齐

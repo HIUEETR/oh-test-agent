@@ -30,7 +30,7 @@
 
 `ToolDecision` 已含 `reasoning` 字段（`src/harmony_test_agent/models.py:242-251`）。它会进入 `action_started.payload.decision`、ActionResult 参数、Trace 和 HTML 报告（`src/harmony_test_agent/agents/orchestrator.py:147-151`、`src/harmony_test_agent/runtime/tools.py:41-47`、`src/harmony_test_agent/reporting.py:25-38`）。前端事件列表只读取 `message`、`type` 和时间，并且 Action 类型没有声明 params，所以页面没有展示该字段（`web/src/App.tsx:215-219`、`web/src/types.ts:40-59`）。
 
-`AGENT_DISABLE_THINKING` 只控制是否向兼容端点发送 `thinking.type=disabled`（`.env.example:6`、`src/harmony_test_agent/agents/providers.py:254-257`），当前没有提取或展示供应商 reasoning 的实现。
+`AGENT_DISABLE_THINKING` 只控制是否向兼容端点发送 `thinking.type=disabled`（`.env.example:6`、`src/harmony_test_agent/agents/providers.py:254-257`），当前没有提取或展示供应商 reasoning 的实现。注意：该字段只有 DeepSeek 官方端点认识，对 OpenAI 兼容的自建端点（例如 `api.commandcode.ai/provider/v1`）会被忽略，thinking 依然开启，因此它不能用来规避 `tool_choice` 冲突；结构化输出统一走 `PromptedOutput`（`OpenAICompatibleProvider._structured_output`）才是有效做法，详见 `docs/STARTUP_GUIDE.md` 5.2 节。
 
 ## 3. 功能一：前端模型流式输出与决策依据
 

@@ -141,7 +141,7 @@ VLM_MIN_CONFIDENCE=0.55
 | `AGENT_MODEL`            | 规划模型；必须支持当前 Provider 的结构化输出。                                       |
 | `AGENT_VISION_MODEL`     | 截图理解和工具决策模型；留空时回退到`AGENT_MODEL`。                                |
 | `AGENT_PROVIDER`         | `auto`、`openai` 或 `mock`。`auto` 在配置完整时使用真实模型，否则使用 Mock。 |
-| `AGENT_DISABLE_THINKING` | 某些兼容端点的 thinking 模式与结构化工具输出冲突时设为`true`。                     |
+| `AGENT_DISABLE_THINKING` | 追加 `extra_body.thinking.type=disabled`；**只对 DeepSeek 官方端点有效**，自建 OpenAI 兼容端点会忽略，不能用来规避 `tool_choice` 冲突（见 5.2 节）。                     |
 | `HDC_PATH`               | `hdc.exe` 的绝对路径；若 HDC 已在 `PATH` 中可留空。                              |
 | `HARMONY_DEVICE`         | 设备序列号，默认`127.0.0.1:5555`。                                                 |
 | `AGENT_ACTION_TIMEOUT`   | HDC/设备动作超时，默认 30 秒。                                                       |
@@ -165,13 +165,16 @@ VLM_MIN_CONFIDENCE=0.55
 Thinking mode does not support this tool_choice
 ```
 
-设置：
+说明该端点把模型路由到 thinking 模式，而请求里带了**强制 tool_choice**（`required` 或指定函数）。DeepSeek 侧明确拒绝这个组合，`isRetryable=false`，重试无用。
 
-```dotenv
-AGENT_DISABLE_THINKING=true
-```
+本项目所有结构化输出都已统一走 `PromptedOutput`（`prompted` 模式：不注册工具、不发送 `tool_choice`），因此**正常情况下不会再出现该错误**。仍然报错时按下面逐项排查：
 
-系统只会向模型请求增加兼容端点的 `extra_body.thinking.type=disabled`，不会修改设备工具或安全策略。2026-09-09 的 DeepSeek 兼容端点验收使用了该设置。
+| 成因 | 处置 |
+| --- | --- |
+| 代码里新写了 `output_type=<某个 BaseModel>` 裸传（pydantic-ai 会走 `tool` 模式并发 `tool_choice=required`） | 改回 `OpenAICompatibleProvider._structured_output(...)`，不要绕过它 |
+| 在 pydantic-ai 之外自行拼请求并设置了 `tool_choice` | 去掉强制值，最多用 `auto`；thinking 端点不接受 `required` 和指定函数 |
+
+`AGENT_DISABLE_THINKING=true` 只向端点追加 `extra_body.thinking.type=disabled`，**它只对 DeepSeek 官方端点有效**。对 OpenAI 兼容的自建端点（例如 `api.commandcode.ai/provider/v1`）该字段会被忽略，thinking 依然开启；这类端点也没有可用的关闭手段（其 `reasoning_effort` 只接受 `low`/`medium`/`high`/`xhigh`/`max`，没有 off）。因此**不要指望用它规避 `tool_choice` 冲突**，唯一正确的做法是结构化输出不使用工具。2026-09-09 的 DeepSeek 兼容端点验收使用了该设置。
 
 ## 6. 准备设备与应用
 
@@ -668,7 +671,7 @@ $finalRun = 'run-20260909T140205Z-e9ada52e'
 
 ### 15.4 `Thinking mode does not support this tool_choice`
 
-设置 `AGENT_DISABLE_THINKING=true`，然后重启 CLI/API。
+该端点的 thinking 模式不接受任何强制 `tool_choice`。先确认没有代码把裸 `BaseModel` 传给 `Agent(output_type=...)`——所有结构化输出必须经 `OpenAICompatibleProvider._structured_output(...)`（内部是 `PromptedOutput`）。不要用 `AGENT_DISABLE_THINKING` 处理该错误：它只对 DeepSeek 官方端点有效，对 OpenAI 兼容的自建端点会被忽略，详见 5.2 节。
 
 ### 15.5 模型请求在 30 秒失败
 

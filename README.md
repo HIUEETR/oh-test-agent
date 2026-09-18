@@ -73,11 +73,7 @@ uv run main.py dev --install
 
 `pyproject.toml` 的 `[project.scripts]` 会在 `uv sync` 时生成 `.venv\Scripts\harmony-test-agent.exe`，它只是转发到 `harmony_test_agent.cli:main` 的 Windows 包装器。Windows 会锁定正在运行的 `.exe`，导致另一个 uv 同步进程无法替换它，因此源码检出环境推荐使用不会锁定包装器的 `uv run main.py ...`。
 
-在 `.env` 中填写模型、VLM、HDC 和设备配置。若兼容端点报 thinking/tool choice 冲突，设置：
-
-```dotenv
-AGENT_DISABLE_THINKING=true
-```
+在 `.env` 中填写模型、VLM、HDC 和设备配置。若兼容端点报 `Thinking mode does not support this tool_choice`，说明该端点的 thinking 模式拒绝强制 `tool_choice`：本项目所有结构化输出都已统一使用 `PromptedOutput`，请勿新增裸 `BaseModel` 的 `output_type`。`AGENT_DISABLE_THINKING=true` 只对 DeepSeek 官方端点有效，对 OpenAI 兼容自建端点会被忽略，不能用来规避该错误（详见 `docs/STARTUP_GUIDE.md` 5.2 节）。
 
 ### 2. 预检
 
