@@ -1,4 +1,4 @@
-// 应用壳：顶栏、闭环流水线、左栏（启动器/环境/当前运行/历史）与主舞台（标签页）。
+// 应用壳：顶栏（含环境芯片组）、闭环流水线、左栏（启动器/当前运行）与主舞台（标签页）。
 
 import { useEffect, useState, type ReactNode } from "react";
 import {
@@ -10,8 +10,8 @@ import { Badge, StatusDot } from "../components/ui/primitives";
 import { useConsole } from "../stores/console";
 import { useRunRuntime } from "./use-run-runtime";
 import { LauncherPanel } from "../features/launcher/LauncherPanel";
-import { HealthPanel } from "../features/health/HealthPanel";
-import { CurrentRunCard, RunHistoryPanel } from "../features/runs/RunHistoryPanel";
+import { TopbarHealth } from "../features/health/TopbarHealth";
+import { CurrentRunCard } from "../features/runs/CurrentRunCard";
 import { PipelineStrip } from "../features/pipeline/PipelineStrip";
 import { DeviceScreen } from "../features/live/DeviceScreen";
 import { ThoughtStream } from "../features/live/ThoughtStream";
@@ -69,6 +69,7 @@ export default function App() {
           <h1>Multimodal Test Agent</h1>
           <p className="subtitle">OpenHarmony 多模态智能测试控制台</p>
         </div>
+        <TopbarHealth />
         <div className="topbar-status">
           <StatusDot ok={Boolean(health?.device.connected)} label={health?.device.connected ? "设备在线" : "设备离线"} />
           <StatusDot ok={Boolean(health?.model.configured)} label={health?.model.configured ? "VLM 已配置" : "Mock 模式"} mock />
@@ -78,9 +79,7 @@ export default function App() {
       <main className="workspace">
         <aside className="rail">
           <LauncherPanel />
-          <HealthPanel />
           <CurrentRunCard />
-          <RunHistoryPanel />
         </aside>
 
         <section className="stage">
