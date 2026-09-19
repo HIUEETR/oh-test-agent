@@ -79,15 +79,20 @@ export function fetchDcScript(sessionId: string): Promise<DcScriptArtifact> {
   return apiJson<DcScriptArtifact>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/script`);
 }
 
-/** 从 DC 会话蒸馏 Profile 资产（1 轮设备验证 + 1 次 Hypium 回放） */
+/** 从 DC 会话蒸馏 Profile 资产（1 轮设备验证 + 1 次 Hypium 回放）。
+ *  身份可选：省略时由后端从会话录制推断，推断失败返回 422 cannot infer。 */
 export function distillDcProfile(
   sessionId: string,
-  bundleName: string,
-  mainAbility: string,
+  bundleName?: string,
+  mainAbility?: string,
 ): Promise<DcDistillResult> {
+  // 未提供的字段不序列化：后端据此区分「显式身份」与「请后端推断」
+  const body: { bundle_name?: string; main_ability?: string } = {};
+  if (bundleName !== undefined) body.bundle_name = bundleName;
+  if (mainAbility !== undefined) body.main_ability = mainAbility;
   return apiJson<DcDistillResult>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/profile/distill`, {
     method: "POST",
-    body: { bundle_name: bundleName, main_ability: mainAbility },
+    body,
   });
 }
 

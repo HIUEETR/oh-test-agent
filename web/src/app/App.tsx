@@ -24,6 +24,8 @@ import { ProfilesPanel } from "../features/profiles/ProfilesPanel";
 import { ReportPanel } from "../features/report/ReportPanel";
 import { RunsView } from "../features/runs/RunsView";
 import { DcPanel } from "../features/dc/DcPanel";
+import { DcOperationLog } from "../features/dc/DcOperationLog";
+import { useDcRuntime } from "../features/dc/use-dc-runtime";
 import type { TabKey } from "./deep-links";
 
 const TABS: Array<{ key: TabKey; label: string; icon: ReactNode }> = [
@@ -38,6 +40,8 @@ const TABS: Array<{ key: TabKey; label: string; icon: ReactNode }> = [
 
 export default function App() {
   useRunRuntime();
+  // DC SSE 事件流提升到 App：左栏操作日志因此在任意 Tab（含「脚本与回放」等非会话 Tab）下保持实时。
+  useDcRuntime();
   const [liveMode, setLiveMode] = useState<"thoughts" | "events">("thoughts");
 
   const health = useConsole((state) => state.health);
@@ -77,6 +81,7 @@ export default function App() {
       <main className="workspace">
         <aside className="rail">
           <LauncherPanel />
+          <DcOperationLog />
           <CurrentRunCard />
         </aside>
 

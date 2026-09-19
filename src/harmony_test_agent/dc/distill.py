@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +82,79 @@ _PLACEHOLDER_ABILITIES = frozenset({"EntryAbility", ""})
 
 # 蒸馏动作数量上限：超过后不再追加核心流（防止把整段长会话当作单条核心流回放）。
 _MAX_CORE_ACTIONS = 24
+
+# ``foreground_app`` 的结果摘要格式（见 ``dc/tools.py::tool_foreground_app``）。
+_FOREGROUND_RE = re.compile(r"^bundle=(?P<bundle>\S+),\s*ability=(?P<ability>\S+)$")
+
+# 设备未上报 ability 时工具层输出的字面占位值（``tool_foreground_app`` 的兜底）。
+_UNKNOWN_ABILITY = "unknown"
+
+
+def infer_session_identity(session: DcSession) -> tuple[str, str] | None:
+    """从会话录制记录推断 ``(bundle_name, main_ability)``。
+
+    优先级（先命中先返回）：
+
+    1. 最近一次成功 ``foreground_app`` 的 ``result_summary``：bundle 非占位，
+       且 ability 非空、非 ``unknown``（后者是设备未上报 ability 时的兜底值）；
+    2. 最近一次成功 ``start_app`` 的 ``args``：``bundle_name`` / ``ability_name`` 均非占位；
+    3. ``session.last_foreground_app`` 作 bundle，配同 bundle 的任一成功 ``start_app``
+       的 ``ability_name``（非占位）；
+    4. 均不满足返回 ``None``。
+
+    返回值只做「可推断」判断，占位校验仍由 :meth:`DcProfileDistiller.prepare` 统一负责。
+    """
+    invocations = list(session.recorder.invocations)
+
+    for invocation in reversed(invocations):
+        if invocation.tool != DcToolName.FOREGROUND_APP or not invocation.success:
+            continue
+        match = _FOREGROUND_RE.match(invocation.result_summary.strip())
+        if match is None:
+            continue
+        bundle = match.group("bundle")
+        ability = match.group("ability")
+        if bundle in _PLACEHOLDER_BUNDLES or ability in {"", _UNKNOWN_ABILITY}:
+            continue
+        return bundle, ability
+
+    for invocation in reversed(invocations):
+        if invocation.tool != DcToolName.START_APP or not invocation.success:
+            continue
+        bundle = str(invocation.args.get("bundle_name") or "")
+        ability = str(invocation.args.get("ability_name") or "")
+        if bundle in _PLACEHOLDER_BUNDLES or ability in _PLACEHOLDER_ABILITIES:
+            continue
+        return bundle, ability
+
+    bundle = session.last_foreground_app
+    if bundle and bundle not in _PLACEHOLDER_BUNDLES:
+        for invocation in reversed(invocations):
+            if invocation.tool != DcToolName.START_APP or not invocation.success:
+                continue
+            if str(invocation.args.get("bundle_name") or "") != bundle:
+                continue
+            ability = str(invocation.args.get("ability_name") or "")
+            if ability in _PLACEHOLDER_ABILITIES:
+                continue
+            return bundle, ability
+
+    return None
+
+
+def resolve_distill_identity(
+    session: DcSession,
+    bundle_name: str | None,
+    main_ability: str | None,
+) -> tuple[str, str] | None:
+    """解析蒸馏身份：显式参数（非空）原样返回，否则回落到会话录制推断。
+
+    显式值原样返回（不在此处做占位校验）：调用方传入 ``com.example.app`` 这类占位身份时，
+    仍应由 ``DcProfileDistiller.prepare`` 抛出「placeholder」错误，保持既有 422 文案不变。
+    """
+    if bundle_name and main_ability:
+        return bundle_name, main_ability
+    return infer_session_identity(session)
 
 
 @dataclass(slots=True)
@@ -578,4 +652,10 @@ def _infer_direction(args: dict[str, object]) -> str:
     return "down" if end[1] > start[1] else "up"
 
 
-__all__ = ["DistillPreparation", "DcProfileDistiller", "MIN_DISTILL_PAGES"]
+__all__ = [
+    "DistillPreparation",
+    "DcProfileDistiller",
+    "MIN_DISTILL_PAGES",
+    "infer_session_identity",
+    "resolve_distill_identity",
+]

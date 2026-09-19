@@ -1,22 +1,16 @@
-// DC 模式主面板：两列 grid（中=聊天，右=截图+操作日志+脚本按钮）+ 顶部工具栏。
+// DC 模式主面板：两列 grid（中=聊天，右=设备画面）+ 顶部工具栏。
 // 完全不引用 stores/console.ts（隔离要求）。
+// SSE 运行时（useDcRuntime）与操作日志已上移到 App：见 DcChat 下方的 composer 与左栏 rail。
 
 import { useEffect } from "react";
 import { Bot, Plus, Trash2, Zap } from "lucide-react";
 import { useDcConsole } from "../../stores/dc-console";
-import { useDcRuntime } from "./use-dc-runtime";
 import { DcChat } from "./DcChat";
 import { DcScreen } from "./DcScreen";
-import { DcOperationLog } from "./DcOperationLog";
-import { DcScriptDialog } from "./DcScriptDialog";
-import { DcDistillButton } from "./DcDistillButton";
-import { DcTierPicker } from "./DcTierPicker";
 import { Badge, StatusDot } from "../../components/ui/primitives";
 import type { DcSessionSummary } from "../../api/dc-types";
 
 export function DcPanel() {
-  useDcRuntime();
-
   const sessions = useDcConsole((state) => state.sessions);
   const activeSessionId = useDcConsole((state) => state.activeSessionId);
   const session = useDcConsole((state) => state.session);
@@ -117,7 +111,7 @@ export function DcPanel() {
         </div>
       )}
 
-      {/* 主内容区：中=聊天，右=截图+日志 */}
+      {/* 主内容区：中=聊天（含 composer 控制条），右=设备画面 */}
       <div className="dc-main">
         <div className="dc-center">
           {activeSessionId ? (
@@ -132,10 +126,6 @@ export function DcPanel() {
         </div>
         <div className="dc-side">
           <DcScreen />
-          <DcTierPicker />
-          <DcOperationLog />
-          <DcScriptDialog />
-          <DcDistillButton />
         </div>
       </div>
     </div>

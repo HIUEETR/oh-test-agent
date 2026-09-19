@@ -880,13 +880,13 @@ button.icon-button {
 .dc-message-tool.state-cancelled .dc-tool-text { color: var(--text-3); }
 .dc-tool-effect-warn { color: var(--warn) !important; }
 
-/* 输入区 */
+/* 输入区：textarea 整行 + 下方 composer 控制条 */
 .dc-input-row {
-  display: flex; gap: 8px; padding: 10px 16px;
-  border-top: 1px solid var(--glass-line); align-items: flex-end;
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 16px 0;
+  border-top: 1px solid var(--glass-line); align-items: stretch;
 }
 .dc-input-row textarea {
-  flex: 1; resize: none; border: 1px solid var(--glass-line); border-radius: var(--radius-s);
+  width: 100%; resize: none; border: 1px solid var(--glass-line); border-radius: var(--radius-s);
   padding: 7px 10px; font-size: 13px; font-family: inherit; background: var(--glass-softer);
   min-height: 38px; max-height: 120px;
 }
@@ -980,25 +980,39 @@ button.icon-button {
   padding: 12px 16px; color: var(--text-3); font-size: 12px; text-align: center;
 }
 
-/* 层级选择器 */
-.dc-tier-options { display: flex; flex-direction: column; gap: 3px; padding: 8px 16px 12px; }
-.dc-tier-option {
-  display: flex; align-items: flex-start; gap: 6px; padding: 4px 6px;
-  border-radius: var(--radius-s); cursor: pointer; font-size: 11.5px; line-height: 1.4;
+/* 工具层级下拉（composer 左侧触发器 + 向上弹出菜单） */
+.dc-tier { display: inline-flex; min-width: 0; }
+.dc-tier-trigger {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--brand-line); border-radius: 999px; background: transparent;
+  color: var(--brand); padding: 4px 12px; font-size: 12px; font-family: inherit;
+  cursor: pointer; max-width: 100%;
 }
-.dc-tier-option:hover { background: var(--glass-soft); }
-.dc-tier-option.active { background: var(--brand-softer); }
-.dc-tier-option input { margin-top: 2px; }
-.dc-tier-label { color: var(--text-2); }
+.dc-tier-trigger:hover:not(:disabled) { background: var(--brand-softer); }
+.dc-tier-trigger:disabled { opacity: 0.45; cursor: not-allowed; }
+.dc-tier-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-tier-pop {
+  /* 经 createPortal 挂到 body：.panel 的 backdrop-filter 会使面板成为 fixed 元素的包含块 */
+  position: fixed; z-index: 2100; min-width: 320px;
+  max-height: 320px; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--surface); border: 1px solid var(--glass-line);
+  border-radius: var(--radius-m); box-shadow: var(--shadow-pop); padding: 5px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.dc-tier-pop-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 6px 8px; border: none; border-radius: var(--radius-s);
+  background: none; color: var(--text-2); font-size: 11.5px; line-height: 1.4;
+  font-family: inherit; cursor: pointer;
+}
+.dc-tier-pop-item:hover { background: var(--glass-soft); }
+.dc-tier-pop-item.active { background: var(--brand-softer); color: var(--brand); }
+.dc-tier-pop-label { flex: 1 1 auto; min-width: 0; }
 
-/* 脚本面板 */
-.dc-script-actions { display: flex; gap: 8px; padding: 8px 16px 12px; }.dc-script-warnings { padding: 0 16px 10px; display: flex; flex-direction: column; gap: 2px; }
-.dc-script-warnings small { font-size: 11px; color: var(--warn); }
-.dc-script-hint { padding: 0 16px 12px; }
-.dc-script-hint small { font-size: 11px; color: var(--text-3); line-height: 1.5; }
+/* 脚本预览弹窗 */
 .dc-script-overlay {
   /* 弹窗经 createPortal 挂到 body：.panel 的 backdrop-filter 会让面板成为
-     position:fixed 的包含块，留在面板内会被相邻面板遮挡（见 DcScriptDialog.tsx）。 */
+     position:fixed 的包含块，留在面板内会被相邻面板遮挡（见 DcScriptPreview.tsx）。 */
   position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2000;
   display: flex; align-items: center; justify-content: center; padding: 20px;
   overflow-y: auto;
@@ -1029,15 +1043,55 @@ button.icon-button {
   border-top: 1px solid var(--glass-line);
 }
 
-/* ---------- DC 蒸馏为 Profile（2026-09-17 重构） ---------- */
-.dc-distill-fields { display: flex; flex-direction: column; gap: 4px; padding: 0 16px 8px; }
-.dc-distill-fields label { font-size: 11px; color: var(--text-3); }
-.dc-distill-fields input { font-size: 12px; padding: 6px 8px; }
-.dc-distill-actions { display: flex; gap: 8px; padding: 0 16px 10px; }
-.dc-distill-hint { display: block; padding: 0 16px 10px; font-size: 11px; color: var(--text-3); }
-.dc-distill-error { display: block; padding: 0 16px 10px; font-size: 11px; color: var(--danger, #c0392b); }
-.dc-distill-result { display: flex; flex-direction: column; gap: 2px; padding: 0 16px 12px; }
-.dc-distill-result small { font-size: 11px; color: var(--text-2); }
+/* ---------- DC composer 控制条（2026-09-17 布局重构） ---------- */
+.dc-composer-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 0 12px 10px;
+}
+.dc-composer-left {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  min-width: 0; flex: 1 1 auto;
+}
+.dc-composer-pills { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dc-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  border-radius: 999px; border: 1px solid var(--brand-line); color: var(--brand);
+  background: transparent; padding: 4px 12px; font-size: 12px; font-family: inherit;
+  cursor: pointer; white-space: nowrap;
+}
+.dc-pill:hover:not(:disabled) { background: var(--brand-softer); }
+.dc-pill:disabled { opacity: 0.45; cursor: not-allowed; }
+.dc-pill.busy { background: var(--brand-softer); }
+.dc-composer-hint {
+  flex-basis: 100%; font-size: 12px; color: var(--text-3); line-height: 1.5;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.dc-composer-hint.error { color: var(--danger); }
+.dc-hint-link {
+  border: none; background: none; padding: 0; cursor: pointer;
+  color: var(--brand); font-size: 12px; font-family: inherit; text-decoration: underline;
+}
+.dc-identity-overlay {
+  /* 手动身份兜底浮层：同样 portal 到 body（见 DcComposerActions.tsx） */
+  position: fixed; inset: 0; background: rgba(0,0,0,0.28); z-index: 2100;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.dc-identity-pop {
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--surface); border: 1px solid var(--glass-line);
+  border-radius: var(--radius-m); box-shadow: var(--shadow-pop);
+  padding: 14px; width: 100%; max-width: 340px;
+}
+.dc-identity-pop strong { font-size: 13px; }
+.dc-identity-pop small { font-size: 11px; color: var(--text-3); line-height: 1.5; margin-bottom: 4px; }
+.dc-identity-pop label { font-size: 11px; color: var(--text-3); }
+.dc-identity-pop input { font-size: 12px; padding: 6px 8px; margin-bottom: 4px; }
+.dc-identity-error { font-size: 11px; color: var(--danger); }
+.dc-identity-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+
+/* rail 窄栏适配：操作日志进左栏后隐藏参数摘要（行展开详情仍可见参数与结果） */
+.rail .dc-operation-list { max-height: 320px; }
+.rail .dc-op-args { display: none; }
 
 /* ---------- 脚本库（Hypium 脚本 Tab） ---------- */
 .script-library { display: flex; flex-direction: column; }
@@ -1097,7 +1151,9 @@ button.icon-button {
   .dc-activity { margin: 0 10px 8px; }
   .dc-activity-id { max-width: 96px; }
   .dc-activity-status { margin-left: 0; }
-  .dc-input-row { padding: 10px; }
+  .dc-input-row { padding: 10px 10px 0; }
+  .dc-composer-bar { flex-wrap: wrap; }
+  .dc-composer-left { flex-basis: 100%; }
   .dc-token-stats { padding: 6px 10px 8px; gap: 8px; }
   .dc-token-detail { display: none; }
 }

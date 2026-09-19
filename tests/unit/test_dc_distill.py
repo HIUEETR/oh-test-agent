@@ -12,12 +12,17 @@ from typing import Any
 import pytest
 
 from harmony_test_agent.config import Settings
-from harmony_test_agent.dc.distill import DcProfileDistiller, DistillPreparation
+from harmony_test_agent.dc.distill import (
+    DcProfileDistiller,
+    DistillPreparation,
+    infer_session_identity,
+    resolve_distill_identity,
+)
 from harmony_test_agent.dc.models import (
+    TOOL_TIER,
     DcError,
     DcToolInvocation,
     DcToolName,
-    DcToolTier,
     utc_now,
 )
 from harmony_test_agent.dc.session import DcSession
@@ -45,13 +50,15 @@ class _Holder:
 
 
 class _FakeSession:
-    """蒸馏器只读取 session_id/device_id/dir/recorder/snapshots。"""
+    """蒸馏器只读取 session_id/device_id/dir/recorder/snapshots/last_foreground_app。"""
 
     def __init__(
         self,
         tmp_path: Path,
         invocations: list[DcToolInvocation],
         snapshots: list[ScreenSnapshot] | None = None,
+        *,
+        last_foreground_app: str | None = None,
     ) -> None:
         self.session_id = "dc-20260917T000000Z-abcd1234"
         self.device_id = "127.0.0.1:5555"
@@ -59,6 +66,7 @@ class _FakeSession:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.recorder = _Recorder(invocations)
         self.snapshots = snapshots or []
+        self.last_foreground_app = last_foreground_app
 
 
 def _settings(tmp_path: Path, **overrides: Any) -> Settings:
@@ -107,12 +115,13 @@ def _invocation(
     after_snapshot_id: str | None = None,
     invocation_id: str = "inv-001",
     success: bool = True,
+    result_summary: str = "",
 ) -> DcToolInvocation:
     return DcToolInvocation(
         invocation_id=invocation_id,
         turn_id="turn-1",
         tool=tool,
-        tier=DcToolTier.L1,
+        tier=TOOL_TIER[tool],
         args=args or {},
         success=success,
         started_at=utc_now(),
@@ -121,6 +130,7 @@ def _invocation(
         resolved_element=element,
         page_path=page_path,
         after_snapshot_id=after_snapshot_id,
+        result_summary=result_summary,
     )
 
 
@@ -290,6 +300,148 @@ def test_distill_draft_records_session_provenance(tmp_path: Path) -> None:
     assert prepared.draft.provenance.discovery_run_id == session.session_id
     assert prepared.draft.provenance.evidence["distilled_from_dc_session"] == session.session_id
     assert prepared.draft.target_app_id == f"dc-{session.session_id}"
+
+
+# ---------------------------------------------------------------------------
+# 会话身份推断（前端一键蒸馏与 422 兜底的身份来源）
+# ---------------------------------------------------------------------------
+
+
+def _foreground(app: str, ability: str, *, invocation_id: str = "inv-fg", success: bool = True) -> DcToolInvocation:
+    """构造一条 ``foreground_app`` 记录，摘要格式与 tools.py::tool_foreground_app 一致。"""
+    return _invocation(
+        DcToolName.FOREGROUND_APP,
+        page_path="pages/Page1",
+        invocation_id=invocation_id,
+        success=success,
+        result_summary=f"bundle={app}, ability={ability}",
+    )
+
+
+def _start_app(
+    bundle: str, ability: str, *, invocation_id: str = "inv-start", success: bool = True
+) -> DcToolInvocation:
+    """构造一条 ``start_app`` 记录，args 键与 tools.py::tool_start_app 一致。"""
+    return _invocation(
+        DcToolName.START_APP,
+        page_path="pages/Page1",
+        args={"bundle_name": bundle, "ability_name": ability},
+        invocation_id=invocation_id,
+        success=success,
+    )
+
+
+def test_infer_identity_from_foreground_summary(tmp_path: Path) -> None:
+    """首选来源是最近一次**成功**的 FOREGROUND_APP 结果摘要（失败记录被跳过）。"""
+    session = _FakeSession(
+        tmp_path,
+        [
+            _foreground("com.example.notes", "MainAbility", invocation_id="inv-failed", success=False),
+            _foreground("com.old.app", "OldAbility", invocation_id="inv-old"),
+            _foreground(BUNDLE, ABILITY),
+        ],
+    )
+
+    assert infer_session_identity(session) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+
+def test_infer_identity_falls_back_to_start_app_when_ability_unknown(tmp_path: Path) -> None:
+    """``ability == "unknown"``（设备未上报）视为无效 → 退化到成功 START_APP 的 args。"""
+    session = _FakeSession(tmp_path, [_foreground(BUNDLE, "unknown"), _start_app(BUNDLE, ABILITY)])
+
+    assert infer_session_identity(session) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+
+def test_infer_identity_combines_last_foreground_app_with_start_app_ability(tmp_path: Path) -> None:
+    """无 FOREGROUND_APP 记录时：bundle 来自 last_foreground_app，ability 来自同 bundle 的 START_APP。"""
+    session = _FakeSession(
+        tmp_path,
+        [_start_app(BUNDLE, ABILITY, invocation_id="inv-matching")],
+        last_foreground_app=BUNDLE,
+    )
+
+    assert infer_session_identity(session) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+    # last_foreground_app 存在但没有任何同 bundle 的成功 START_APP → 仍然推断失败
+    no_matching_start = _FakeSession(
+        tmp_path,
+        [_start_app("com.example.app", ABILITY, invocation_id="inv-placeholder")],
+        last_foreground_app=BUNDLE,
+    )
+
+    assert infer_session_identity(no_matching_start) is None  # type: ignore[arg-type]
+
+
+def test_infer_identity_returns_none_without_evidence(tmp_path: Path) -> None:
+    """完全没有身份线索（含无法解析的 FOREGROUND_APP 摘要）→ None。"""
+    session = _FakeSession(
+        tmp_path,
+        [
+            _invocation(DcToolName.CLICK, page_path="pages/Page1", args={"x": 1, "y": 2}),
+            _invocation(
+                DcToolName.FOREGROUND_APP,
+                page_path="pages/Page1",
+                invocation_id="inv-no-fg",
+                result_summary="no foreground app detected",
+            ),
+        ],
+    )
+
+    assert infer_session_identity(session) is None  # type: ignore[arg-type]
+
+
+def test_infer_identity_skips_placeholder_values(tmp_path: Path) -> None:
+    """占位身份既不作为结果返回，也不阻断更靠后的真实线索。"""
+    placeholders_only = _FakeSession(
+        tmp_path,
+        [
+            _foreground("com.example.app", ABILITY, invocation_id="inv-fg-placeholder"),
+            _start_app(BUNDLE, "EntryAbility", invocation_id="inv-start-placeholder"),
+        ],
+    )
+
+    assert infer_session_identity(placeholders_only) is None  # type: ignore[arg-type]
+
+    with_real_evidence = _FakeSession(
+        tmp_path,
+        [
+            _foreground("com.example.app", ABILITY, invocation_id="inv-fg-placeholder"),
+            _start_app(BUNDLE, "EntryAbility", invocation_id="inv-start-placeholder"),
+            _start_app(BUNDLE, ABILITY, invocation_id="inv-start-real"),
+        ],
+    )
+
+    assert infer_session_identity(with_real_evidence) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+
+def test_infer_identity_defers_foreground_placeholder_ability_to_prepare(tmp_path: Path) -> None:
+    """优先级 1 只把 ``unknown``/空视为无效 ability（按规格）：占位 ability 仍原样返回。
+
+    ``EntryAbility`` 属于 ``_PLACEHOLDER_ABILITIES``，因此这一步的结果仍会被
+    ``prepare()`` 以「placeholder」422 拒绝——占位校验保持单点，不在推断层重复。
+    """
+    session = _FakeSession(tmp_path, [_foreground(BUNDLE, "EntryAbility")])
+
+    assert infer_session_identity(session) == (BUNDLE, "EntryAbility")  # type: ignore[arg-type]
+
+
+def test_resolve_identity_prefers_explicit_params_then_infers(tmp_path: Path) -> None:
+    """显式参数原样返回（占位校验交给 prepare）；缺省时回落到会话录制推断。"""
+    session = _FakeSession(tmp_path, [_foreground(BUNDLE, ABILITY)])
+
+    assert resolve_distill_identity(session, "com.other.app", "OtherAbility") == (  # type: ignore[arg-type]
+        "com.other.app",
+        "OtherAbility",
+    )
+    assert resolve_distill_identity(session, "com.example.app", "EntryAbility") == (  # type: ignore[arg-type]
+        "com.example.app",
+        "EntryAbility",
+    )
+    assert resolve_distill_identity(session, None, None) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+    assert resolve_distill_identity(session, "", "") == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+    no_evidence = _FakeSession(tmp_path, [])
+    assert resolve_distill_identity(no_evidence, None, None) is None  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
