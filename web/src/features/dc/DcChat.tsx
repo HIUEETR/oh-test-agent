@@ -10,6 +10,8 @@ import type { DcChatMessage } from "../../api/dc-types";
 import { Markdown } from "../../components/ui/primitives";
 import { DcActivityBar } from "./DcActivityBar";
 import { DcTokenStatsBar } from "./DcTokenStatsBar";
+import { DcTierMenu } from "./DcTierMenu";
+import { DcComposerActions } from "./DcComposerActions";
 
 /** 一次渲染的消息上限：超出时默认只渲染最近 N 条，可手动展开更早内容。 */
 const RENDER_WINDOW = 200;
@@ -92,7 +94,8 @@ export function DcChat() {
         )}
       </div>
 
-      {/* 输入区 */}
+      {/* 输入区（DeepSeek 式 composer）：textarea 独占整行，控制条在下方
+          （左：工具层级下拉 + 脚本/蒸馏 pill，右：发送或停止）。 */}
       <div className="dc-input-row">
         <textarea
           value={draft}
@@ -103,31 +106,37 @@ export function DcChat() {
           disabled={busy || sending}
           aria-label="对话输入"
         />
-        {busy ? (
-          <button
-            type="button"
-            className="secondary compact danger dc-stop-button"
-            onClick={() => void stopTurn()}
-            disabled={stopping}
-            aria-label={stopping ? "正在确认设备状态" : "停止执行"}
-          >
-            {stopping ? (
-              <><span className="dc-tool-spinner" aria-hidden="true" />正在确认设备状态</>
-            ) : (
-              <><Square size={15} />停止</>
-            )}
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="primary compact"
-            onClick={handleSend}
-            disabled={!draft.trim() || sending}
-            aria-label="发送消息"
-          >
-            <Send size={15} />发送
-          </button>
-        )}
+        <div className="dc-composer-bar">
+          <div className="dc-composer-left">
+            <DcTierMenu />
+            <DcComposerActions />
+          </div>
+          {busy ? (
+            <button
+              type="button"
+              className="secondary compact danger dc-stop-button"
+              onClick={() => void stopTurn()}
+              disabled={stopping}
+              aria-label={stopping ? "正在确认设备状态" : "停止执行"}
+            >
+              {stopping ? (
+                <><span className="dc-tool-spinner" aria-hidden="true" />正在确认设备状态</>
+              ) : (
+                <><Square size={15} />停止</>
+              )}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="primary compact"
+              onClick={handleSend}
+              disabled={!draft.trim() || sending}
+              aria-label="发送消息"
+            >
+              <Send size={15} />发送
+            </button>
+          )}
+        </div>
       </div>
 
       {/* 输入框下方：本会话 token 用量与缓存命中率（数据来自 provider 真实响应） */}

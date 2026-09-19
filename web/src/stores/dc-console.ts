@@ -149,7 +149,7 @@ interface DcState {
   stopTurn: () => Promise<void>;
   changeTier: (tier: DcToolTier) => Promise<void>;
   generateScript: (bundleName?: string, mainAbility?: string) => Promise<void>;
-  distillProfile: (bundleName: string, mainAbility: string) => Promise<DcDistillResult | null>;
+  distillProfile: (bundleName?: string, mainAbility?: string) => Promise<DcDistillResult | null>;
   closeSession: () => Promise<void>;
   appendEvent: (event: DcEvent) => void;
   setConnection: (connection: DcLiveConnection) => void;
@@ -395,8 +395,9 @@ export const useDcConsole = create<DcState>()((set, get) => ({
   },
 
   // 蒸馏为 Profile 资产：纯 CPU + 1 轮设备验证 + 1 次 Hypium 回放，返回蒸馏结果。
+  // 身份可选：不传时后端从会话录制推断（推断失败 422），前端据此给出「手动填写身份」兜底。
   // SSE 会自动推送 profile_distill_started / finished / failed，由 appendEvent 消费。
-  distillProfile: async (bundleName: string, mainAbility: string) => {
+  distillProfile: async (bundleName?: string, mainAbility?: string) => {
     const { activeSessionId } = get();
     if (!activeSessionId) return null;
     try {

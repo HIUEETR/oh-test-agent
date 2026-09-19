@@ -19,6 +19,7 @@ from ..config import Settings
 from ..devices.base import DeviceError
 from ..profiles import ProfileTransitionError
 from ..runner import HypiumRunner
+from .distill import resolve_distill_identity
 from .models import (
     SIDE_EFFECT_TOOLS,
     TOOL_TIER,
@@ -85,10 +86,10 @@ class GenerateScriptRequest(BaseModel):
 
 
 class DistillProfileRequest(BaseModel):
-    """DC 会话蒸馏 Profile 请求：必须提供真实应用身份（非占位值）。"""
+    """DC 会话蒸馏 Profile 请求：身份可省略，缺省时由会话录制记录推断。"""
 
-    bundle_name: str = Field(min_length=1, max_length=255)
-    main_ability: str = Field(default="EntryAbility", min_length=1, max_length=255)
+    bundle_name: str | None = Field(default=None, max_length=255)
+    main_ability: str | None = Field(default=None, max_length=255)
 
 
 class RunScriptRequest(BaseModel):
@@ -344,6 +345,9 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
         端点是同步等待的：纯 CPU 阶段 <1s，加上 1 轮设备验证与 1 次回放总计 <2 分钟。
         进度通过 SSE 的 ``profile_distill_started`` / ``profile_distill_finished`` /
         ``profile_distill_failed`` 事件推送。
+
+        应用身份可省略：缺省时从会话录制记录推断；推断不出身份时返回 422，
+        前端据此提示手动填写 bundle_name / main_ability。
         """
         try:
             session = manager.get(session_id)
@@ -351,8 +355,16 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if not session.recorder.invocations:
             raise HTTPException(status_code=409, detail="no operations recorded yet")
+        identity = resolve_distill_identity(session, body.bundle_name, body.main_ability)
+        if identity is None:
+            raise HTTPException(
+                status_code=422,
+                detail="cannot infer application identity from session recordings; "
+                "pass bundle_name/main_ability explicitly",
+            )
+        bundle_name, main_ability = identity
         try:
-            return await session.distill_profile(body.bundle_name, body.main_ability)
+            return await session.distill_profile(bundle_name, main_ability)
         except DcSessionNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except DcError as exc:

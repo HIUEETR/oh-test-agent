@@ -12,12 +12,12 @@ from harmony_test_agent.api.app import create_app
 from harmony_test_agent.config import Settings
 from harmony_test_agent.dc.distill import DcProfileDistiller
 from harmony_test_agent.dc.models import (
+    TOOL_TIER,
     DcDistillResult,
     DcError,
     DcEventType,
     DcToolInvocation,
     DcToolName,
-    DcToolTier,
     utc_now,
 )
 from harmony_test_agent.models import BoundingBox, ScreenSnapshot, UIElement
@@ -47,18 +47,35 @@ def client(tmp_path: Path) -> TestClient:
         yield TestClient(app, raise_server_exceptions=False)
 
 
-def _invocation(page_path: str, invocation_id: str) -> DcToolInvocation:
+def _invocation(
+    page_path: str,
+    invocation_id: str,
+    *,
+    tool: DcToolName = DcToolName.CLICK,
+    result_summary: str = "",
+) -> DcToolInvocation:
     return DcToolInvocation(
         invocation_id=invocation_id,
         turn_id="turn-1",
-        tool=DcToolName.CLICK,
-        tier=DcToolTier.L1,
-        args={"x": 10, "y": 20},
+        tool=tool,
+        tier=TOOL_TIER[tool],
+        args={"x": 10, "y": 20} if tool == DcToolName.CLICK else {},
         success=True,
         started_at=utc_now(),
         ended_at=utc_now(),
         duration_ms=3,
         page_path=page_path,
+        result_summary=result_summary,
+    )
+
+
+def _foreground_invocation() -> DcToolInvocation:
+    """灌入一条成功的前台应用观测（摘要格式与 tools.py::tool_foreground_app 一致）。"""
+    return _invocation(
+        "pages/Page3",
+        "inv-fg",
+        tool=DcToolName.FOREGROUND_APP,
+        result_summary=f"bundle={BUNDLE}, ability={ABILITY}",
     )
 
 
@@ -93,15 +110,76 @@ def _seed_session(client: TestClient, *, pages: list[str], with_snapshot: bool =
 
 
 def test_distill_endpoint_missing_bundle(client: TestClient) -> None:
-    """bundle_name 为空 → 422（请求模型校验）。"""
+    """空 body 且录制中无身份线索 → 422，detail 为逐字固定的推断失败文案。"""
     session_id = _seed_session(client, pages=["pages/Page1"])
 
     response = client.post(
         f"/api/dc/sessions/{session_id}/profile/distill",
-        json={"bundle_name": "", "main_ability": ABILITY},
+        json={},
     )
 
     assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "cannot infer application identity from session recordings; pass bundle_name/main_ability explicitly"
+    )
+
+
+def test_distill_endpoint_infers_identity_from_recordings(client: TestClient) -> None:
+    """空 body：身份由会话录制记录（FOREGROUND_APP 结果摘要）推断后交给蒸馏器。"""
+    session_id = _seed_session(client, pages=["pages/Page1", "pages/Page2", "pages/Page3"])
+    session = client.app.state.dc_manager.get(session_id)
+    session.recorder.invocations.append(_foreground_invocation())
+    expected = DcDistillResult(
+        profile_id=f"dc-{session_id}",
+        status="verified",
+        pages_covered=3,
+        stable_locators=3,
+        assertions=1,
+        replay_run_id=f"{session_id}:profile-attempt-1",
+        replay_passed=True,
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def fake_distill(self, target_session, bundle_name, main_ability):
+        seen.append((bundle_name, main_ability))
+        return expected
+
+    with patch.object(DcProfileDistiller, "distill", fake_distill):
+        response = client.post(
+            f"/api/dc/sessions/{session_id}/profile/distill",
+            json={},
+        )
+
+    assert response.status_code == 200, response.text
+    assert seen == [(BUNDLE, ABILITY)]
+    assert response.json()["profile_id"] == expected.profile_id
+
+
+def test_distill_endpoint_explicit_identity_wins_over_inference(client: TestClient) -> None:
+    """显式参数优先于录制推断：录制里虽有身份，仍按 body 的值蒸馏。"""
+    session_id = _seed_session(client, pages=["pages/Page1", "pages/Page2", "pages/Page3"])
+    session = client.app.state.dc_manager.get(session_id)
+    session.recorder.invocations.append(_foreground_invocation())
+    seen: list[tuple[str, str]] = []
+
+    async def fake_distill(self, target_session, bundle_name, main_ability):
+        seen.append((bundle_name, main_ability))
+        return DcDistillResult(
+            profile_id=f"dc-{session_id}",
+            status="candidate",
+            pages_covered=3,
+            stable_locators=2,
+            assertions=0,
+        )
+
+    with patch.object(DcProfileDistiller, "distill", fake_distill):
+        response = client.post(
+            f"/api/dc/sessions/{session_id}/profile/distill",
+            json={"bundle_name": "com.other.app", "main_ability": "OtherAbility"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert seen == [("com.other.app", "OtherAbility")]
 
 
 def test_distill_endpoint_session_not_found(client: TestClient) -> None:

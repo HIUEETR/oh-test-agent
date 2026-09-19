@@ -1,11 +1,14 @@
-// DcScriptDialog 测试：弹窗必须 portal 到 body（否则被 .panel 的 backdrop-filter
-// 关在面板层叠上下文里，被相邻面板遮挡）、Esc/遮罩关闭、复制下载可用。
+// DcScriptPreview 测试：受控弹窗必须 portal 到 body（否则被 .panel 的 backdrop-filter
+// 关在面板层叠上下文里，被相邻面板遮挡）、Esc/遮罩关闭、复制下载与「重新生成」可用。
 
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { DcScriptDialog } from "./DcScriptDialog";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { DcScriptPreview } from "./DcScriptPreview";
 import { useDcConsole } from "../../stores/dc-console";
 import type { DcScriptArtifact } from "../../api/dc-types";
+
+const generateDcScript = vi.fn();
 
 vi.mock("../../api/dc-client", () => ({
   closeDcSession: vi.fn(),
@@ -13,7 +16,7 @@ vi.mock("../../api/dc-client", () => ({
   dcArtifactUrl: vi.fn((sessionId: string, path: string) => `/api/dc/sessions/${sessionId}/artifacts/${path}`),
   distillDcProfile: vi.fn(),
   fetchDcScript: vi.fn(),
-  generateDcScript: vi.fn(),
+  generateDcScript: (...args: unknown[]) => generateDcScript(...args),
   getDcSession: vi.fn(),
   listDcSessions: vi.fn(),
   sendDcMessage: vi.fn(),
@@ -32,31 +35,32 @@ function artifact(): DcScriptArtifact {
   };
 }
 
-function openPreview() {
-  render(<DcScriptDialog />);
-  fireEvent.click(screen.getByRole("button", { name: /预览/ }));
+/** 受控弹窗的宿主：把 open 状态接起来，验证 onClose 真的能关掉弹窗。 */
+function Harness() {
+  const [open, setOpen] = useState(true);
+  return <DcScriptPreview open={open} onClose={() => setOpen(false)} />;
 }
 
-describe("DcScriptDialog", () => {
+describe("DcScriptPreview", () => {
   beforeEach(() => {
+    generateDcScript.mockReset();
     useDcConsole.getState().reset();
-    useDcConsole.setState({ script: artifact() });
+    useDcConsole.setState({ activeSessionId: "dc-1", script: artifact() });
   });
 
-  it("弹窗经 portal 渲染到 body，而不是留在面板内", () => {
-    const { container } = render(<DcScriptDialog />);
-    fireEvent.click(screen.getByRole("button", { name: /预览/ }));
+  it("弹窗经 portal 渲染到 body，而不是留在宿主容器内", () => {
+    const { container } = render(<Harness />);
 
     const overlay = document.body.querySelector(".dc-script-overlay");
     expect(overlay).not.toBeNull();
-    // 面板内部不得包含遮罩（原先的层叠上下文 bug 就是因为它在这里）
+    // 宿主内部不得包含遮罩（原先的层叠上下文 bug 就是因为它在这里）
     expect(container.querySelector(".dc-script-overlay")).toBeNull();
     expect(container.contains(overlay)).toBe(false);
     expect(screen.getByRole("dialog", { name: "生成的 Hypium 脚本" })).toBeInTheDocument();
   });
 
   it("展示脚本源码与统计信息", () => {
-    openPreview();
+    render(<Harness />);
 
     expect(document.body.querySelector(".dc-script-code")?.textContent).toContain("from hypium import UiDriver");
     expect(screen.getByText("可回放操作：5")).toBeInTheDocument();
@@ -64,8 +68,15 @@ describe("DcScriptDialog", () => {
     expect(screen.getByText("警告：1")).toBeInTheDocument();
   });
 
+  it("open=false 时不渲染任何弹窗", () => {
+    render(<DcScriptPreview open={false} onClose={vi.fn()} />);
+
+    expect(document.body.querySelector(".dc-script-overlay")).toBeNull();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("Esc 关闭并恢复页面滚动", () => {
-    openPreview();
+    render(<Harness />);
     expect(document.body.style.overflow).toBe("hidden");
 
     fireEvent.keyDown(window, { key: "Escape" });
@@ -75,7 +86,7 @@ describe("DcScriptDialog", () => {
   });
 
   it("点击遮罩关闭，点击弹窗内部不关闭", () => {
-    openPreview();
+    render(<Harness />);
 
     fireEvent.click(screen.getByRole("dialog", { name: "生成的 Hypium 脚本" }));
     expect(document.body.querySelector(".dc-script-overlay")).not.toBeNull();
@@ -85,7 +96,7 @@ describe("DcScriptDialog", () => {
   });
 
   it("无断言脚本显示「诊断回放专用」", () => {
-    openPreview();
+    render(<Harness />);
 
     expect(screen.getByText("诊断回放专用 · 未包含断言")).toBeInTheDocument();
   });
@@ -93,8 +104,19 @@ describe("DcScriptDialog", () => {
   it("有断言且非占位身份时显示「可作为验收脚本执行」并给出断言数", () => {
     useDcConsole.setState({ script: { ...artifact(), replay_eligible: true, explicit_assertions: 3 } });
 
-    openPreview();
+    render(<Harness />);
 
     expect(screen.getByText("可作为验收脚本执行 · 断言 3 条")).toBeInTheDocument();
+  });
+
+  it("footer 的「重新生成」重新调用生成接口", async () => {
+    generateDcScript.mockResolvedValue(artifact());
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: /重新生成/ }));
+
+    await vi.waitFor(() => {
+      expect(generateDcScript).toHaveBeenCalledWith("dc-1", undefined, undefined);
+    });
   });
 });
