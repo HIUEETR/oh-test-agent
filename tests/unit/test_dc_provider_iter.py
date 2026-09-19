@@ -8,6 +8,7 @@ AGENT_TEXT」这一修复（否则前端会重复显示最终回复）。
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -22,7 +23,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     UserPromptPart,
 )
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaThinkingPart, DeltaToolCall, FunctionModel
 
 from harmony_test_agent.config import Settings
 from harmony_test_agent.dc.models import (
@@ -33,7 +34,7 @@ from harmony_test_agent.dc.models import (
     DcTurnTimeout,
     DcUsageLimitReached,
 )
-from harmony_test_agent.dc.provider import DcChatProvider, MockDcChatProvider, _usage_limits
+from harmony_test_agent.dc.provider import DC_SYSTEM_PROMPT, DcChatProvider, MockDcChatProvider, _usage_limits
 from harmony_test_agent.models import utc_now
 
 # ---------------------------------------------------------------------------
@@ -502,3 +503,245 @@ class TestTokenUsageCapture:
 
         assert response.usage.has_values is False
         assert response.usage_delta.has_values is False
+
+
+class TestSystemPromptIdentityAndAssertions:
+    """改动 B：提示词必须要求「身份记录」与「断言 checkpoint」。
+
+    回归背景：规则 3 原先明令「无断言」，与 generator 的 replay_eligible 判定
+    （需 ≥1 显式断言）自相矛盾；提示词也从未要求记录 foreground_app/start_app，
+    导致会话录制里没有应用身份，脚本与蒸馏都拿不到真实 bundle。
+    """
+
+    def test_prompt_requires_identity_recording(self) -> None:
+        assert "身份记录" in DC_SYSTEM_PROMPT
+        assert "foreground_app" in DC_SYSTEM_PROMPT
+        assert "start_app" in DC_SYSTEM_PROMPT
+        assert "ability_name" in DC_SYSTEM_PROMPT
+        assert "禁止猜测占位值" in DC_SYSTEM_PROMPT
+
+    def test_prompt_requires_assertion_checkpoints(self) -> None:
+        assert "断言 checkpoint" in DC_SYSTEM_PROMPT
+        assert "assert_text/assert_visible" in DC_SYSTEM_PROMPT
+        # 旧的「无断言」规则必须彻底消失，否则模型仍不会留证
+        assert "无断言" not in DC_SYSTEM_PROMPT
+        assert "不要尝试使用 assert_visible/assert_text" not in DC_SYSTEM_PROMPT
+
+    def test_other_execution_rules_stay_intact(self) -> None:
+        """只改规则 3/9：其余规则与回复格式不动。"""
+        assert "**自主执行**" in DC_SYSTEM_PROMPT
+        assert "**每轮一个工具**" in DC_SYSTEM_PROMPT
+        assert "**先看清再动手**" in DC_SYSTEM_PROMPT
+        assert "## 回复格式" in DC_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# token 级流式（改动 D）
+# ---------------------------------------------------------------------------
+
+
+def make_stream_provider(stream_fn: Any, **settings_overrides: Any) -> DcChatProvider:
+    """构造 provider：非流式走 function，流式走 stream_function。
+
+    ``DcChatProvider._model`` 被替换为同一个 FunctionModel，因此
+    ``dc_token_streaming=False`` 时走 ``function``、开启时走 ``stream_function``。
+    """
+    model = FunctionModel(
+        lambda messages, info: ModelResponse(parts=[TextPart(content="整块输出")]),
+        stream_function=stream_fn,
+    )
+    return make_provider(model, **settings_overrides)
+
+
+def deltas(events: list[tuple[str, str, dict[str, Any]]]) -> list[tuple[str, str, dict[str, Any]]]:
+    return [event for event in events if event[0] == DcEventType.MESSAGE_DELTA.value]
+
+
+class TestTokenStreaming:
+    """改动 D：token 级增量 + 全量事件收口 + 关闭开关 + 不支持流式的回退。"""
+
+    async def test_deltas_stream_then_full_events_close_drafts(self) -> None:
+        calls = {"stream": 0}
+
+        async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> Any:
+            calls["stream"] += 1
+            if calls["stream"] == 1:
+                for chunk in ["先", "看"]:
+                    yield {"0": DeltaThinkingPart(content=chunk)}
+                    await asyncio.sleep(0.1)
+                # 工具调用先出现：之后到达的文本属于「中途叙述」
+                yield {"1": DeltaToolCall(name="ping", json_args="{}", tool_call_id="call-1")}
+                for chunk in ["我来", "点击"]:
+                    yield chunk
+                    await asyncio.sleep(0.1)
+            else:
+                for chunk in ["任务", "完成"]:
+                    yield chunk
+                    await asyncio.sleep(0.1)
+
+        provider = make_stream_provider(stream_fn)
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        request = DcChatRequest(user_prompt="搜索", turn_id="turn-1", tools=ping_registry(), emit=collect(events))
+
+        response = await provider.chat(request)
+
+        emitted = deltas(events)
+        thinking_deltas = [event for event in emitted if event[2]["stream_key"] == "turn-1:m1:thinking"]
+        text_deltas = [event for event in emitted if event[2]["stream_key"] == "turn-1:m1:text"]
+        assert thinking_deltas and text_deltas
+        # 增量按序拼接 == 全量文本
+        assert "".join(event[2]["delta"] for event in thinking_deltas) == "先看"
+        assert "".join(event[2]["delta"] for event in text_deltas) == "我来点击"
+        # 思考增量与叙述增量的 role 由 part 种类/是否已有工具调用决定
+        assert {event[2]["role"] for event in thinking_deltas} == {"thinking"}
+        assert {event[2]["role"] for event in text_deltas} == {"narration"}
+        # delta 与全量事件共用同一个 stream_key（前端据此就地收口草稿）
+        thinking_event = next(event for event in events if event[0] == DcEventType.THINKING.value)
+        agent_text_event = next(event for event in events if event[0] == DcEventType.AGENT_TEXT.value)
+        assert thinking_deltas[0][2]["stream_key"] == "turn-1:m1:thinking"
+        assert thinking_event[2]["stream_key"] == thinking_deltas[0][2]["stream_key"]
+        assert agent_text_event[2]["stream_key"] == text_deltas[0][2]["stream_key"]
+        assert agent_text_event[2]["text"] == "".join(event[2]["delta"] for event in text_deltas)
+        assert thinking_event[2]["text"] == "".join(event[2]["delta"] for event in thinking_deltas)
+        # 终态回答（第二条模型消息）只有增量草稿，没有 AGENT_TEXT 收口
+        text_keys = [event[2]["stream_key"] for event in emitted if event[2]["stream_key"].endswith(":text")]
+        assert list(dict.fromkeys(text_keys)) == ["turn-1:m1:text", "turn-1:m3:text"]
+        # 手动消费节点不能让模型被请求两次
+        assert calls["stream"] == 2
+        assert response.tool_call_count == 1
+
+    async def test_text_delta_role_is_assistant_before_tool_call_appears(self) -> None:
+        """文本先于工具调用到达时 role=assistant，由后续全量事件改判为叙述。"""
+        calls = {"stream": 0}
+
+        async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> Any:
+            calls["stream"] += 1
+            if calls["stream"] == 1:
+                yield "我来点击"
+                await asyncio.sleep(0.1)
+                yield {"0": DeltaToolCall(name="ping", json_args="{}", tool_call_id="call-1")}
+                await asyncio.sleep(0.1)
+            else:
+                yield "任务完成"
+                await asyncio.sleep(0.1)
+
+        provider = make_stream_provider(stream_fn)
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        request = DcChatRequest(user_prompt="搜索", turn_id="turn-1", tools=ping_registry(), emit=collect(events))
+
+        await provider.chat(request)
+
+        text_deltas = [event for event in deltas(events) if event[2]["stream_key"] == "turn-1:m1:text"]
+        assert text_deltas
+        assert {event[2]["role"] for event in text_deltas} == {"assistant"}
+        # 全量叙述事件仍然发出，供前端把草稿改判为 narration
+        agent_text_event = next(event for event in events if event[0] == DcEventType.AGENT_TEXT.value)
+        assert agent_text_event[2]["stream_key"] == text_deltas[0][2]["stream_key"]
+
+    async def test_terminal_text_deltas_are_not_re_emitted_as_full_events(self) -> None:
+        """终态回答只发增量草稿，仍不发 AGENT_TEXT（否则前端出现两条重复回复）。"""
+        calls = {"stream": 0}
+
+        async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> Any:
+            calls["stream"] += 1
+            if calls["stream"] == 1:
+                yield "先探测"
+                await asyncio.sleep(0.1)
+                yield {"0": DeltaToolCall(name="ping", json_args="{}", tool_call_id="call-1")}
+                await asyncio.sleep(0.1)
+            else:
+                yield "任务完成"
+                await asyncio.sleep(0.1)
+
+        provider = make_stream_provider(stream_fn)
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        request = DcChatRequest(user_prompt="探测", turn_id="turn-1", tools=ping_registry(), emit=collect(events))
+
+        response = await provider.chat(request)
+
+        assert response.output_text == "任务完成"
+        assert [event[2]["text"] for event in visible(events)] == ["先探测"]
+        # 终态文本仍有增量（前端逐字显示，由 ASSISTANT_MESSAGE 收口）
+        assert any(event[2]["delta"] == "任务完成" for event in deltas(events))
+
+    async def test_streaming_emits_progress_heartbeat(self) -> None:
+        """流式等待期间也要发 model_call_progress（复用进度心跳），并标记 streaming。"""
+
+        async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> Any:
+            yield "开始输出"
+            # 模型静默期：这段没有任何 delta，靠心跳让「最近进展」与剩余预算继续走
+            await asyncio.sleep(0.6)
+            yield "结束"
+
+        provider = make_stream_provider(stream_fn)
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        request = DcChatRequest(
+            user_prompt="hi",
+            turn_id="turn-1",
+            progress_interval=0.05,
+            emit=collect(events),
+        )
+
+        await provider.chat(request)
+
+        started = [event for event in events if event[0] == DcEventType.MODEL_CALL_STARTED.value]
+        progress = [event for event in events if event[0] == DcEventType.MODEL_CALL_PROGRESS.value]
+        # 流式路径自己发的 started 带 streaming 标记（节点推进那条不带，属既有事件）
+        assert any(event[2].get("streaming") is True for event in started)
+        # 静默期的心跳同样是流式路径发出的 progress 事件
+        heartbeat = [event for event in progress if event[2].get("streaming") is True]
+        assert heartbeat, "流式等待期间必须有进度心跳"
+        assert all(event[2]["turn_id"] == "turn-1" for event in heartbeat)
+
+    async def test_streaming_disabled_emits_no_deltas(self) -> None:
+        async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> Any:
+            yield "不应被调用"
+
+        provider = make_stream_provider(stream_fn, dc_token_streaming=False)
+        events: list[tuple[str, str, dict[str, Any]]] = []
+
+        response = await provider.chat(DcChatRequest(user_prompt="hi", turn_id="turn-1", emit=collect(events)))
+
+        assert deltas(events) == []
+        assert response.output_text == "整块输出"
+
+    async def test_model_without_stream_support_falls_back_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """模型不支持流式：记录 warning、退回整块推进，轮次照常完成。"""
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ThinkingPart(content="想一下"), TextPart(content="任务完成")])
+
+        provider = make_provider(FunctionModel(model_fn))  # 只有 function，没有 stream_function
+        events: list[tuple[str, str, dict[str, Any]]] = []
+
+        with caplog.at_level(logging.WARNING, logger="harmony_test_agent.dc.provider"):
+            response = await provider.chat(DcChatRequest(user_prompt="hi", emit=collect(events)))
+
+        assert response.output_text == "任务完成"
+        assert deltas(events) == []
+        # 全量思考事件仍按原路径发出
+        assert [event[0] for event in visible(events)] == [DcEventType.THINKING.value]
+        assert any("streaming unavailable" in record.getMessage() for record in caplog.records)
+
+    async def test_streaming_timeout_emits_failed_and_raises(self) -> None:
+        async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> Any:
+            yield "开始输出"
+            await asyncio.sleep(5)
+
+        provider = make_stream_provider(stream_fn)
+        events: list[tuple[str, str, dict[str, Any]]] = []
+        request = DcChatRequest(
+            user_prompt="hi",
+            turn_id="turn-slow",
+            model_timeout=0.3,
+            progress_interval=0.05,
+            emit=collect(events),
+        )
+
+        with pytest.raises(DcModelTimeout):
+            await provider.chat(request)
+
+        failed = [event for event in events if event[0] == DcEventType.MODEL_CALL_FAILED.value]
+        assert failed, "流式超时必须发出 model_call_failed"
+        assert failed[-1][2]["error_code"] == "model_timeout"
+        assert deltas(events), "超时前已到达的增量不应被丢弃"

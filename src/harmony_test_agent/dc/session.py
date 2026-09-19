@@ -22,7 +22,7 @@ from ..models import ResolvedTarget, ScreenSnapshot, StableLocator, utc_now
 from ..profiles import ProfileRegistry, ProfileRegistryError
 from ..runner import HypiumRunner
 from ..storage.artifacts import ArtifactStore
-from .distill import DcProfileDistiller
+from .distill import DcProfileDistiller, infer_session_identity
 from .generator import DcHypiumGenerator, _format_args
 from .hdc import DcHdcExecutor
 from .models import (
@@ -100,7 +100,12 @@ class DcEventBus:
             message=message,
             payload=payload or {},
         )
-        self._recent.append(event)
+        # token 级增量只是前端草稿，不进 Last-Event-ID 回放缓冲：
+        # 否则一轮上千条 delta 会挤掉工具/终态事件的回放能力（buffer 只有 500 条），
+        # 而重连客户端本来就靠 refreshSession 的全量快照重建消息与账本。
+        # 实时订阅者照常收到（下面的广播不受影响）。
+        if event_type != DcEventType.MESSAGE_DELTA:
+            self._recent.append(event)
         dead: list[asyncio.Queue[DcEvent]] = []
         for queue in self._subscribers:
             try:
@@ -877,10 +882,18 @@ class DcSession:
 
     def generate_script(
         self,
-        bundle_name: str = "com.example.app",
-        main_ability: str = "EntryAbility",
+        bundle_name: str | None = None,
+        main_ability: str | None = None,
     ) -> DcScriptArtifact:
-        """从录制的操作生成 Hypium 脚本。"""
+        """从录制的操作生成 Hypium 脚本。
+
+        应用身份缺省（或只给了一半）时按会话录制推断，与蒸馏端点共用同一推断器；
+        推断不出则回退占位身份 ``com.example.app`` / ``EntryAbility``——脚本仍会生成，
+        但只作为诊断脚本（占位警告保留，行为与改动前一致）。
+        """
+        explicit = (bundle_name, main_ability) if (bundle_name and main_ability) else None
+        identity = explicit or infer_session_identity(self)
+        resolved_bundle, resolved_ability = identity or ("com.example.app", "EntryAbility")
         generator = DcHypiumGenerator(self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds)
         snapshots = [self.snapshot_holder.latest] if self.snapshot_holder.latest else []
         self.script = generator.generate(
@@ -888,8 +901,8 @@ class DcSession:
             device_id=self.device_id,
             invocations=list(self.recorder.invocations),
             snapshots=snapshots,
-            bundle_name=bundle_name,
-            main_ability=main_ability,
+            bundle_name=resolved_bundle,
+            main_ability=resolved_ability,
         )
         self._emit(
             DcEventType.SCRIPT_GENERATED,

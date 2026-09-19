@@ -166,7 +166,7 @@ function MessageBubble({ message, busy }: { message: DcChatMessage; busy: boolea
     return (
       <div className="dc-message dc-message-narration">
         <div className="dc-message-content">
-          <Markdown text={message.content} />
+          <MessageContent message={message} />
         </div>
         <small className="dc-message-time">{formatTime(message.timestamp)}</small>
       </div>
@@ -181,9 +181,29 @@ function MessageBubble({ message, busy }: { message: DcChatMessage; busy: boolea
   return (
     <div className="dc-message dc-message-assistant">
       <div className="dc-message-content">
-        <Markdown text={message.content} />
+        <MessageContent message={message} />
       </div>
       <small className="dc-message-time">{formatTime(message.timestamp)}</small>
+    </div>
+  );
+}
+
+/**
+ * 气泡正文：流式草稿用纯文本 + 光标渲染。
+ * 半截 Markdown（未闭合的代码块/表格/强调符）会被解析成错乱结构并随每帧跳动，
+ * 定稿（streaming=false）后才切回 Markdown。
+ */
+function MessageContent({ message }: { message: DcChatMessage }) {
+  if (message.streaming) return <StreamingText content={message.content} />;
+  return <Markdown text={message.content} />;
+}
+
+/** 流式纯文本 + 光标（pre-wrap，保留 token 间的换行与空格） */
+function StreamingText({ content }: { content: string }) {
+  return (
+    <div className="dc-stream-plain">
+      {content}
+      <span className="dc-stream-caret" aria-hidden="true" />
     </div>
   );
 }
@@ -207,7 +227,14 @@ function ThinkingBlock({ message, busy }: { message: DcChatMessage; busy: boolea
         <span>💭 思考</span>
         <span className="dc-tool-toggle">{expanded ? "▾" : "▸"}</span>
       </button>
-      {expanded && <div className="dc-thinking-body">{message.content}</div>}
+      {expanded &&
+        (message.streaming ? (
+          <div className="dc-thinking-body">
+            <StreamingText content={message.content} />
+          </div>
+        ) : (
+          <div className="dc-thinking-body">{message.content}</div>
+        ))}
       <small className="dc-message-time">{formatTime(message.timestamp)}</small>
     </div>
   );

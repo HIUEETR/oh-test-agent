@@ -370,6 +370,9 @@ class DcEventType(StrEnum):
     ASSISTANT_MESSAGE = "assistant_message"
     THINKING = "thinking"  # 模型原生推理（reasoning_content / ThinkingPart）
     AGENT_TEXT = "agent_text"  # 模型可见叙述文本（每步 TextPart，非最终总结）
+    # token 级增量：仅作为前端草稿，由同 stream_key 的全量 THINKING/AGENT_TEXT
+    # 或 ASSISTANT_MESSAGE 收口（见 web/src/stores/dc-console.ts::appendEvent）
+    MESSAGE_DELTA = "message_delta"
     TOKEN_USAGE_UPDATED = "token_usage_updated"  # 会话 token 用量/缓存命中率更新
     SCRIPT_GENERATED = "script_generated"
     PROFILE_DISTILL_STARTED = "profile_distill_started"

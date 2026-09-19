@@ -26,6 +26,8 @@ from httpx import ASGITransport, AsyncClient
 
 from harmony_test_agent.api.app import create_app
 from harmony_test_agent.config import Settings
+from harmony_test_agent.dc.models import DcEventType
+from harmony_test_agent.dc.session import DcEventBus
 
 
 def _fake_screenshot_jpeg(self: Any, output_dir: Path, label: str = "screen") -> tuple[Path, bytes, int, int]:
@@ -184,3 +186,40 @@ class TestDcTurnEventStream:
         # 刷新历史（前端全量重建）依赖该 steps 列表还原思考/叙述块
         kinds = [step["kind"] for step in view["turns"][0]["steps"]]
         assert kinds == ["thinking", "agent_text"]
+
+
+class TestMessageDeltaReplayPolicy:
+    """token 级增量不进回放缓冲，但必须实时送达订阅者。
+
+    背景：``DcEventBus._recent`` 只有 ``dc_event_buffer_size``（默认 500）条，
+    一轮对话的 message_delta 轻松上千条。若把增量也塞进回放缓冲，Last-Event-ID
+    补发能力会被草稿挤空——重连客户端反而收不到工具事件与终态事件。
+    """
+
+    def test_deltas_are_broadcast_but_not_buffered_for_replay(self) -> None:
+        bus = DcEventBus(buffer_size=10)
+        queue = bus.subscribe()
+
+        bus.emit("dc-1", DcEventType.TURN_STARTED, "开始")
+        bus.emit("dc-1", DcEventType.MESSAGE_DELTA, "增量", {"delta": "你", "stream_key": "turn-1:m1:text"})
+        bus.emit("dc-1", DcEventType.AGENT_TEXT, "叙述", {"text": "你好", "stream_key": "turn-1:m1:text"})
+
+        # 实时订阅者拿到全部三类事件（顺序不变）
+        live = [queue.get_nowait().type for _ in range(3)]
+        assert live == [DcEventType.TURN_STARTED, DcEventType.MESSAGE_DELTA, DcEventType.AGENT_TEXT]
+
+        # 回放缓冲里没有草稿，但全量事件仍在
+        assert [event.type for event in bus.recent()] == [DcEventType.TURN_STARTED, DcEventType.AGENT_TEXT]
+
+    def test_replay_after_id_ignores_delta_ids(self) -> None:
+        bus = DcEventBus(buffer_size=10)
+
+        first = bus.emit("dc-1", DcEventType.TURN_STARTED, "开始")
+        bus.emit("dc-1", DcEventType.MESSAGE_DELTA, "增量", {"delta": "你"})
+        bus.emit("dc-1", DcEventType.MESSAGE_DELTA, "增量", {"delta": "好"})
+        last = bus.emit("dc-1", DcEventType.TURN_FINISHED, "结束")
+
+        replayed = bus.recent(after_id=first.event_id)
+        assert [event.type for event in replayed] == [DcEventType.TURN_FINISHED]
+        # event_id 仍单调递增（回放过滤只依赖它，允许出现空洞）
+        assert last.event_id > first.event_id

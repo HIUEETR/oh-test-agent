@@ -10,6 +10,10 @@ from fastapi.testclient import TestClient
 
 from harmony_test_agent.api.app import create_app
 from harmony_test_agent.config import Settings
+from harmony_test_agent.dc.models import TOOL_TIER, DcToolInvocation, DcToolName, utc_now
+
+BUNDLE = "com.example.notes"
+ABILITY = "MainAbility"
 
 
 @pytest.fixture
@@ -35,6 +39,49 @@ def client(tmp_path: Path) -> TestClient:
         ),
     ):
         yield TestClient(app, raise_server_exceptions=False)
+
+
+def _recorded(
+    tool: DcToolName,
+    *,
+    invocation_id: str,
+    args: dict[str, object] | None = None,
+    result_summary: str = "",
+) -> DcToolInvocation:
+    """构造一条成功的录制记录（脚本端点只要求录制非空，生成器只读 args/success）。"""
+    return DcToolInvocation(
+        invocation_id=invocation_id,
+        turn_id="turn-1",
+        tool=tool,
+        tier=TOOL_TIER[tool],
+        args=args or {},
+        success=True,
+        started_at=utc_now(),
+        ended_at=utc_now(),
+        duration_ms=3,
+        page_path="pages/Page1",
+        result_summary=result_summary,
+    )
+
+
+def _foreground_recording() -> DcToolInvocation:
+    """成功的前台应用观测：摘要格式与 tools.py::tool_foreground_app 一致。"""
+    return _recorded(
+        DcToolName.FOREGROUND_APP,
+        invocation_id="inv-fg",
+        result_summary=f"bundle={BUNDLE}, ability={ABILITY}",
+    )
+
+
+def _click_recording() -> DcToolInvocation:
+    return _recorded(DcToolName.CLICK, invocation_id="inv-click", args={"x": 10, "y": 20})
+
+
+def _seed_script_session(client: TestClient, invocations: list[DcToolInvocation]) -> str:
+    """创建真实 DC 会话并灌入录制记录。"""
+    session = client.app.state.dc_manager.create()
+    session.recorder.invocations.extend(invocations)
+    return session.session_id
 
 
 class TestDcSessionEndpoints:
@@ -134,6 +181,58 @@ class TestDcScriptEndpoints:
         session_id = create_resp.json()["session_id"]
         response = client.get(f"/api/dc/sessions/{session_id}/script")
         assert response.status_code == 404
+
+    # ------------------------------------------------------------------
+    # 改动 C1：脚本生成身份可省略，缺省时按会话录制推断
+    # ------------------------------------------------------------------
+
+    def test_generate_script_infers_identity_from_recordings(self, client: TestClient) -> None:
+        """空 body（省略身份）时按录制推断 bundle/ability，不再是 com.example.app 占位。"""
+        session_id = _seed_script_session(client, [_foreground_recording(), _click_recording()])
+
+        response = client.post(f"/api/dc/sessions/{session_id}/script", json={})
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert f"BUNDLE_NAME = {BUNDLE!r}" in body["python_text"]
+        assert f"MAIN_ABILITY = {ABILITY!r}" in body["python_text"]
+        # 推断出真实身份 ⇒ 不再是占位脚本
+        assert not any("placeholder" in warning for warning in body["warnings"])
+
+    def test_generate_script_without_body_infers_identity(self, client: TestClient) -> None:
+        """完全不发请求体也走同一推断路径（端点 body 可选）。"""
+        session_id = _seed_script_session(client, [_foreground_recording(), _click_recording()])
+
+        response = client.post(f"/api/dc/sessions/{session_id}/script")
+
+        assert response.status_code == 200, response.text
+        assert f"BUNDLE_NAME = {BUNDLE!r}" in response.json()["python_text"]
+
+    def test_generate_script_explicit_identity_wins_over_inference(self, client: TestClient) -> None:
+        """显式提供的身份优先于录制推断。"""
+        session_id = _seed_script_session(client, [_foreground_recording(), _click_recording()])
+
+        response = client.post(
+            f"/api/dc/sessions/{session_id}/script",
+            json={"bundle_name": "com.explicit.app", "main_ability": "ExplicitAbility"},
+        )
+
+        assert response.status_code == 200, response.text
+        text = response.json()["python_text"]
+        assert "BUNDLE_NAME = 'com.explicit.app'" in text
+        assert "MAIN_ABILITY = 'ExplicitAbility'" in text
+        assert BUNDLE not in text
+
+    def test_generate_script_without_identity_evidence_falls_back_to_placeholder(self, client: TestClient) -> None:
+        """录制无身份线索且未显式提供 → 回退占位身份：脚本仍生成，但只作诊断脚本。"""
+        session_id = _seed_script_session(client, [_click_recording()])
+
+        response = client.post(f"/api/dc/sessions/{session_id}/script", json={})
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "BUNDLE_NAME = 'com.example.app'" in body["python_text"]
+        assert any("placeholder" in warning for warning in body["warnings"])
 
 
 class TestDcSSEEndpoint:

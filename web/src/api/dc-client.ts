@@ -59,7 +59,25 @@ export function setDcTier(sessionId: string, tier: DcToolTier): Promise<{ sessio
   });
 }
 
-/** 触发脚本生成 */
+/** 组装「可选应用身份」请求体：未提供的字段一律不序列化。
+ *
+ *  后端把「字段缺省」解释为「请从会话录制推断身份」；前端若补占位值
+ *  （com.example.app / EntryAbility），后端会按「显式身份优先」采用，推断永不生效。
+ */
+function identityBody(
+  bundleName?: string,
+  mainAbility?: string,
+): { bundle_name?: string; main_ability?: string } {
+  const body: { bundle_name?: string; main_ability?: string } = {};
+  if (bundleName !== undefined) body.bundle_name = bundleName;
+  if (mainAbility !== undefined) body.main_ability = mainAbility;
+  return body;
+}
+
+/** 触发脚本生成。
+ *  身份可选：缺省时由后端从会话录制推断。只序列化已提供的字段——
+ *  前端补 `?? "com.example.app"` 会让后端按「显式身份优先」采用占位值，推断永不生效。
+ */
 export function generateDcScript(
   sessionId: string,
   bundleName?: string,
@@ -67,10 +85,7 @@ export function generateDcScript(
 ): Promise<DcScriptArtifact> {
   return apiJson<DcScriptArtifact>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/script`, {
     method: "POST",
-    body: {
-      bundle_name: bundleName ?? "com.example.app",
-      main_ability: mainAbility ?? "EntryAbility",
-    },
+    body: identityBody(bundleName, mainAbility),
   });
 }
 
@@ -87,12 +102,9 @@ export function distillDcProfile(
   mainAbility?: string,
 ): Promise<DcDistillResult> {
   // 未提供的字段不序列化：后端据此区分「显式身份」与「请后端推断」
-  const body: { bundle_name?: string; main_ability?: string } = {};
-  if (bundleName !== undefined) body.bundle_name = bundleName;
-  if (mainAbility !== undefined) body.main_ability = mainAbility;
   return apiJson<DcDistillResult>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/profile/distill`, {
     method: "POST",
-    body,
+    body: identityBody(bundleName, mainAbility),
   });
 }
 

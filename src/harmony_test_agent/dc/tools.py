@@ -23,7 +23,7 @@ from pydantic_ai import RunContext, Tool
 
 from ..devices.base import DeviceError
 from ..devices.harmony import HarmonyDeviceAdapter
-from ..models import CommandResult, ScreenSnapshot, StableLocator, ToolName, utc_now
+from ..models import CommandResult, ScreenSnapshot, StableLocator, ToolName, UIElement, utc_now
 from ..perception.normalizer import normalize_layout, page_path
 from ..runtime.tools import evaluate_assertion
 from ..storage.artifacts import ArtifactStore
@@ -127,6 +127,67 @@ def relative_artifact_path(abs_path: Path | None, base_dir: Path | None) -> str 
         return abs_path.resolve().relative_to(base_dir.resolve()).as_posix()
     except ValueError, OSError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# 坐标 → 元素命中（改动 A：为录制记录补录 resolved_element）
+# ---------------------------------------------------------------------------
+
+
+def _bbox_area(element: UIElement) -> int:
+    """元素面积；bbox 缺失记为 0（缺失 bbox 的元素不会成为命中候选）。"""
+    bbox = element.bbox
+    if bbox is None:
+        return 0
+    return max(0, bbox.right - bbox.left) * max(0, bbox.bottom - bbox.top)
+
+
+def _resolve_element(snapshot: ScreenSnapshot | None, x: int, y: int) -> UIElement | None:
+    """命中测试：取包含 ``(x, y)`` 的面积最小元素（最内层控件），editable 元素优先。
+
+    无快照、无元素包含该点或元素缺 bbox 时返回 ``None``，绝不抛异常：录制路径上的
+    坐标可能落在任何位置，命中失败只意味着脚本回退坐标写法（行为与补录前一致）。
+    """
+    if snapshot is None:
+        return None
+    hits = [
+        element
+        for element in snapshot.elements
+        if element.bbox is not None
+        and element.bbox.left <= x < element.bbox.right
+        and element.bbox.top <= y < element.bbox.bottom
+    ]
+    if not hits:
+        return None
+    # editable 优先：输入框常被更小的装饰性子元素覆盖，取最内层会失去可输入目标。
+    editable = [element for element in hits if element.editable]
+    pool = editable or hits
+    return min(pool, key=_bbox_area)
+
+
+def _invocation_coordinates(tool: DcToolName, args: dict[str, Any]) -> tuple[int, int] | None:
+    """取命中测试坐标：CLICK 用 ``x``/``y``，INPUT_TEXT 用二元 ``coordinate``。
+
+    其余工具不解析；参数缺失、非数值或长度不足时返回 ``None``（静默跳过补录）。
+    """
+    raw: Any
+    if tool == DcToolName.CLICK:
+        raw = (args.get("x"), args.get("y"))
+    elif tool == DcToolName.INPUT_TEXT:
+        coordinate = args.get("coordinate")
+        if not isinstance(coordinate, (list, tuple)):
+            return None
+        raw = tuple(coordinate)
+    else:
+        return None
+    if len(raw) < 2:
+        return None
+    x, y = raw[0], raw[1]
+    if isinstance(x, bool) or isinstance(y, bool):
+        return None
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return int(x), int(y)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +319,12 @@ class DcActionRecorder:
         # 因此必须在调用前补录（调用后的帧可能已切页）。
         latest = getattr(deps, "snapshot_holder", None)
         latest_snapshot = getattr(latest, "latest", None)
+        # 元素命中（改动 A）：与 page_path 同一时机、同一帧判定，供脚本生成与蒸馏复用。
+        # 命中失败保持 None ⇒ 脚本回退坐标写法，行为与补录前一致。
+        target_xy = _invocation_coordinates(tool, args)
+        resolved_element = (
+            _resolve_element(latest_snapshot, target_xy[0], target_xy[1]) if target_xy is not None else None
+        )
         invocation = DcToolInvocation(
             invocation_id=invocation_id,
             turn_id=deps.turn_id,
@@ -276,6 +343,7 @@ class DcActionRecorder:
             phase=phase or tool.value,
             cancellable=cancellable,
             page_path=(latest_snapshot.page_path if latest_snapshot is not None else "") or "",
+            resolved_element=resolved_element,
         )
         self.invocations.append(invocation)
         self._active = invocation

@@ -28,6 +28,7 @@ import type {
   DcEvent,
   DcLiveConnection,
   DcLiveToolRecord,
+  DcMessageRole,
   DcScriptArtifact,
   DcSessionSummary,
   DcSessionView,
@@ -545,32 +546,89 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           });
           break;
         }
-        case "thinking":
+        case "message_delta": {
+          // token 级增量：同一 stream_key 一条草稿，逐字追加（不重建数组元素，id 稳定）
+          const streamKey = (p.stream_key as string) ?? "";
+          const delta = (p.delta as string) ?? "";
+          if (!streamKey || !delta) break;
+          const position = findStreamDraft(state.messages, streamKey);
+          if (position < 0) {
+            patch.messages = [
+              ...state.messages,
+              {
+                id: `stream-${streamKey}`,
+                role: streamRoleOf(p),
+                content: delta,
+                timestamp: event.timestamp,
+                turnId: (p.turn_id as string) || undefined,
+                streaming: true,
+                streamKey,
+              },
+            ];
+            break;
+          }
+          const draft = state.messages[position];
+          // 已收口的草稿不再接受增量：该气泡已是全量文本（或终态回复），
+          // 迟到的增量只可能是重连回放，追加会把文本写重。
+          if (draft.streaming !== true) break;
+          const next = state.messages.slice();
+          next[position] = {
+            ...draft,
+            // 文本 key 出现 tool-call part 时 role 由 assistant 改判为 narration；不允许回退
+            role: draft.role === "narration" ? "narration" : streamRoleOf(p),
+            content: draft.content + delta,
+            streaming: true,
+          };
+          patch.messages = next;
+          break;
+        }
+        case "thinking": {
+          const text = (p.text as string) ?? event.message;
+          const streamKey = p.stream_key as string | undefined;
+          const position = streamKey ? findStreamDraft(state.messages, streamKey) : -1;
+          if (position >= 0) {
+            // 全量事件收口草稿：id 与时间戳不变（避免 React 重挂载闪烁），只替换文本并清流式标记
+            const next = state.messages.slice();
+            next[position] = { ...state.messages[position], role: "thinking", content: text, streaming: false };
+            patch.messages = next;
+            break;
+          }
           patch.messages = [
             ...state.messages,
             {
               id: `think-${event.event_id}`,
               role: "thinking",
-              content: (p.text as string) ?? event.message,
+              content: text,
               timestamp: event.timestamp,
               turnId: p.turn_id as string | undefined,
               step: p.step as number | undefined,
             },
           ];
           break;
-        case "agent_text":
+        }
+        case "agent_text": {
+          const text = (p.text as string) ?? event.message;
+          const streamKey = p.stream_key as string | undefined;
+          const position = streamKey ? findStreamDraft(state.messages, streamKey) : -1;
+          if (position >= 0) {
+            const next = state.messages.slice();
+            next[position] = { ...state.messages[position], role: "narration", content: text, streaming: false };
+            patch.messages = next;
+            break;
+          }
           patch.messages = [
             ...state.messages,
             {
               id: `text-${event.event_id}`,
               role: "narration",
-              content: (p.text as string) ?? event.message,
+              content: text,
               timestamp: event.timestamp,
               turnId: p.turn_id as string | undefined,
               step: p.step as number | undefined,
             },
           ];
           break;
+        }
         case "tool_call_started": {
           const record = recordFromStarted(p, event.timestamp);
           const ledger = upsertRecord(state.liveInvocations, record);
@@ -658,6 +716,8 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           patch.cancelStatus = "settled";
           patch.status = "idle";
           patch.sending = false;
+          // 中断后残留草稿不会再有全量事件收口：就地定稿，避免光标卡住
+          patch.messages = settleStreamingMessages(state.messages);
           patch.activity = nextActivity(state.activity, {
             kind: "idle",
             phase: (p.reason as string) || "interrupted",
@@ -692,6 +752,20 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           patch.cancelStatus = "settled";
           patch.activity = nextActivity(state.activity, { kind: "idle", phaseLabelOverride: "" });
           const summary = (p.summary as string) ?? event.message;
+          const turnId = p.turn_id as string | undefined;
+          // 终态权威文本：优先收口同轮仍在流式的 assistant 草稿（id 不变，光标即刻消失）
+          const draftPosition = state.messages.findIndex(
+            (message) =>
+              message.streaming === true &&
+              message.role === "assistant" &&
+              (turnId == null || message.turnId === turnId),
+          );
+          if (draftPosition >= 0) {
+            const next = state.messages.slice();
+            next[draftPosition] = { ...state.messages[draftPosition], content: summary, streaming: false };
+            patch.messages = next;
+            break;
+          }
           // 终态回答可能已作为 narration（agent_text）渲染过（历史记录或 Mock 场景）：
           // 同一轮中文本相同的叙述就地升级为助手消息，避免出现两条「任务完成」。
           const last = state.messages[state.messages.length - 1];
@@ -709,7 +783,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
                 role: "assistant",
                 content: summary,
                 timestamp: event.timestamp,
-                turnId: p.turn_id as string | undefined,
+                turnId,
               },
             ];
           }
@@ -733,6 +807,8 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           patch.status = "idle";
           patch.sending = false;
           patch.cancelStatus = "settled";
+          // 轮次结束：残留草稿一律定稿（后续对账会用快照重建权威历史）
+          patch.messages = settleStreamingMessages(state.messages);
           patch.activity = nextActivity(state.activity, {
             kind: "idle",
             phaseLabelOverride: turnFinishedLabel(status),
@@ -746,6 +822,7 @@ export const useDcConsole = create<DcState>()((set, get) => ({
           patch.status = "idle";
           patch.sending = false;
           patch.cancelStatus = "settled";
+          patch.messages = settleStreamingMessages(state.messages);
           patch.activity = nextActivity(state.activity, { kind: "idle", phaseLabelOverride: "" });
           reconcile = true;
           break;
@@ -1049,6 +1126,34 @@ function toolMark(status: DcToolStatus): string {
     case "cancelled": return "⊘";
     default: return "?";
   }
+}
+
+// ---------------------------------------------------------------------------
+// 流式草稿（message_delta）：同一 stream_key 一条草稿，全量事件就地收口
+// ---------------------------------------------------------------------------
+
+/** 按 streamKey 找回草稿消息的下标（message_delta 追加与全量事件收口共用）。 */
+function findStreamDraft(messages: DcChatMessage[], streamKey: string): number {
+  return messages.findIndex((message) => message.streamKey === streamKey);
+}
+
+/**
+ * 把残留的流式草稿批量定稿（轮次结束/中断/错误时调用，避免光标卡住）。
+ * 无草稿时返回原数组引用，避免无意义的重渲染。
+ */
+function settleStreamingMessages(messages: DcChatMessage[]): DcChatMessage[] {
+  if (!messages.some((message) => message.streaming)) return messages;
+  return messages.map((message) => (message.streaming ? { ...message, streaming: false } : message));
+}
+
+/**
+ * message_delta 的 role 归一化：只接受契约内的三种取值；
+ * 缺失或非法时按 stream_key 后缀推断（`:thinking` → thinking，其余按叙述处理）。
+ */
+function streamRoleOf(payload: Record<string, any>): DcMessageRole {
+  const role = payload.role;
+  if (role === "thinking" || role === "narration" || role === "assistant") return role;
+  return String(payload.stream_key ?? "").endsWith(":thinking") ? "thinking" : "narration";
 }
 
 // ---------------------------------------------------------------------------

@@ -81,8 +81,10 @@ class ResolveAttentionRequest(BaseModel):
 
 
 class GenerateScriptRequest(BaseModel):
-    bundle_name: str = "com.example.app"
-    main_ability: str = "EntryAbility"
+    """DC 会话脚本生成请求：身份可省略，缺省时由会话录制记录推断。"""
+
+    bundle_name: str | None = Field(default=None, max_length=255)
+    main_ability: str | None = Field(default=None, max_length=255)
 
 
 class DistillProfileRequest(BaseModel):
@@ -312,7 +314,11 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
         session_id: str,
         body: GenerateScriptRequest | None = None,
     ):
-        """触发 Hypium 脚本生成。"""
+        """触发 Hypium 脚本生成。
+
+        应用身份可省略：缺省（或只给了一半）时由会话录制记录推断，与蒸馏端点同一推断器；
+        推断不出则回退占位身份，脚本仍生成但只作为诊断脚本。
+        """
         body = body or GenerateScriptRequest()
         try:
             session = manager.get(session_id)
