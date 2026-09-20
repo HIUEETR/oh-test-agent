@@ -42,11 +42,23 @@ class TestTierTools:
     def test_l1_has_11_tools(self) -> None:
         assert len(TIER_TOOLS[DcToolTier.L1]) == 11
 
-    def test_l2_has_6_tools(self) -> None:
-        assert len(TIER_TOOLS[DcToolTier.L2]) == 6
+    def test_l2_has_7_tools(self) -> None:
+        assert len(TIER_TOOLS[DcToolTier.L2]) == 7
 
-    def test_l3_has_5_tools(self) -> None:
-        assert len(TIER_TOOLS[DcToolTier.L3]) == 5
+    def test_l3_has_4_tools(self) -> None:
+        assert len(TIER_TOOLS[DcToolTier.L3]) == 4
+
+    def test_start_app_is_available_at_l2(self) -> None:
+        """start_app 必须在默认层可用：会话身份（bundle/ability）只能由显式启动留下。
+
+        回归背景（30e 复盘）：默认 L2 下没有 start_app，模型只能靠 foreground_app
+        记录身份，而设备对前台应用的 ability 常报 unknown，导致脚本生成与蒸馏都拿不到
+        真实 bundle/ability。
+        """
+        assert DcToolName.START_APP in TIER_TOOLS[DcToolTier.L2]
+        assert DcToolName.START_APP in tools_up_to(DcToolTier.L2)
+        assert DcToolName.START_APP not in tools_up_to(DcToolTier.L1)
+        assert DcToolName.FORCE_STOP_APP not in tools_up_to(DcToolTier.L2)
 
     def test_l4_has_3_tools(self) -> None:
         assert len(TIER_TOOLS[DcToolTier.L4]) == 3
@@ -74,8 +86,8 @@ class TestToolsUpTo:
     def test_l1_returns_11(self) -> None:
         assert len(tools_up_to(DcToolTier.L1)) == 11
 
-    def test_l2_returns_17(self) -> None:
-        assert len(tools_up_to(DcToolTier.L2)) == 17
+    def test_l2_returns_18(self) -> None:
+        assert len(tools_up_to(DcToolTier.L2)) == 18
 
     def test_l3_returns_22(self) -> None:
         assert len(tools_up_to(DcToolTier.L3)) == 22

@@ -384,11 +384,11 @@ export interface DcActivitySnapshot {
 }
 
 
-/** 层级描述（用于 TierPicker） */
+/** 层级描述（用于 TierPicker）；L2 含 start_app：会话身份只能由显式启动留下 */
 export const TIER_DESCRIPTIONS: Record<DcToolTier, string> = {
   1: "L1 · UI 交互：点击、滑动、输入、按键、截图",
-  2: "L2 · 观测诊断：UI 层级、日志、前台应用、应用列表、内存",
-  3: "L3 · 应用管理：启动、停止、安装、卸载、清除数据",
+  2: "L2 · 观测诊断与启动：UI 层级、日志、前台应用、应用列表、内存、启动应用",
+  3: "L3 · 应用管理：停止、安装、卸载、清除数据",
   4: "L4 · 文件操作：推送、拉取、列出设备文件",
   5: "L5 · 受控 Shell：执行白名单命令（破坏性命令被拦截）",
 };

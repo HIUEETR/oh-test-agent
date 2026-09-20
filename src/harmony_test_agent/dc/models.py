@@ -24,7 +24,7 @@ class DcToolTier(IntEnum):
     """HDC 工具暴露层级；高层级包含低层级的全部工具。"""
 
     L1 = 1  # UI 交互
-    L2 = 2  # 观测诊断
+    L2 = 2  # 观测诊断与启动
     L3 = 3  # 应用管理
     L4 = 4  # 文件操作
     L5 = 5  # 受控 Shell
@@ -46,15 +46,18 @@ class DcToolName(StrEnum):
     ASSERT_VISIBLE = "assert_visible"
     ASSERT_NOT_VISIBLE = "assert_not_visible"
     ASSERT_TEXT = "assert_text"
-    # L2 — 观测诊断 (6)
+    # L2 — 观测诊断与启动 (7)
     DUMP_UI_HIERARCHY = "dump_ui_hierarchy"
     COLLECT_LOGS = "collect_logs"
     FOREGROUND_APP = "foreground_app"
     LIST_APPS = "list_apps"
     INSPECT_APP = "inspect_app"
     MEMORY_DUMP = "memory_dump"
-    # L3 — 应用管理 (5)
+    # start_app 语义上属「应用管理」，但会话身份（bundle/ability）只有显式调用它才能留下：
+    # 设备对前台应用的 ability 常报 unknown，脚本生成与 Profile 蒸馏都依赖这份身份，
+    # 因此下放到默认层 L2（否则默认层级下模型没有任何可用的身份记录手段）。
     START_APP = "start_app"
+    # L3 — 应用管理 (4)
     FORCE_STOP_APP = "force_stop_app"
     INSTALL_APP = "install_app"
     UNINSTALL_APP = "uninstall_app"
@@ -89,9 +92,9 @@ TIER_TOOLS: dict[DcToolTier, tuple[DcToolName, ...]] = {
         DcToolName.LIST_APPS,
         DcToolName.INSPECT_APP,
         DcToolName.MEMORY_DUMP,
+        DcToolName.START_APP,
     ),
     DcToolTier.L3: (
-        DcToolName.START_APP,
         DcToolName.FORCE_STOP_APP,
         DcToolName.INSTALL_APP,
         DcToolName.UNINSTALL_APP,
@@ -116,6 +119,28 @@ def tools_up_to(tier: DcToolTier) -> tuple[DcToolName, ...]:
         if level <= tier:
             result.extend(TIER_TOOLS[level])
     return tuple(result)
+
+
+# 会出现在前台、但不属于「被测应用」的系统界面 bundle：
+# 桌面（sceneboard）与系统 UI。会话身份推断必须跳过它们，
+# 否则「任务开始时的前台」会被误记成目标应用（30e 复盘：记成了桌面 + ability=unknown）。
+SYSTEM_FOREGROUND_BUNDLES: frozenset[str] = frozenset(
+    {
+        "com.ohos.sceneboard",
+        "com.ohos.systemui",
+    }
+)
+
+
+def is_system_foreground_bundle(bundle_name: str) -> bool:
+    """该 bundle 是否属于系统界面（桌面/系统 UI/输入法）而非被测应用。"""
+    bundle = (bundle_name or "").strip()
+    if not bundle:
+        return True
+    if bundle in SYSTEM_FOREGROUND_BUNDLES:
+        return True
+    # 输入法会短暂成为前台 root 窗口，但它永远不是被测目标
+    return "inputmethod" in bundle.casefold()
 
 
 # ---------------------------------------------------------------------------

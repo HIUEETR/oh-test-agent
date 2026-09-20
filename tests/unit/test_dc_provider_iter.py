@@ -527,6 +527,19 @@ class TestSystemPromptIdentityAndAssertions:
         assert "无断言" not in DC_SYSTEM_PROMPT
         assert "不要尝试使用 assert_visible/assert_text" not in DC_SYSTEM_PROMPT
 
+    def test_prompt_records_identity_after_target_app_is_foreground(self) -> None:
+        """身份必须在目标应用进入前台**之后**记录，并排除桌面身份。
+
+        回归背景（30e 复盘）：原文案要求「任务开始、首次操作目标应用前」记录一次，
+        模型照做后记到的是桌面（com.ohos.sceneboard / ability=unknown），
+        脚本生成与蒸馏因此始终拿不到真实 bundle/ability。
+        """
+        assert "目标应用进入前台之后" in DC_SYSTEM_PROMPT
+        assert "com.ohos.sceneboard" in DC_SYSTEM_PROMPT
+        assert "ability=unknown" in DC_SYSTEM_PROMPT
+        # start_app 已下放到 L2，提示词可以要求模型用它显式声明身份
+        assert "MainAbility" in DC_SYSTEM_PROMPT
+
     def test_other_execution_rules_stay_intact(self) -> None:
         """只改规则 3/9：其余规则与回复格式不动。"""
         assert "**自主执行**" in DC_SYSTEM_PROMPT

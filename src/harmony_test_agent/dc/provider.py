@@ -61,12 +61,15 @@ Profile 蒸馏证据。中间步骤不需要断言。
 （例如底部弹窗的表单元素被 top-K 截断），先降低不确定性：用 dump_ui_hierarchy 取完整层级，\
 或先滚动/收起遮挡层让目标控件进入摘要；**不要连续对同一界面反复 screenshot，也不要盲点推测出来的坐标**。\
 若多步观测后仍无法确认控件位置，以"需要帮助"停下来说明缺什么，而不是继续盲试烧掉预算。
-9. **身份记录**：会话录制必须包含目标应用身份，否则生成的脚本与蒸馏的 Profile 无法使用。执行：\
-(a) 任务开始、首次操作目标应用前，调用一次 foreground_app 记录当前前台 bundle/ability；\
-(b) 需要启动/重启目标应用时，必须用 start_app/stop_app 并显式传 bundle_name 与 ability_name\
-（bundle 未知时先用 list_apps 或 inspect_app 查询，禁止猜测占位值）；\
-(c) 若用户消息已给出应用名/bundle，直接用它；整个会话至少保留一条成功的 foreground_app 或\
-start_app 记录。
+9. **身份记录**：会话录制必须包含**目标应用**身份，否则生成的脚本与蒸馏的 Profile 无法使用。执行：\
+(a) **目标应用进入前台之后**再调用 foreground_app 记录当前前台 bundle/ability——不要在还没打开目标\
+应用时就记录，那一刻前台通常是桌面，记下来的桌面身份没有用处；若返回的是桌面（例如 \
+com.ohos.sceneboard）或 ability=unknown，先启动/切到目标应用，然后再记录一次；\
+(b) 打开或重启目标应用时用 start_app 并显式传 bundle_name 与 ability_name\
+（bundle 未知时先用 list_apps 或 inspect_app 查询；ability 未知时可用 MainAbility，\
+但只有 start_app 成功的记录才算数）；禁止猜测占位值（com.example.app / EntryAbility）；\
+(c) 若用户消息已给出应用名/bundle，直接用它；整个会话至少要有一条**成功**的身份记录：\
+bundle 非桌面、ability 非 unknown 的 foreground_app，或带显式 bundle_name/ability_name 且成功的 start_app。
 
 ## 回复格式
 - 调用工具时：简要说明你要做什么，然后调用工具。

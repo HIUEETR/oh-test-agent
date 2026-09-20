@@ -610,7 +610,7 @@ async def tool_inspect_screen(ctx: RunContext[DcToolContext]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# L2 工具 — 观测诊断 (6)
+# L2 工具 — 观测诊断与启动 (7)
 # ---------------------------------------------------------------------------
 
 
@@ -730,11 +730,9 @@ async def tool_memory_dump(ctx: RunContext[DcToolContext], bundle_name: str) -> 
     return await deps.recorder.run(ctx, DcToolName.MEMORY_DUMP, {"bundle_name": bundle_name}, _dump)
 
 
-# ---------------------------------------------------------------------------
-# L3 工具 — 应用管理 (5)
-# ---------------------------------------------------------------------------
-
-
+# start_app 语义上属「应用管理」（下面 L3 小节），但它被下放到默认层 L2：
+# 会话身份（bundle/ability）只有显式调用它才能留下，而脚本生成与 Profile 蒸馏都依赖这份身份
+# （设备对前台应用的 ability 常报 unknown，foreground_app 单独不足以提供身份）。
 async def tool_start_app(
     ctx: RunContext[DcToolContext], bundle_name: str, ability_name: str, module_name: str | None = None
 ) -> str:
@@ -746,6 +744,11 @@ async def tool_start_app(
     return await deps.recorder.run(
         ctx, DcToolName.START_APP, args, lambda: deps.device.start_app(bundle_name, ability_name, module_name)
     )
+
+
+# ---------------------------------------------------------------------------
+# L3 工具 — 应用管理 (4)
+# ---------------------------------------------------------------------------
 
 
 async def tool_force_stop_app(ctx: RunContext[DcToolContext], bundle_name: str) -> str:
