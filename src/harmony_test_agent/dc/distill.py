@@ -51,6 +51,7 @@ from .models import (
     DcError,
     DcToolInvocation,
     DcToolName,
+    is_system_foreground_bundle,
 )
 
 if TYPE_CHECKING:  # 仅类型注解：session ↔ distill 存在运行期循环依赖
@@ -95,15 +96,31 @@ def infer_session_identity(session: DcSession) -> tuple[str, str] | None:
 
     优先级（先命中先返回）：
 
-    1. 最近一次成功 ``foreground_app`` 的 ``result_summary``：bundle 非占位，
+    1. ``session.observed_identity``：会话每次上下文采集时从 UI 层级解析出的 focused 窗口
+       （bundle 非系统界面/非占位，ability 非空、非 ``unknown``）。设备对
+       ``foreground_app`` 的 ability 常报 ``unknown``，而这条来自层级里的 ``abilityName``，
+       是唯一不依赖模型主动调工具的身份来源；
+    2. 最近一次成功 ``foreground_app`` 的 ``result_summary``：bundle 非占位，
        且 ability 非空、非 ``unknown``（后者是设备未上报 ability 时的兜底值）；
-    2. 最近一次成功 ``start_app`` 的 ``args``：``bundle_name`` / ``ability_name`` 均非占位；
-    3. ``session.last_foreground_app`` 作 bundle，配同 bundle 的任一成功 ``start_app``
+    3. 最近一次成功 ``start_app`` 的 ``args``：``bundle_name`` / ``ability_name`` 均非占位；
+    4. ``session.last_foreground_app`` 作 bundle，配同 bundle 的任一成功 ``start_app``
        的 ``ability_name``（非占位）；
-    4. 均不满足返回 ``None``。
+    5. 均不满足返回 ``None``。
 
     返回值只做「可推断」判断，占位校验仍由 :meth:`DcProfileDistiller.prepare` 统一负责。
     """
+    observed = getattr(session, "observed_identity", None)
+    if observed is not None:
+        bundle = str(observed[0] or "").strip()
+        ability = str(observed[1] or "").strip()
+        if (
+            ability
+            and ability != _UNKNOWN_ABILITY
+            and bundle not in _PLACEHOLDER_BUNDLES
+            and not is_system_foreground_bundle(bundle)
+        ):
+            return bundle, ability
+
     invocations = list(session.recorder.invocations)
 
     for invocation in reversed(invocations):

@@ -234,3 +234,103 @@ def _write_fake_jpeg(output_dir: Path) -> Path:
     path = output_dir / f"dc_{int(time.time())}.jpeg"
     path.write_bytes(b"fake-jpeg")
     return path
+
+
+# ---------------------------------------------------------------------------
+# 会话自观测身份（_capture_context 顺带解析 focused 窗口）
+# ---------------------------------------------------------------------------
+
+
+def _hierarchy(*windows: tuple[str, str, bool]) -> dict[str, Any]:
+    """构造 dumpLayout 风格的最小层级：每项是 (bundle, ability, focused)。"""
+    return {
+        "attributes": {},
+        "children": [
+            {
+                "bundleName": bundle,
+                "abilityName": ability,
+                "focused": "true" if focused else "false",
+                "type": "root" if focused else "WindowScene",
+            }
+            for bundle, ability, focused in windows
+        ],
+    }
+
+
+class TestObservedForegroundIdentity:
+    """目标应用身份由会话采集时解析，不依赖模型主动调用 foreground_app。
+
+    回归背景（30e 复盘）：模型只在任务开始（前台是桌面）时调了一次 foreground_app，
+    记录到 ``com.ohos.sceneboard / unknown``；而目标应用的 bundle+ability 就在每次
+    上下文采集的 UI 层级里，于是脚本生成与蒸馏全都拿不到真实身份。
+    """
+
+    async def test_capture_records_target_identity(self, tmp_path: Path) -> None:
+        session = make_session(tmp_path)
+        session.device.collect_ui_hierarchy = lambda: _hierarchy(  # type: ignore[method-assign]
+            ("com.ohos.sceneboard", "", False),
+            ("com.huawei.hmos.calendar", "MainAbility", True),
+        )
+        session.hdc.screenshot_jpeg = lambda output_dir, label="screen": (
+            _write_fake_jpeg(output_dir),
+            b"fake-jpeg",
+            1080,
+            2232,
+        )
+
+        await session._capture_context()
+
+        assert session.observed_identity == ("com.huawei.hmos.calendar", "MainAbility")
+
+    async def test_launcher_only_capture_does_not_set_identity(self, tmp_path: Path) -> None:
+        session = make_session(tmp_path)
+        session.device.collect_ui_hierarchy = lambda: _hierarchy(  # type: ignore[method-assign]
+            ("com.ohos.sceneboard", "", True),
+        )
+        session.hdc.screenshot_jpeg = lambda output_dir, label="screen": (
+            _write_fake_jpeg(output_dir),
+            b"fake-jpeg",
+            1080,
+            2232,
+        )
+
+        await session._capture_context()
+
+        assert session.observed_identity is None
+
+    async def test_first_target_identity_is_sticky(self, tmp_path: Path) -> None:
+        """中途切到别的应用不应改写会话身份（只认第一次命中的目标应用）。"""
+        session = make_session(tmp_path)
+        session.hdc.screenshot_jpeg = lambda output_dir, label="screen": (
+            _write_fake_jpeg(output_dir),
+            b"fake-jpeg",
+            1080,
+            2232,
+        )
+        session.device.collect_ui_hierarchy = lambda: _hierarchy(  # type: ignore[method-assign]
+            ("com.huawei.hmos.calendar", "MainAbility", True),
+        )
+        await session._capture_context()
+
+        session.device.collect_ui_hierarchy = lambda: _hierarchy(  # type: ignore[method-assign]
+            ("com.huawei.hmos.settings", "SettingsAbility", True),
+        )
+        await session._capture_context()
+
+        assert session.observed_identity == ("com.huawei.hmos.calendar", "MainAbility")
+
+    async def test_hierarchy_failure_keeps_identity_none(self, tmp_path: Path) -> None:
+        session = make_session(tmp_path)
+        session.device.collect_ui_hierarchy = no_ui_hierarchy  # type: ignore[method-assign]
+        session.hdc.screenshot_jpeg = lambda output_dir, label="screen": (
+            _write_fake_jpeg(output_dir),
+            b"fake-jpeg",
+            1080,
+            2232,
+        )
+
+        jpeg_bytes, digest = await session._capture_context()
+
+        assert jpeg_bytes == b"fake-jpeg"
+        assert digest == "(UI hierarchy unavailable)"
+        assert session.observed_identity is None

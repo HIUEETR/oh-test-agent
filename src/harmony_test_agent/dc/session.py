@@ -22,7 +22,8 @@ from ..models import ResolvedTarget, ScreenSnapshot, StableLocator, utc_now
 from ..profiles import ProfileRegistry, ProfileRegistryError
 from ..runner import HypiumRunner
 from ..storage.artifacts import ArtifactStore
-from .distill import DcProfileDistiller
+from ..targets.catalog import parse_foreground_hierarchy
+from .distill import DcProfileDistiller, infer_session_identity
 from .generator import DcHypiumGenerator, _format_args
 from .hdc import DcHdcExecutor
 from .models import (
@@ -52,6 +53,7 @@ from .models import (
     DcTurnStatus,
     DcTurnTimeout,
     DcUsageLimitReached,
+    is_system_foreground_bundle,
 )
 from .provider import DcChatProvider, MockDcChatProvider, create_dc_provider
 from .safety import DcShellPolicy
@@ -100,7 +102,12 @@ class DcEventBus:
             message=message,
             payload=payload or {},
         )
-        self._recent.append(event)
+        # token 级增量只是前端草稿，不进 Last-Event-ID 回放缓冲：
+        # 否则一轮上千条 delta 会挤掉工具/终态事件的回放能力（buffer 只有 500 条），
+        # 而重连客户端本来就靠 refreshSession 的全量快照重建消息与账本。
+        # 实时订阅者照常收到（下面的广播不受影响）。
+        if event_type != DcEventType.MESSAGE_DELTA:
+            self._recent.append(event)
         dead: list[asyncio.Queue[DcEvent]] = []
         for queue in self._subscribers:
             try:
@@ -239,6 +246,11 @@ class DcSession:
         self.active_turn_id: str | None = None
         self.last_page_path: str | None = None
         self.last_foreground_app: str | None = None
+        # 会话自己观测到的「目标应用身份」(bundle, ability)：
+        # 每次上下文采集都会 dump 一次 UI 层级，里面就带 focused 窗口的 bundleName/abilityName。
+        # 只认第一个「非系统界面」的观测结果（后续可能切到桌面/输入法等，不应劫持会话身份）。
+        # 这是脚本生成与 Profile 蒸馏的身份来源中优先级最高的一条（见 dc/distill.py）。
+        self.observed_identity: tuple[str, str] | None = None
         # 副作用未确认的动作：新轮次必须先对账（Phase 4）
         self.pending_attention: DcToolInvocation | None = None
         # 会话内累计 token 用量（来自 provider 真实响应；前端输入框下方展示）
@@ -830,6 +842,7 @@ class DcSession:
             hierarchy = await asyncio.to_thread(self.device.collect_ui_hierarchy)
             from ..perception.normalizer import normalize_layout, page_path
 
+            self._observe_foreground_identity(hierarchy)
             fallback_width = width or 1080
             fallback_height = height or 2232
             elements = normalize_layout(hierarchy, fallback_width, fallback_height)
@@ -850,6 +863,32 @@ class DcSession:
             ui_tree_digest = "(UI hierarchy unavailable)"
 
         return jpeg_bytes, ui_tree_digest
+
+    def _observe_foreground_identity(self, hierarchy: Any) -> None:
+        """从刚采到的 UI 层级里记住「目标应用身份」``(bundle, ability)``。
+
+        设备对 ``foreground_app`` 的 ability 常报 ``unknown``（桌面尤其如此），而脚本生成与
+        Profile 蒸馏都需要真实 bundle+ability 才能产出可回放资产。focused 窗口的
+        ``bundleName``/``abilityName`` 本来就在每次采集的层级里，所以这里直接解析并记住，
+        不依赖模型主动调用工具（30e 复盘：模型只在任务开始时调了一次 foreground_app，
+        那一次记到的是桌面 + ability=unknown，导致整条身份链失效）。
+
+        只认第一次命中的非系统界面：会话中途可能回到桌面、弹出输入法，它们不应改写会话身份。
+        观测失败静默跳过，绝不影响上下文采集主流程。
+        """
+        if self.observed_identity is not None:
+            return
+        try:
+            foreground = parse_foreground_hierarchy(hierarchy)
+        except Exception:  # noqa: BLE001 - 观测是尽力而为，失败不影响采集
+            return
+        if foreground is None:
+            return
+        bundle = (foreground.bundle_name or "").strip()
+        ability = (foreground.ability_name or "").strip()
+        if not ability or is_system_foreground_bundle(bundle):
+            return
+        self.observed_identity = (bundle, ability)
 
     @property
     def snapshots(self) -> list[ScreenSnapshot]:
@@ -877,10 +916,18 @@ class DcSession:
 
     def generate_script(
         self,
-        bundle_name: str = "com.example.app",
-        main_ability: str = "EntryAbility",
+        bundle_name: str | None = None,
+        main_ability: str | None = None,
     ) -> DcScriptArtifact:
-        """从录制的操作生成 Hypium 脚本。"""
+        """从录制的操作生成 Hypium 脚本。
+
+        应用身份缺省（或只给了一半）时按会话录制推断，与蒸馏端点共用同一推断器；
+        推断不出则回退占位身份 ``com.example.app`` / ``EntryAbility``——脚本仍会生成，
+        但只作为诊断脚本（占位警告保留，行为与改动前一致）。
+        """
+        explicit = (bundle_name, main_ability) if (bundle_name and main_ability) else None
+        identity = explicit or infer_session_identity(self)
+        resolved_bundle, resolved_ability = identity or ("com.example.app", "EntryAbility")
         generator = DcHypiumGenerator(self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds)
         snapshots = [self.snapshot_holder.latest] if self.snapshot_holder.latest else []
         self.script = generator.generate(
@@ -888,8 +935,8 @@ class DcSession:
             device_id=self.device_id,
             invocations=list(self.recorder.invocations),
             snapshots=snapshots,
-            bundle_name=bundle_name,
-            main_ability=main_ability,
+            bundle_name=resolved_bundle,
+            main_ability=resolved_ability,
         )
         self._emit(
             DcEventType.SCRIPT_GENERATED,

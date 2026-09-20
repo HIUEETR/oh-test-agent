@@ -50,7 +50,7 @@ class _Holder:
 
 
 class _FakeSession:
-    """蒸馏器只读取 session_id/device_id/dir/recorder/snapshots/last_foreground_app。"""
+    """蒸馏器只读取 session_id/device_id/dir/recorder/snapshots/last_foreground_app/observed_identity。"""
 
     def __init__(
         self,
@@ -59,6 +59,7 @@ class _FakeSession:
         snapshots: list[ScreenSnapshot] | None = None,
         *,
         last_foreground_app: str | None = None,
+        observed_identity: tuple[str, str] | None = None,
     ) -> None:
         self.session_id = "dc-20260917T000000Z-abcd1234"
         self.device_id = "127.0.0.1:5555"
@@ -67,6 +68,7 @@ class _FakeSession:
         self.recorder = _Recorder(invocations)
         self.snapshots = snapshots or []
         self.last_foreground_app = last_foreground_app
+        self.observed_identity = observed_identity
 
 
 def _settings(tmp_path: Path, **overrides: Any) -> Settings:
@@ -442,6 +444,70 @@ def test_resolve_identity_prefers_explicit_params_then_infers(tmp_path: Path) ->
 
     no_evidence = _FakeSession(tmp_path, [])
     assert resolve_distill_identity(no_evidence, None, None) is None  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# 会话自观测身份（最高优先级）
+# ---------------------------------------------------------------------------
+
+
+def test_infer_identity_prefers_session_observed_identity(tmp_path: Path) -> None:
+    """会话自观测到的 (bundle, ability) 优先于任何录制推断。
+
+    回归背景（30e 复盘）：模型只会在任务开始时调一次 foreground_app，那一次前台是桌面，
+    记录到 ``com.ohos.sceneboard / unknown``；而目标应用的 bundle+ability 其实就在每次
+    上下文采集的 UI 层级里（focused 窗口的 bundleName/abilityName）。
+    """
+    session = _FakeSession(
+        tmp_path,
+        [_foreground("com.ohos.sceneboard", "unknown")],
+        observed_identity=("com.huawei.hmos.calendar", "MainAbility"),
+    )
+
+    assert infer_session_identity(session) == ("com.huawei.hmos.calendar", "MainAbility")  # type: ignore[arg-type]
+
+
+def test_observed_identity_wins_over_successful_start_app(tmp_path: Path) -> None:
+    session = _FakeSession(
+        tmp_path,
+        [_start_app(BUNDLE, ABILITY)],
+        observed_identity=("com.huawei.hmos.calendar", "MainAbility"),
+    )
+
+    assert infer_session_identity(session) == ("com.huawei.hmos.calendar", "MainAbility")  # type: ignore[arg-type]
+
+
+def test_observed_identity_rejects_system_bundles_and_unknown_ability(tmp_path: Path) -> None:
+    """系统界面（桌面/系统UI/输入法）与 unknown/空 ability 不构成身份，继续往下推断。"""
+    launcher = _FakeSession(
+        tmp_path,
+        [_foreground(BUNDLE, ABILITY)],
+        observed_identity=("com.ohos.sceneboard", "MainAbility"),
+    )
+    assert infer_session_identity(launcher) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+    ime = _FakeSession(
+        tmp_path,
+        [_foreground(BUNDLE, ABILITY)],
+        observed_identity=("com.huawei.hmos.inputmethod", "InputMethodAbility"),
+    )
+    assert infer_session_identity(ime) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+    unknown = _FakeSession(tmp_path, [_foreground(BUNDLE, ABILITY)], observed_identity=(BUNDLE, "unknown"))
+    assert infer_session_identity(unknown) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+    empty = _FakeSession(tmp_path, [], observed_identity=("", ""))
+    assert infer_session_identity(empty) is None  # type: ignore[arg-type]
+
+
+def test_is_system_foreground_bundle_matches_launcher_ui_and_ime() -> None:
+    from harmony_test_agent.dc.models import is_system_foreground_bundle
+
+    assert is_system_foreground_bundle("com.ohos.sceneboard") is True
+    assert is_system_foreground_bundle("com.ohos.systemui") is True
+    assert is_system_foreground_bundle("com.huawei.hmos.inputmethod") is True
+    assert is_system_foreground_bundle("") is True
+    assert is_system_foreground_bundle("com.huawei.hmos.calendar") is False
 
 
 # ---------------------------------------------------------------------------

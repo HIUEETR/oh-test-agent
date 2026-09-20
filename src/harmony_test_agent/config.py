@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     dc_checkpoint_interval: float = Field(default=2.0, ge=0, le=60)
     # 关闭/淘汰会话时等待轮次收尾的上限
     dc_close_timeout: float = Field(default=8.0, gt=0, le=120)
+    # token 级流式输出：开启后模型侧按增量发 message_delta，前端逐字显示。
+    # 关闭即回退整块输出（每个 part 仍发全量 THINKING/AGENT_TEXT，行为与旧版一致）。
+    dc_token_streaming: bool = True
 
     @field_validator("harmony_cors_origins", mode="before")
     @classmethod

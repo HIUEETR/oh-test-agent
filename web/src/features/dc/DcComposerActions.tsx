@@ -1,7 +1,9 @@
 // DC 会话输入区控制条右侧的两个动作 pill（DeepSeek 式 composer）：
 // - Hypium 脚本：一键生成（已生成则直接预览），生成完成自动弹出预览；
+//   若后端只能拿到占位身份（com.example.app / EntryAbility），hint 行给出
+//   「手动填写身份」入口，用显式身份重新生成一次；
 // - 蒸馏为 Profile：身份由后端从会话录制推断，一键触发；推断失败（422 cannot infer）
-//   时给出「手动填写身份」兜底浮层，用显式身份重试一次。
+//   时同样给出「手动填写身份」兜底浮层，用显式身份重试一次。
 //
 // 「任务完成」统一定义为 taskDone：有会话 + 会话未关闭 + 有录制记录 + 非执行中。
 // 执行中/无录制一律 disabled，不依赖后端兜底。
@@ -12,6 +14,19 @@ import { createPortal } from "react-dom";
 import { FileCode2, FlaskConical } from "lucide-react";
 import { useDcConsole } from "../../stores/dc-console";
 import { DcScriptPreview } from "./DcScriptPreview";
+
+/** 脚本使用占位身份时后端给出的警告片段（见 src/harmony_test_agent/dc/generator.py）。 */
+const PLACEHOLDER_WARNING = "placeholder bundle/ability";
+
+/** 占位身份的含义：脚本仍能生成，但回放/验收/蒸馏都拿不到真实应用。 */
+const PLACEHOLDER_HINT = "脚本使用了占位身份（com.example.app / EntryAbility），回放与验收都不可用。";
+
+interface Hint {
+  tone: "info" | "error";
+  text: string;
+  /** 是否给出「手动填写身份」入口 */
+  retry: boolean;
+}
 
 export function DcComposerActions() {
   const activeSessionId = useDcConsole((state) => state.activeSessionId);
@@ -28,7 +43,9 @@ export function DcComposerActions() {
   const [distilling, setDistilling] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [identityOpen, setIdentityOpen] = useState(false);
-  const [hint, setHint] = useState<{ tone: "info" | "error"; text: string; retry: boolean } | null>(null);
+  // 身份浮层要重试哪个动作：脚本生成或蒸馏
+  const [identityFor, setIdentityFor] = useState<"script" | "distill">("distill");
+  const [hint, setHint] = useState<Hint | null>(null);
 
   const busy = status === "thinking" || status === "acting" || cancelStatus === "confirming";
   const taskDone =
@@ -36,21 +53,37 @@ export function DcComposerActions() {
   const disabled = !taskDone;
   const disabledTitle = "任务完成且有录制记录后可点击";
 
-  const handleScript = async () => {
+  const hasPlaceholderIdentity = (artifact: { warnings?: string[] } | null): boolean =>
+    Boolean(artifact?.warnings?.some((warning) => warning.includes(PLACEHOLDER_WARNING)));
+
+  /** 生成脚本；未传身份时由后端推断，推断不出会退回占位身份（此时给出手动填写入口）。 */
+  const handleScript = async (bundleName?: string, mainAbility?: string) => {
     if (disabled || generating || distilling) return;
     setHint(null);
-    // 已有脚本：直接预览，不重复请求
-    if (useDcConsole.getState().script) {
+    const existing = useDcConsole.getState().script;
+    // 无显式身份且已有脚本：直接预览，不重复请求；但仍保留手动身份入口，
+    // 否则用户再次点击 pill 会清掉 hint、走进「只能看占位脚本」的死胡同。
+    if (bundleName === undefined && mainAbility === undefined && existing) {
       setPreviewOpen(true);
+      if (hasPlaceholderIdentity(existing)) {
+        setIdentityFor("script");
+        setHint({ tone: "error", text: PLACEHOLDER_HINT, retry: true });
+      }
       return;
     }
     setGenerating(true);
     try {
-      await generateScript();
-      if (useDcConsole.getState().script) setPreviewOpen(true);
-      else {
+      await generateScript(bundleName, mainAbility);
+      const artifact = useDcConsole.getState().script;
+      if (!artifact) {
         const detail = useDcConsole.getState().error;
         if (detail) setHint({ tone: "error", text: detail, retry: false });
+        return;
+      }
+      setPreviewOpen(true);
+      if (hasPlaceholderIdentity(artifact)) {
+        setIdentityFor("script");
+        setHint({ tone: "error", text: PLACEHOLDER_HINT, retry: true });
       }
     } finally {
       setGenerating(false);
@@ -78,8 +111,18 @@ export function DcComposerActions() {
     }
   };
 
+  const handleIdentitySubmit = async (bundleName: string, mainAbility: string) => {
+    if (identityFor === "script") {
+      await handleScript(bundleName, mainAbility);
+      setIdentityOpen(false);
+      return;
+    }
+    await handleDistill(bundleName, mainAbility);
+  };
+
   const closePreview = useCallback(() => setPreviewOpen(false), []);
   const closeIdentity = useCallback(() => setIdentityOpen(false), []);
+  const identityBusy = identityFor === "script" ? generating : distilling;
 
   return (
     <>
@@ -142,11 +185,16 @@ export function DcComposerActions() {
               onClick={(event) => event.stopPropagation()}
             >
               <strong>手动填写应用身份</strong>
-              <small>后端无法从会话录制推断 bundleName / MainAbility，请显式指定后重试。</small>
+              <small>
+                {identityFor === "script"
+                  ? "脚本用了占位身份（com.example.app / EntryAbility），请显式指定目标应用后重新生成。"
+                  : "后端无法从会话录制推断 bundleName / MainAbility，请显式指定后重试。"}
+              </small>
               <IdentityForm
-                distilling={distilling}
+                busy={identityBusy}
+                busyLabel={identityFor === "script" ? "生成中…" : "蒸馏中…"}
                 onCancel={closeIdentity}
-                onSubmit={(bundleName, mainAbility) => void handleDistill(bundleName, mainAbility)}
+                onSubmit={(bundleName, mainAbility) => void handleIdentitySubmit(bundleName, mainAbility)}
               />
             </div>
           </div>,
@@ -160,11 +208,13 @@ export function DcComposerActions() {
 
 /** 手动身份表单：非空校验在本地完成，避免把空值当成「显式身份」发给后端。 */
 function IdentityForm({
-  distilling,
+  busy,
+  busyLabel,
   onCancel,
   onSubmit,
 }: {
-  distilling: boolean;
+  busy: boolean;
+  busyLabel: string;
   onCancel: () => void;
   onSubmit: (bundleName: string, mainAbility: string) => void;
 }) {
@@ -199,7 +249,7 @@ function IdentityForm({
         value={bundleName}
         placeholder="com.example.notes"
         onChange={(event) => setBundleName(event.target.value)}
-        disabled={distilling}
+        disabled={busy}
       />
       <label htmlFor="dc-identity-ability">MainAbility</label>
       <input
@@ -208,13 +258,13 @@ function IdentityForm({
         value={mainAbility}
         placeholder="MainAbility"
         onChange={(event) => setMainAbility(event.target.value)}
-        disabled={distilling}
+        disabled={busy}
       />
       {error && <small className="dc-identity-error">{error}</small>}
       <div className="dc-identity-actions">
         <button type="button" className="secondary compact" onClick={onCancel}>取消</button>
-        <button type="button" className="primary compact" onClick={submit} disabled={distilling}>
-          {distilling ? "蒸馏中…" : "用该身份重试"}
+        <button type="button" className="primary compact" onClick={submit} disabled={busy}>
+          {busy ? busyLabel : "用该身份重试"}
         </button>
       </div>
     </>

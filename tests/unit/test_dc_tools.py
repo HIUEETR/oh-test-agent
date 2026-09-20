@@ -23,10 +23,13 @@ from harmony_test_agent.dc.tools import (
     DcActionRecorder,
     DcSnapshotHolder,
     DcToolContext,
+    _resolve_element,
     build_tools,
     tool_assert_not_visible,
     tool_assert_text,
     tool_assert_visible,
+    tool_click,
+    tool_input_text,
 )
 from harmony_test_agent.models import BoundingBox, ScreenSnapshot, UIElement
 
@@ -39,11 +42,23 @@ class TestTierTools:
     def test_l1_has_11_tools(self) -> None:
         assert len(TIER_TOOLS[DcToolTier.L1]) == 11
 
-    def test_l2_has_6_tools(self) -> None:
-        assert len(TIER_TOOLS[DcToolTier.L2]) == 6
+    def test_l2_has_7_tools(self) -> None:
+        assert len(TIER_TOOLS[DcToolTier.L2]) == 7
 
-    def test_l3_has_5_tools(self) -> None:
-        assert len(TIER_TOOLS[DcToolTier.L3]) == 5
+    def test_l3_has_4_tools(self) -> None:
+        assert len(TIER_TOOLS[DcToolTier.L3]) == 4
+
+    def test_start_app_is_available_at_l2(self) -> None:
+        """start_app 必须在默认层可用：会话身份（bundle/ability）只能由显式启动留下。
+
+        回归背景（30e 复盘）：默认 L2 下没有 start_app，模型只能靠 foreground_app
+        记录身份，而设备对前台应用的 ability 常报 unknown，导致脚本生成与蒸馏都拿不到
+        真实 bundle/ability。
+        """
+        assert DcToolName.START_APP in TIER_TOOLS[DcToolTier.L2]
+        assert DcToolName.START_APP in tools_up_to(DcToolTier.L2)
+        assert DcToolName.START_APP not in tools_up_to(DcToolTier.L1)
+        assert DcToolName.FORCE_STOP_APP not in tools_up_to(DcToolTier.L2)
 
     def test_l4_has_3_tools(self) -> None:
         assert len(TIER_TOOLS[DcToolTier.L4]) == 3
@@ -71,8 +86,8 @@ class TestToolsUpTo:
     def test_l1_returns_11(self) -> None:
         assert len(tools_up_to(DcToolTier.L1)) == 11
 
-    def test_l2_returns_17(self) -> None:
-        assert len(tools_up_to(DcToolTier.L2)) == 17
+    def test_l2_returns_18(self) -> None:
+        assert len(tools_up_to(DcToolTier.L2)) == 18
 
     def test_l3_returns_22(self) -> None:
         assert len(tools_up_to(DcToolTier.L3)) == 22
@@ -196,14 +211,22 @@ class _FakeHdc:
 
 
 class _FakeDevice:
-    """最小设备替身：screenshot 返回预先准备的帧。"""
+    """最小设备替身：screenshot 返回预先准备的帧，click/input_text 只记账不产生副作用。"""
 
     def __init__(self, snapshot: ScreenSnapshot) -> None:
         self.snapshot = snapshot
+        self.clicks: list[tuple[int, int]] = []
+        self.inputs: list[tuple[str, int | None, int | None]] = []
 
     def screenshot(self, output_dir: Path, run_id: str, label: str = "screen") -> ScreenSnapshot:
         del output_dir, run_id, label
         return self.snapshot
+
+    def click(self, x: int, y: int) -> None:
+        self.clicks.append((x, y))
+
+    def input_text(self, text: str, x: int | None = None, y: int | None = None) -> None:
+        self.inputs.append((text, x, y))
 
 
 def _context(
@@ -323,3 +346,161 @@ def test_page_path_is_recorded_from_latest_snapshot(tmp_path: Path) -> None:
     asyncio.run(tool_assert_visible(ctx, "搜索"))
 
     assert ctx.deps.recorder.invocations[-1].page_path == "pages/Home"
+
+
+# ---------------------------------------------------------------------------
+# 改动 A：坐标 → 元素命中，录制时补录 resolved_element
+# ---------------------------------------------------------------------------
+
+
+def _boxed(
+    element_id: str,
+    box: tuple[int, int, int, int],
+    *,
+    key: str = "",
+    element_key_id: str = "",
+    editable: bool = False,
+) -> UIElement:
+    """带 bbox 的元素替身（现有 ``_element`` 的 bbox 固定，无法构造嵌套命中）。"""
+    left, top, right, bottom = box
+    return UIElement(
+        element_id=element_id,
+        key=key,
+        id=element_key_id,
+        editable=editable,
+        clickable=True,
+        bbox=BoundingBox(left=left, top=top, right=right, bottom=bottom),
+    )
+
+
+def _layered_snapshot() -> ScreenSnapshot:
+    """外层容器 + 内层按钮 + 一块可编辑输入框（互相重叠）。"""
+    return _snapshot(
+        [
+            _boxed("container", (0, 0, 400, 400)),
+            _boxed("inner_button", (10, 10, 60, 60), key="inner_button"),
+            _boxed("search_field", (100, 100, 300, 160), key="search_input", editable=True),
+        ]
+    )
+
+
+class TestResolvedElementHitTest:
+    """``_resolve_element`` 纯函数：最内层优先、editable 优先、命中失败返回 None。"""
+
+    def test_none_snapshot_returns_none(self) -> None:
+        assert _resolve_element(None, 10, 10) is None
+
+    def test_picks_innermost_element(self) -> None:
+        element = _resolve_element(_layered_snapshot(), 20, 20)
+
+        assert element is not None
+        assert element.element_id == "inner_button"
+
+    def test_prefers_editable_over_smaller_child(self) -> None:
+        snapshot = _snapshot(
+            [
+                _boxed("label", (100, 100, 140, 140)),
+                _boxed("search_field", (100, 100, 300, 160), key="search_input", editable=True),
+            ]
+        )
+
+        element = _resolve_element(snapshot, 120, 120)
+
+        assert element is not None
+        assert element.element_id == "search_field"
+
+    def test_point_outside_every_bbox_returns_none(self) -> None:
+        assert _resolve_element(_layered_snapshot(), 900, 900) is None
+
+    def test_right_and_bottom_edges_are_exclusive(self) -> None:
+        """bbox 是半开区间 [left, right) × [top, bottom)：右/下边界上的点不算命中。"""
+        snapshot = _snapshot([_boxed("inner_button", (10, 10, 60, 60))])
+
+        assert _resolve_element(snapshot, 59, 59) is not None
+        assert _resolve_element(snapshot, 60, 30) is None
+        assert _resolve_element(snapshot, 30, 60) is None
+
+    def test_element_without_bbox_is_ignored(self) -> None:
+        snapshot = _snapshot([UIElement(element_id="no_bbox", content="无定位框")])
+
+        assert _resolve_element(snapshot, 10, 10) is None
+
+
+class TestRecorderResolvedElement:
+    """录制器补录：CLICK 用 x/y，INPUT_TEXT 用二元 coordinate，命中失败静默为 None。"""
+
+    def test_click_records_innermost_element(self, tmp_path: Path) -> None:
+        ctx = _context(tmp_path, _layered_snapshot())
+
+        asyncio.run(tool_click(ctx, 20, 20))
+
+        invocation = ctx.deps.recorder.invocations[-1]
+        assert invocation.tool == DcToolName.CLICK
+        assert invocation.status == DcToolStatus.SUCCEEDED
+        assert invocation.resolved_element is not None
+        assert invocation.resolved_element.element_id == "inner_button"
+        assert ctx.deps.device.clicks == [(20, 20)]  # type: ignore[attr-defined]
+
+    def test_click_on_editable_field_prefers_editable(self, tmp_path: Path) -> None:
+        ctx = _context(tmp_path, _layered_snapshot())
+
+        asyncio.run(tool_click(ctx, 120, 120))
+
+        element = ctx.deps.recorder.invocations[-1].resolved_element
+        assert element is not None
+        assert element.element_id == "search_field"
+        assert element.editable is True
+
+    def test_click_hit_failure_records_none(self, tmp_path: Path) -> None:
+        ctx = _context(tmp_path, _layered_snapshot())
+
+        asyncio.run(tool_click(ctx, 900, 900))
+
+        assert ctx.deps.recorder.invocations[-1].resolved_element is None
+
+    def test_click_without_snapshot_records_none(self, tmp_path: Path) -> None:
+        """无帧可判时不抛异常，只保持 None（脚本回退坐标写法）。"""
+        ctx = _context(tmp_path, None)
+
+        asyncio.run(tool_click(ctx, 20, 20))
+
+        invocation = ctx.deps.recorder.invocations[-1]
+        assert invocation.status == DcToolStatus.SUCCEEDED
+        assert invocation.resolved_element is None
+
+    def test_input_text_records_element_from_coordinate(self, tmp_path: Path) -> None:
+        ctx = _context(tmp_path, _layered_snapshot())
+
+        asyncio.run(tool_input_text(ctx, "hello", 120, 120))
+
+        invocation = ctx.deps.recorder.invocations[-1]
+        assert invocation.tool == DcToolName.INPUT_TEXT
+        assert invocation.resolved_element is not None
+        assert invocation.resolved_element.element_id == "search_field"
+
+    def test_input_text_without_coordinate_records_none(self, tmp_path: Path) -> None:
+        """coordinate 缺省（仅输入、不先点按）时不猜元素。"""
+        ctx = _context(tmp_path, _layered_snapshot())
+
+        asyncio.run(tool_input_text(ctx, "hello"))
+
+        invocation = ctx.deps.recorder.invocations[-1]
+        assert invocation.args.get("coordinate") is None
+        assert invocation.resolved_element is None
+
+    def test_malformed_coordinates_are_skipped_silently(self, tmp_path: Path) -> None:
+        """coordinate 长度不足/非序列、x/y 缺失或非数值 → 全部静默跳过，不抛异常。"""
+        ctx = _context(tmp_path, _layered_snapshot())
+        recorder = ctx.deps.recorder
+
+        malformed: list[tuple[DcToolName, dict[str, Any]]] = [
+            (DcToolName.INPUT_TEXT, {"text": "a", "coordinate": [120]}),
+            (DcToolName.INPUT_TEXT, {"text": "a", "coordinate": "120,120"}),
+            (DcToolName.CLICK, {"x": 120}),
+            (DcToolName.CLICK, {"x": "120", "y": 120}),
+        ]
+        for tool, args in malformed:
+            asyncio.run(recorder.run(ctx, tool, args, lambda: None))
+
+        assert len(recorder.invocations) == len(malformed)
+        assert all(invocation.resolved_element is None for invocation in recorder.invocations)

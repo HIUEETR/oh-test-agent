@@ -81,6 +81,9 @@ _NON_REPLAYABLE: frozenset[DcToolName] = frozenset(
 
 _SWIPE_DIRECTIONS = frozenset({"UP", "DOWN", "LEFT", "RIGHT"})
 
+# 聚合警告的固定方向顺序：保证同一会话的警告列表稳定可断言（集合本身无序）。
+_SWIPE_DIRECTION_ORDER = ("UP", "DOWN", "LEFT", "RIGHT")
+
 
 class DcHypiumGenerator:
     """从 DC 会话录制的操作生成 Hypium Python 脚本。"""
@@ -114,6 +117,8 @@ class DcHypiumGenerator:
             DcScriptArtifact 包含脚本路径、源码、警告和省略操作。
         """
         warnings: list[str] = []
+        # swipe 方向只能靠起止坐标推断，逐条警告会刷成警告墙：先计数、循环后聚合（改动 C2）。
+        swipe_inferred: dict[str, int] = {}
         omitted: list[dict[str, str]] = []
         body_lines: list[str] = []
         included_count = 0
@@ -174,7 +179,7 @@ class DcHypiumGenerator:
                     body_lines.append(f"        # skipped: key_event({key!r})")
                     continue
 
-            action_result = self._to_action_result(inv, trace, warnings)
+            action_result = self._to_action_result(inv, trace, warnings, swipe_inferred)
             if action_result is None:
                 omitted.append(
                     {"invocation_id": inv.invocation_id, "tool": inv.tool.value, "reason": "could not map to action"}
@@ -189,6 +194,12 @@ class DcHypiumGenerator:
                 omitted.append(
                     {"invocation_id": inv.invocation_id, "tool": inv.tool.value, "reason": "no renderable output"}
                 )
+
+        # swipe 推断警告按方向聚合为一条（固定方向顺序，输出稳定）
+        for direction in _SWIPE_DIRECTION_ORDER:
+            count = swipe_inferred.get(direction, 0)
+            if count:
+                warnings.append(f"swipe direction inferred as {direction} x{count} (from start/end coordinates)")
 
         # DC 会话使用显式 assert_* 工具，因此**不注入** hypium.py:191-199 的兜底断言，
         # 以免掩盖缺失的断言。若模型未调用任何 assert_* 工具（explicit_assertions == 0），
@@ -256,8 +267,18 @@ class DcHypiumGenerator:
     # 内部：DC 工具调用 → ActionResult 映射
     # ------------------------------------------------------------------
 
-    def _to_action_result(self, inv: DcToolInvocation, trace: RunTrace, warnings: list[str]) -> ActionResult | None:
-        """把 DcToolInvocation 映射为既有 ActionResult（不修改 ToolName 枚举）。"""
+    def _to_action_result(
+        self,
+        inv: DcToolInvocation,
+        trace: RunTrace,
+        warnings: list[str],
+        swipe_inferred: dict[str, int],
+    ) -> ActionResult | None:
+        """把 DcToolInvocation 映射为既有 ActionResult（不修改 ToolName 枚举）。
+
+        ``swipe_inferred`` 由 :meth:`generate` 创建并持有：方向靠坐标推断的 swipe 只累加计数，
+        聚合警告由调用方在循环结束后统一追加（避免逐条刷屏）。
+        """
         tool_name = _REPLAYABLE_MAP.get(inv.tool)
         if tool_name is None:
             return None
@@ -288,6 +309,17 @@ class DcHypiumGenerator:
                 value = element.key or element.id
                 locator = LocatorCandidate(kind=kind, value=value)
 
+        # input_text：resolved_element 带 key/id 时同样升级为结构化定位器。
+        # 录制补录了坐标命中元素（tools.py::_resolve_element）后，输入框才能写成
+        # BY.key/BY.id；否则渲染只能退化为 BY.text("输入框") 并留下
+        # "semantic target ... fell back to exact text" 警告。
+        if inv.tool == DcToolName.INPUT_TEXT:
+            element = inv.resolved_element
+            if element and (element.key or element.id):
+                kind = LocatorKind.KEY if element.key else LocatorKind.ID
+                value = element.key or element.id
+                locator = LocatorCandidate(kind=kind, value=value)
+
         # swipe：确保 direction 大写
         if inv.tool == DcToolName.SWIPE:
             direction = str(params.get("direction", "")).upper()
@@ -308,7 +340,7 @@ class DcHypiumGenerator:
                         direction = "UP"
                 else:
                     direction = "UP"
-                warnings.append(f"{inv.invocation_id}: swipe direction inferred as {direction}")
+                swipe_inferred[direction] = swipe_inferred.get(direction, 0) + 1
             params["direction"] = direction
 
         # input_text：确保有 text 参数

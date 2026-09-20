@@ -350,3 +350,152 @@ class TestDcHypiumGenerator:
 
         assert result.replay_eligible is False
         assert result.explicit_assertions == 0
+
+    # ------------------------------------------------------------------
+    # 改动 A：resolved_element → 结构化选择器；改动 C2：swipe 警告聚合
+    # ------------------------------------------------------------------
+
+    def _element(self, *, key: str = "", element_id: str = "") -> UIElement:
+        return UIElement(
+            element_id=key or element_id,
+            key=key,
+            id=element_id,
+            content="搜索",
+            clickable=True,
+            bbox=BoundingBox(left=0, top=0, right=100, bottom=50),
+        )
+
+    def test_click_with_resolved_element_uses_key_selector(self, tmp_path: Path) -> None:
+        """命中元素带 key → 生成 BY.key 选择器，不再退化为坐标。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [
+            _invocation(
+                DcToolName.CLICK,
+                {"x": 10, "y": 20},
+                resolved_element=self._element(key="home_search"),
+            )
+        ]
+        result = generator.generate(
+            session_id="dc-test-resolved-key",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+        )
+
+        assert "driver.touch(BY.key('home_search'))" in result.python_text
+        assert "coordinate fallback" not in result.python_text
+
+    def test_click_with_resolved_element_id_uses_id_selector(self, tmp_path: Path) -> None:
+        """只有 id 没有 key 时退到 BY.id（仍是结构化选择器，非坐标）。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [
+            _invocation(
+                DcToolName.CLICK,
+                {"x": 10, "y": 20},
+                resolved_element=self._element(element_id="submit_button"),
+            )
+        ]
+        result = generator.generate(
+            session_id="dc-test-resolved-id",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+        )
+
+        assert "driver.touch(BY.id('submit_button'))" in result.python_text
+        assert "coordinate fallback" not in result.python_text
+
+    def test_click_without_resolved_element_keeps_coordinate_fallback(self, tmp_path: Path) -> None:
+        """未命中元素（resolved_element=None）时保持坐标写法：改动 A 的边界行为不变。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [_invocation(DcToolName.CLICK, {"x": 10, "y": 20})]
+        result = generator.generate(
+            session_id="dc-test-coordinate-fallback",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+        )
+
+        assert "driver.touch((10, 20))  # coordinate fallback" in result.python_text
+
+    def test_input_text_with_resolved_element_uses_key_selector(self, tmp_path: Path) -> None:
+        """input_text 命中元素带 key → BY.key 定位器，且不再产生 semantic fallback 警告。
+
+        这是改动 A 在 input_text 上的效果链终点：只补录 resolved_element 而渲染层
+        不消费它，脚本仍会写 ``BY.text('输入框')`` 并留下警告墙里的那条 fallback。
+        """
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [
+            _invocation(
+                DcToolName.INPUT_TEXT,
+                {"text": "hello", "coordinate": [10, 20]},
+                resolved_element=self._element(key="search_input"),
+            )
+        ]
+        result = generator.generate(
+            session_id="dc-test-input-text-locator",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+        )
+
+        assert "driver.input_text(BY.key('search_input'), 'hello')" in result.python_text
+        assert not [warning for warning in result.warnings if "fell back to exact text" in warning]
+
+    def test_input_text_without_resolved_element_keeps_text_fallback(self, tmp_path: Path) -> None:
+        """未命中元素时仍写 BY.text('输入框') 并保留 fallback 警告（边界行为不变）。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [_invocation(DcToolName.INPUT_TEXT, {"text": "hello", "coordinate": [10, 20]})]
+        result = generator.generate(
+            session_id="dc-test-input-text-fallback",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+        )
+
+        assert "driver.input_text(BY.text('输入框'), 'hello')" in result.python_text
+        assert any("fell back to exact text" in warning for warning in result.warnings)
+
+    def test_swipe_warnings_are_aggregated_by_direction(self, tmp_path: Path) -> None:
+        """同类 swipe 推断警告聚合为一条并带计数，方向顺序固定（改动 C2）。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [
+            _invocation(DcToolName.SWIPE, {"start": [100, 500], "end": [100, 200]}, invocation_id="inv-sw-1"),
+            _invocation(DcToolName.SWIPE, {"start": [100, 600], "end": [100, 300]}, invocation_id="inv-sw-2"),
+            _invocation(DcToolName.SWIPE, {"start": [500, 100], "end": [100, 100]}, invocation_id="inv-sw-3"),
+        ]
+        result = generator.generate(
+            session_id="dc-test-swipe-aggregate",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+        )
+
+        swipe_warnings = [warning for warning in result.warnings if "swipe direction inferred" in warning]
+        assert swipe_warnings == [
+            "swipe direction inferred as UP x2 (from start/end coordinates)",
+            "swipe direction inferred as LEFT x1 (from start/end coordinates)",
+        ]
+        # 不再逐条携带 invocation_id 刷屏
+        assert not any(warning.startswith("inv-sw-") for warning in result.warnings)
+        # 三条 swipe 仍然各自渲染成脚本行
+        assert result.python_text.count("driver.swipe(") == 3
+
+    def test_swipe_with_explicit_direction_is_not_counted(self, tmp_path: Path) -> None:
+        """显式给出 direction 的 swipe 不是推断结果，不产生聚合警告。"""
+        artifacts = ArtifactStore(tmp_path / "runs")
+        generator = DcHypiumGenerator(artifacts)
+        invocations = [
+            _invocation(
+                DcToolName.SWIPE,
+                {"direction": "DOWN", "start": [100, 200], "end": [100, 500]},
+                invocation_id="inv-sw-explicit",
+            )
+        ]
+        result = generator.generate(
+            session_id="dc-test-swipe-explicit",
+            device_id="127.0.0.1:5555",
+            invocations=invocations,
+        )
+
+        assert not any("swipe direction inferred" in warning for warning in result.warnings)

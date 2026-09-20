@@ -118,11 +118,27 @@ export type DcEventType =
   | "model_call_started" | "model_call_progress" | "model_call_finished" | "model_call_failed"
   | "tool_call_started" | "tool_call_progress" | "tool_call_finished"
   | "screenshot_captured" | "ui_tree_captured"
-  | "assistant_message" | "thinking" | "agent_text"
+  | "assistant_message" | "thinking" | "agent_text" | "message_delta"
   | "token_usage_updated"
   | "script_generated" | "tier_changed" | "needs_attention" | "error";
 
-/** DC 事件类型列表（用于 SSE 订阅） */
+/**
+ * `message_delta` 事件 payload 契约（token 级流式增量）：
+ * 同一模型消息的思考与文本各有一个 `stream_key`（`{turn_id}:m{index}:thinking|:text`）。
+ * 文本 key 的 `role` 可能随 tool-call part 的出现由 `assistant` 改判为 `narration`。
+ *
+ * 既有 `thinking` / `agent_text` 全量事件的 payload 追加 `stream_key` 字段（与对应草稿一致），
+ * 前端据此把草稿就地收口为全量文本；`assistant_message` 仍是终态权威文本。
+ */
+export interface DcMessageDeltaPayload {
+  turn_id: string;
+  stream_key: string;
+  role: "thinking" | "narration" | "assistant";
+  delta: string;
+  message_index: number;
+}
+
+/** DC 事件类型列表（用于 SSE 订阅；新增事件类型必须同步加入，否则收不到） */
 export const DC_EVENT_TYPES: DcEventType[] = [
   "session_created", "session_closed",
   "turn_started", "turn_finished",
@@ -131,7 +147,7 @@ export const DC_EVENT_TYPES: DcEventType[] = [
   "model_call_started", "model_call_progress", "model_call_finished", "model_call_failed",
   "tool_call_started", "tool_call_progress", "tool_call_finished",
   "screenshot_captured", "ui_tree_captured",
-  "assistant_message", "thinking", "agent_text",
+  "assistant_message", "thinking", "agent_text", "message_delta",
   "token_usage_updated",
   "script_generated", "tier_changed", "needs_attention", "error",
 ];
@@ -286,6 +302,10 @@ export interface DcChatMessage {
   toolPhase?: string;
   toolErrorCode?: string | null;
   toolEffectStatus?: DcEffectStatus;
+  /** 流式草稿标记：仅 message_delta 增量期间为 true，收口/终态后置 false */
+  streaming?: boolean;
+  /** 流式草稿键（`{turn_id}:m{index}:thinking|text`）：全量事件据此就地收口同一草稿 */
+  streamKey?: string;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -364,11 +384,11 @@ export interface DcActivitySnapshot {
 }
 
 
-/** 层级描述（用于 TierPicker） */
+/** 层级描述（用于 TierPicker）；L2 含 start_app：会话身份只能由显式启动留下 */
 export const TIER_DESCRIPTIONS: Record<DcToolTier, string> = {
   1: "L1 · UI 交互：点击、滑动、输入、按键、截图",
-  2: "L2 · 观测诊断：UI 层级、日志、前台应用、应用列表、内存",
-  3: "L3 · 应用管理：启动、停止、安装、卸载、清除数据",
+  2: "L2 · 观测诊断与启动：UI 层级、日志、前台应用、应用列表、内存、启动应用",
+  3: "L3 · 应用管理：停止、安装、卸载、清除数据",
   4: "L4 · 文件操作：推送、拉取、列出设备文件",
   5: "L5 · 受控 Shell：执行白名单命令（破坏性命令被拦截）",
 };

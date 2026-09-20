@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from datetime import timedelta
 from typing import Any
 
-from pydantic_ai import Agent, BinaryContent, UsageLimits
+from pydantic_ai import Agent, BinaryContent, ModelRequestNode, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 
 from ..agents.providers import MockAgentProvider, OpenAICompatibleProvider
@@ -27,6 +28,8 @@ from .models import (
     DcTurnTimeout,
     DcUsageLimitReached,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 系统提示词
@@ -45,7 +48,9 @@ DC_SYSTEM_PROMPT = """\
 1. **自主执行**：收到用户消息后，自主多步调用工具完成任务，直到任务完成或遇到无法逾越的阻塞。\
 不要每步都询问用户下一步该做什么。
 2. **每轮一个工具**：每次回复只调用一个工具，等待结果后再决定下一步。
-3. **无断言**：DC 模式不引入任何断言校验。不要尝试使用 assert_visible/assert_text 等工具。
+3. **断言 checkpoint**：当用户任务包含可观测的完成条件（某文案出现/某元素可见）时，在达成后调用\
+assert_text/assert_visible 留证（整个任务 1-2 次即可，不要每步都断言）；这些断言会进入回放脚本与\
+Profile 蒸馏证据。中间步骤不需要断言。
 4. **免 Profile**：不需要验证 Target App Profile。直接操作用户指定的应用。
 5. **Shell 安全**：execute_shell 受安全策略约束，破坏性命令（reboot/rm -rf / /mkfs/dd/param set 等）\
 会被拒绝。如果被拒绝，向用户报告并尝试替代方案。
@@ -56,6 +61,15 @@ DC_SYSTEM_PROMPT = """\
 （例如底部弹窗的表单元素被 top-K 截断），先降低不确定性：用 dump_ui_hierarchy 取完整层级，\
 或先滚动/收起遮挡层让目标控件进入摘要；**不要连续对同一界面反复 screenshot，也不要盲点推测出来的坐标**。\
 若多步观测后仍无法确认控件位置，以"需要帮助"停下来说明缺什么，而不是继续盲试烧掉预算。
+9. **身份记录**：会话录制必须包含**目标应用**身份，否则生成的脚本与蒸馏的 Profile 无法使用。执行：\
+(a) **目标应用进入前台之后**再调用 foreground_app 记录当前前台 bundle/ability——不要在还没打开目标\
+应用时就记录，那一刻前台通常是桌面，记下来的桌面身份没有用处；若返回的是桌面（例如 \
+com.ohos.sceneboard）或 ability=unknown，先启动/切到目标应用，然后再记录一次；\
+(b) 打开或重启目标应用时用 start_app 并显式传 bundle_name 与 ability_name\
+（bundle 未知时先用 list_apps 或 inspect_app 查询；ability 未知时可用 MainAbility，\
+但只有 start_app 成功的记录才算数）；禁止猜测占位值（com.example.app / EntryAbility）；\
+(c) 若用户消息已给出应用名/bundle，直接用它；整个会话至少要有一条**成功**的身份记录：\
+bundle 非桌面、ability 非 unknown 的 foreground_app，或带显式 bundle_name/ability_name 且成功的 start_app。
 
 ## 回复格式
 - 调用工具时：简要说明你要做什么，然后调用工具。
@@ -166,6 +180,11 @@ class DcChatProvider(OpenAICompatibleProvider):
         等待期间按 ``progress_interval`` 发心跳，超时后抛出 ``DcModelTimeout``
         或 ``DcTurnTimeout``，绝不无限等待。
 
+        Phase 3 关键变化：``dc_token_streaming`` 开启时，遇到 ``ModelRequestNode``
+        就地用 ``node.stream(ctx)`` 消费模型流，按增量发 ``MESSAGE_DELTA``
+        （前端逐字显示草稿），随后仍发全量 ``THINKING`` / ``AGENT_TEXT`` 供收口；
+        模型不支持流式时记录 warning 并回退整块推进，行为与关闭开关一致。
+
         pydantic-ai 的历史管理已保证 ``ThinkingPart`` 正确进出模型请求，
         这里只读不改（思考内容绝不回喂模型）。
         """
@@ -196,6 +215,9 @@ class DcChatProvider(OpenAICompatibleProvider):
         emitted: set[tuple[str, str]] = set()
 
         attempt = 0
+        # 上一次推进是否只是「刚被流式消费过的节点」的缓存命中：
+        # 命中时不再重复发 model_call_started/progress/finished（真实模型调用已经发过）
+        streamed_advance = False
         try:
             async with agent.iter(
                 user_content,
@@ -212,17 +234,36 @@ class DcChatProvider(OpenAICompatibleProvider):
                         raise DcTurnTimeout(
                             f"DC turn budget exhausted before model call {attempt} (dc_turn_timeout reached)"
                         )
-                    node = await _advance_with_progress(iterator, request, attempt, timeout, emit)
+                    node = await _advance_with_progress(
+                        iterator, request, attempt, timeout, emit, emit_progress=not streamed_advance
+                    )
+                    streamed_advance = False
                     # 每个节点后刷新一次「已发生用量」，使超时/取消路径也有数字可入账
                     self._progress_usage = DcTokenUsage.from_run_usage(run.usage())
                     if node is _EXHAUSTED:
                         break
                     messages = run.all_messages()
-                    if len(messages) <= seen:
-                        continue
-                    for message in messages[seen:]:
-                        step = _emit_message_parts(message, step, emit, emitted)
-                    seen = len(messages)
+                    if len(messages) > seen:
+                        for index, message in enumerate(messages[seen:], start=seen):
+                            step = _emit_message_parts(
+                                message, step, emit, emitted, stream_key_base=f"{request.turn_id}:m{index}"
+                            )
+                        seen = len(messages)
+                    # token 级流式：就地消费本次模型请求节点。节点被 stream 后
+                    # 下一次 __anext__ 走 node.run() 的缓存 _result，不会重复请求模型。
+                    if isinstance(node, ModelRequestNode) and self.settings.dc_token_streaming:
+                        # 流式消费发生在节点执行之前：本次的 ModelRequest 还没写进
+                        # all_messages()，故本次响应消息的下标 = 当前条数 + 1（请求占一位），
+                        # 与随后差分 emit 全量事件时用的下标一致（DC 不走无用户消息恢复路径）。
+                        streamed_advance = await _stream_model_node(
+                            node, run, request, attempt, emit, message_index=seen + 1
+                        )
+                        messages = run.all_messages()
+                        for index, message in enumerate(messages[seen:], start=seen):
+                            step = _emit_message_parts(
+                                message, step, emit, emitted, stream_key_base=f"{request.turn_id}:m{index}"
+                            )
+                        seen = len(messages)
                 messages = run.all_messages()
                 result = run.result
                 # 必须在 iter 上下文内读取：块外 run 的累计用量不再可用
@@ -418,11 +459,17 @@ async def _advance_with_progress(
     attempt: int,
     timeout: float,
     emit: Any,
+    *,
+    emit_progress: bool = True,
 ) -> Any:
     """推进一次 ``agent.iter()``，全程发 started/progress，超时发 failed 并抛出。
 
     ``__anext__()`` 内部包含真实的模型 HTTP 请求，因此把 deadline 放在这一层
     才能约束「单次模型调用」，而不是只包住整个轮次。
+
+    ``emit_progress=False`` 用于「刚被 ``_stream_model_node`` 流式消费过的节点」：
+    这次推进只是缓存命中，真实模型调用的 started/finished 已由流式路径发出，
+    再发一对会让前端看到重复的「开始等待模型响应」。超时/取消的失败事件照常发。
     """
     model_call_id = f"model-{uuid.uuid4().hex[:8]}"
     started_mono = time.monotonic()
@@ -433,17 +480,18 @@ async def _advance_with_progress(
         "attempt": attempt,
         "phase": "waiting_model",
     }
-    _emit_model_event(
-        emit,
-        DcEventType.MODEL_CALL_STARTED,
-        f"开始等待模型响应（第 {attempt} 次）",
-        {
-            **base_payload,
-            "started_at": utc_now().isoformat(),
-            "deadline_at": deadline_at.isoformat(),
-            "remaining_budget_ms": round(timeout * 1000),
-        },
-    )
+    if emit_progress:
+        _emit_model_event(
+            emit,
+            DcEventType.MODEL_CALL_STARTED,
+            f"开始等待模型响应（第 {attempt} 次）",
+            {
+                **base_payload,
+                "started_at": utc_now().isoformat(),
+                "deadline_at": deadline_at.isoformat(),
+                "remaining_budget_ms": round(timeout * 1000),
+            },
+        )
 
     async def heartbeat() -> None:
         interval = max(0.2, float(request.progress_interval))
@@ -462,7 +510,7 @@ async def _advance_with_progress(
                 },
             )
 
-    task = asyncio.create_task(heartbeat(), name=f"dc-model-progress-{model_call_id}")
+    task = asyncio.create_task(heartbeat(), name=f"dc-model-progress-{model_call_id}") if emit_progress else None
     # 用 shield + 独立推进任务：deadline 由我们判定，不被 pydantic-ai 内部的
     # CancelledError 改写影响；同时保证超时后底层推进任务被真正取消。
     advance_task = asyncio.ensure_future(iterator.__anext__())
@@ -501,9 +549,13 @@ async def _advance_with_progress(
         )
         raise
     finally:
-        task.cancel()
+        if task is not None:
+            task.cancel()
         if not advance_task.done():
             advance_task.cancel()
+
+    if not emit_progress:
+        return node
 
     _emit_model_event(
         emit,
@@ -538,6 +590,200 @@ def _consume_task_result(task: asyncio.Future[Any]) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# token 级流式（Phase 3）
+# ---------------------------------------------------------------------------
+
+# 分块合并窗口：窗口内的增量合成一次 emit，避免每个 token 一条 SSE。
+_DELTA_DEBOUNCE = 0.08
+
+# 可流式的文本 part：part_kind → stream_key 后缀（思考与文本各一条独立草稿）。
+_STREAM_PART_KINDS: tuple[tuple[str, str], ...] = (("thinking", "thinking"), ("text", "text"))
+
+
+def _text_of(response: Any, kind: str) -> str:
+    """把一条（可能仍在增长的）模型响应里某种 part 的文本拼起来。"""
+    parts = getattr(response, "parts", None) or []
+    chunks: list[str] = []
+    for part in parts:
+        if str(_part_field(part, "part_kind") or "") != kind:
+            continue
+        content = _part_field(part, "content", "")
+        if isinstance(content, str):
+            chunks.append(content)
+    return "".join(chunks)
+
+
+def _has_tool_call(response: Any) -> bool:
+    """当前响应快照是否已包含工具调用（决定文本是「叙述」还是「终态回答」）。"""
+    parts = getattr(response, "parts", None) or []
+    return any(str(_part_field(part, "part_kind") or "") in _TOOL_CALL_PART_KINDS for part in parts)
+
+
+def _suffix_delta(previous: str, current: str) -> str:
+    """取 ``current`` 相对已发送内容的新增后缀。
+
+    流式响应正常只追加内容；若出现与已发前缀不一致的重写（重试、role 改判），
+    把整段当增量发出——宁可多显示一次，也不要静默吞掉用户可见的内容。
+    """
+    if current == previous:
+        return ""
+    if current.startswith(previous):
+        return current[len(previous) :]
+    return current
+
+
+async def _stream_model_node(
+    node: Any,
+    run: Any,
+    request: DcChatRequest,
+    attempt: int,
+    emit: Any,
+    message_index: int,
+) -> bool:
+    """就地流式消费一个 ``ModelRequestNode``，按增量发 ``MESSAGE_DELTA``。
+
+    可行性的依据（pydantic-ai 1.73 / pydantic_graph beta）：``agent.iter()`` 返回的是
+    **尚未执行**的节点；``node.stream(ctx)`` 内部完成 ``_prepare_request`` +
+    ``_finish_handling`` 并写入 ``node._result``，于是下一次 ``__anext__`` 走
+    ``ModelRequestNode.run()`` 的缓存分支（``_agent_graph.py`` L485-491），
+    不会重复请求模型，节点语义与整块推进完全一致。
+
+    Returns:
+        ``True``：本次模型调用已由本函数消费（节点已定稿，后续推进是缓存命中）；
+        ``False``：流式入口就失败（例如模型不支持流式），已放弃流式，交回主循环整块推进。
+    """
+    model_call_id = f"model-{uuid.uuid4().hex[:8]}"
+    started_mono = time.monotonic()
+    timeout = _advance_timeout(request)
+    deadline_at = utc_now() + timedelta(seconds=timeout)
+    stream_key_base = f"{request.turn_id}:m{message_index}"
+    base_payload: dict[str, Any] = {
+        "model_call_id": model_call_id,
+        "turn_id": request.turn_id,
+        "attempt": attempt,
+        "phase": "waiting_model",
+    }
+    _emit_model_event(
+        emit,
+        DcEventType.MODEL_CALL_STARTED,
+        f"开始等待模型响应（第 {attempt} 次）",
+        {
+            **base_payload,
+            "started_at": utc_now().isoformat(),
+            "deadline_at": deadline_at.isoformat(),
+            "remaining_budget_ms": round(timeout * 1000),
+            "streaming": True,
+        },
+    )
+
+    accumulated: dict[str, str] = {kind: "" for kind, _ in _STREAM_PART_KINDS}
+
+    async def consume() -> None:
+        async with node.stream(run.ctx) as agent_stream:
+            async for response in agent_stream.stream_responses(debounce_by=_DELTA_DEBOUNCE):
+                has_tool_call = _has_tool_call(response)
+                for kind, suffix in _STREAM_PART_KINDS:
+                    current = _text_of(response, kind)
+                    delta = _suffix_delta(accumulated[kind], current)
+                    if not delta:
+                        continue
+                    accumulated[kind] = current
+                    role = "thinking" if kind == "thinking" else ("narration" if has_tool_call else "assistant")
+                    _emit_model_event(
+                        emit,
+                        DcEventType.MESSAGE_DELTA,
+                        delta[:200],
+                        {
+                            **base_payload,
+                            "stream_key": f"{stream_key_base}:{suffix}",
+                            "role": role,
+                            "delta": delta,
+                            "message_index": message_index,
+                        },
+                    )
+
+    async def heartbeat() -> None:
+        """流式等待期间的心跳：模型静默期也要让「最近进展」与剩余预算动起来。"""
+        interval = max(0.2, float(request.progress_interval))
+        while True:
+            await asyncio.sleep(interval)
+            elapsed = time.monotonic() - started_mono
+            _emit_model_event(
+                emit,
+                DcEventType.MODEL_CALL_PROGRESS,
+                "正在接收模型流式输出",
+                {
+                    **base_payload,
+                    "elapsed_ms": round(elapsed * 1000),
+                    "remaining_ms": round(max(0.0, timeout - elapsed) * 1000),
+                    "last_progress_at": utc_now().isoformat(),
+                    "streaming": True,
+                },
+            )
+
+    consume_task = asyncio.ensure_future(consume())
+    consume_task.add_done_callback(_consume_task_result)
+    heartbeat_task = asyncio.create_task(heartbeat(), name=f"dc-model-stream-progress-{model_call_id}")
+    try:
+        await asyncio.wait_for(asyncio.shield(consume_task), timeout=timeout)
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        current = asyncio.current_task()
+        deadline_hit = isinstance(exc, TimeoutError) or not (current is not None and current.cancelling())
+        duration_ms = round((time.monotonic() - started_mono) * 1000)
+        error_code = "model_timeout" if deadline_hit else "cancelled"
+        _emit_model_event(
+            emit,
+            DcEventType.MODEL_CALL_FAILED,
+            "模型调用超时" if deadline_hit else "模型调用已取消",
+            {
+                **base_payload,
+                "error_code": error_code,
+                "error": f"model call exceeded {timeout:.1f}s" if deadline_hit else "model call cancelled",
+                "duration_ms": duration_ms,
+            },
+        )
+        if deadline_hit:
+            raise DcModelTimeout(f"model call exceeded {timeout:.1f}s") from exc
+        raise
+    except Exception as exc:
+        # 节点已被 stream 标记（_did_stream=True）时不能再回退整块推进，
+        # 只能按模型失败处理；入口就失败的情况见下面的 _did_stream 判定。
+        if not getattr(node, "_did_stream", False):
+            logger.warning("DC token streaming unavailable, falling back to block output: %s", exc)
+            _emit_model_event(
+                emit,
+                DcEventType.MODEL_CALL_PROGRESS,
+                "模型不支持流式输出，回退整块返回",
+                {**base_payload, "phase": "streaming_unavailable"},
+            )
+            return False
+        _emit_model_event(
+            emit,
+            DcEventType.MODEL_CALL_FAILED,
+            "模型流式输出失败",
+            {
+                **base_payload,
+                "error_code": "model_stream_error",
+                "error": str(exc),
+                "duration_ms": round((time.monotonic() - started_mono) * 1000),
+            },
+        )
+        raise
+    finally:
+        heartbeat_task.cancel()
+        if not consume_task.done():
+            consume_task.cancel()
+
+    _emit_model_event(
+        emit,
+        DcEventType.MODEL_CALL_FINISHED,
+        "模型调用完成",
+        {**base_payload, "duration_ms": round((time.monotonic() - started_mono) * 1000)},
+    )
+    return True
+
+
 def _part_field(part: Any, name: str, default: Any = None) -> Any:
     """兼容 dict / dataclass 两种 part 表示读取字段。"""
     if isinstance(part, dict):
@@ -550,6 +796,7 @@ def _emit_message_parts(
     step: int,
     emit: Any,
     emitted: set[tuple[str, str]] | None = None,
+    stream_key_base: str | None = None,
 ) -> int:
     """把一条 ModelMessage 中的 thinking/text part 作为事件 emit。
 
@@ -557,6 +804,9 @@ def _emit_message_parts(
     不含工具调用的文本属于本轮终态回答，会由 ``handle_user_message`` 以
     ``ASSISTANT_MESSAGE`` 呈现；若在此处也 emit，前端会同时渲染出叙述气泡与
     助手气泡，出现两条内容相同的「任务完成」。
+
+    ``stream_key_base`` 非空时，payload 附带与 ``MESSAGE_DELTA`` 草稿一致的
+    ``stream_key``：前端据此把逐字草稿就地收口为全量文本（id 不变）。
 
     Returns:
         更新后的 step 计数（每个实际发出的 part 递增一次）。
@@ -583,5 +833,8 @@ def _emit_message_parts(
             emitted.add(key)
         step += 1
         event_type = DcEventType.THINKING if kind == "thinking" else DcEventType.AGENT_TEXT
-        emit(event_type.value, content[:200], {"step": step, "text": content})
+        payload: dict[str, Any] = {"step": step, "text": content}
+        if stream_key_base:
+            payload["stream_key"] = f"{stream_key_base}:{kind}"
+        emit(event_type.value, content[:200], payload)
     return step

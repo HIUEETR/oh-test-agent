@@ -121,6 +121,57 @@ describe("DcComposerActions", () => {
     expect(generateDcScript).not.toHaveBeenCalled();
   });
 
+  it("脚本落到占位身份时给出手动填写入口，并可显式身份重新生成", async () => {
+    seed();
+    generateDcScript
+      .mockResolvedValueOnce({
+        ...artifact(),
+        warnings: ["placeholder bundle/ability supplied; script is diagnostic only"],
+      })
+      .mockResolvedValueOnce(artifact());
+    render(<DcComposerActions />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hypium 脚本" }));
+
+    // 首次仍是无参调用（后端从录制推断），并把占位警告摆到 hint 行
+    await waitFor(() => {
+      expect(generateDcScript).toHaveBeenCalledWith("dc-1", undefined, undefined);
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/占位身份/)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "手动填写身份" }));
+    const dialog = screen.getByRole("dialog", { name: "手动填写应用身份" });
+    expect(dialog).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(/重新生成/);
+
+    fireEvent.change(screen.getByLabelText("bundleName"), { target: { value: "com.huawei.hmos.calendar" } });
+    fireEvent.change(screen.getByLabelText("MainAbility"), { target: { value: "MainAbility" } });
+    fireEvent.click(screen.getByRole("button", { name: /用该身份重试/ }));
+
+    await waitFor(() => {
+      expect(generateDcScript).toHaveBeenLastCalledWith("dc-1", "com.huawei.hmos.calendar", "MainAbility");
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "手动填写应用身份" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("已有占位身份脚本时再次点击 pill 仍保留手动身份入口", () => {
+    seed();
+    useDcConsole.setState({
+      script: { ...artifact(), warnings: ["placeholder bundle/ability supplied; script is diagnostic only"] },
+    });
+    render(<DcComposerActions />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hypium 脚本" }));
+
+    expect(screen.getByRole("dialog", { name: "生成的 Hypium 脚本" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "手动填写身份" })).toBeInTheDocument();
+    expect(generateDcScript).not.toHaveBeenCalled();
+  });
+
   it("蒸馏 pill 不传身份（由后端推断）并在成功后展示摘要", async () => {
     seed();
     distillDcProfile.mockResolvedValue(distillResult());
