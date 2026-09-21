@@ -33,6 +33,12 @@ class ToolExecutionError(RuntimeError):
         self.state = state
 
 
+#: 滚轮候选「行」的最大高度（px）：更高的元素是容器而不是一行。
+_ROW_LIKE_MAX_HEIGHT = 240
+#: 判定两个间距属于同一「格距」的容差（px）。
+_ROW_PITCH_TOLERANCE = 4
+
+
 @dataclass(slots=True)
 class LaunchSpec:
     """最小启动规格：verified Profile 或实时模式解析结果都能产出它。"""
@@ -208,19 +214,20 @@ class ToolExecutor:
             left, top, right, bottom = anchor
             cx, cy = (left + right) // 2, (top + bottom) // 2
             travel = ToolExecutor._swipe_travel(snapshot, anchor, decision, warnings=warnings)
-            half = travel // 2
-            mapping = {
-                "up": ((cx, cy + half), (cx, cy - half)),
-                "down": ((cx, cy - half), (cx, cy + half)),
-                "left": ((cx + half, cy), (cx - half, cy)),
-                "right": ((cx - half, cy), (cx + half, cy)),
-            }
-            start, end = mapping[direction]
-            clamp = lambda point: (  # noqa: E731 - 就地裁剪，避免坐标越出屏幕
-                min(max(point[0], 0), snapshot.width - 1),
-                min(max(point[1], 0), snapshot.height - 1),
-            )
-            return clamp(start), clamp(end)
+            if travel is not None:
+                half = travel // 2
+                mapping = {
+                    "up": ((cx, cy + half), (cx, cy - half)),
+                    "down": ((cx, cy - half), (cx, cy + half)),
+                    "left": ((cx + half, cy), (cx - half, cy)),
+                    "right": ((cx - half, cy), (cx + half, cy)),
+                }
+                start, end = mapping[direction]
+                clamp = lambda point: (  # noqa: E731 - 就地裁剪，避免坐标越出屏幕
+                    min(max(point[0], 0), snapshot.width - 1),
+                    min(max(point[1], 0), snapshot.height - 1),
+                )
+                return clamp(start), clamp(end)
         return ToolExecutor._default_swipe_points(snapshot, direction, anchor)
 
     @staticmethod
@@ -230,45 +237,79 @@ class ToolExecutor:
         decision: ToolDecision,
         *,
         warnings: list[str] | None = None,
-    ) -> int:
-        """推导本次滑动行程：优先显式 distance，其次格数 × 格距，最后回退元素高度一半。"""
-        left, top, right, bottom = anchor
+    ) -> int | None:
+        """推导本次滑动行程：显式 distance 优先，其次格数 × 格距。
+
+        返回 ``None`` 表示「格距推不出来」，调用方回退到历史的方向 + 锚点 1/4 行程规则
+        （实测：模型有时会把整页容器当作滚轮锚点，此时任何「猜出来」的小格距都会退化成
+        几乎没有位移的空滑动，例如 36px；回退到 1/4 锚点至少与改动前的行为一致）。
+        """
         if decision.distance:
             return max(int(decision.distance), 1)
-        steps = int(decision.steps or 0)
+        steps = max(int(decision.steps or 0), 1)
+        anchor_height = max(anchor[3] - anchor[1], 1)
         pitch = ToolExecutor._row_pitch(snapshot, anchor)
         if pitch is None:
             if warnings is not None:
                 warnings.append(
-                    f"cannot derive wheel row pitch for {decision.target!r}; falling back to half the anchor height"
+                    f"cannot derive wheel row pitch for {decision.target!r}; "
+                    "falling back to a directional swipe with anchor quarter travel"
                 )
-            return max((bottom - top) // 2, 1)
+            # 历史回退规则（锚点 1/4 行程）× 请求格数：格距不可信时至少保持与改动前一致的
+            # 单格位移，并让「移动 N 格」在尺度上单调。
+            return max(anchor_height // 4, 1) * steps
         # 不按锚点高度裁剪：滚轮单行元素的 bbox 往往只有一格高，裁剪会把「移动 4 格」压成 1 格。
-        return min(max(pitch * max(steps, 1), pitch), max(snapshot.height, pitch))
+        return min(pitch * steps, max(snapshot.height, pitch))
 
     @staticmethod
     def _row_pitch(snapshot: ScreenSnapshot, anchor: tuple[int, int, int, int]) -> int | None:
-        """同一滚轮列内相邻可见行的 y 差中位数（格距）；不足两行时返回 None。
+        """同一滚轮列内相邻可见行的 y 差（格距）；推不出可靠格距时返回 ``None``。
 
         实测参考：日历时间选择器每格 108px（960−852），据此可算出 9→1 要往下 4 格而不是往上 8 格。
+
+        可靠性约束（避免把整页容器当成滚轮列时凭空造出小格距）：候选行必须与锚点同列
+        （水平重叠 ≥ 较窄一方宽度的 60%）、不是整屏宽容器、高度像一行（8-240px）；
+        同一 y 只保留**面积最大**的元素（外层行而非其内部文本），再按高度分桶取最大的一桶，
+        桶内至少 3 行且间距重复出现（取众数而非中位数）。
         """
         left, top, right, bottom = anchor
-        column_x = (left + right) // 2
-        centers = sorted(
-            {
-                (item.bbox.top + item.bbox.bottom) // 2
-                for item in snapshot.elements
-                if item.bbox is not None
-                and item.bbox.left <= column_x <= item.bbox.right
-                and item.bbox.top >= top - (bottom - top)
-                and item.bbox.bottom <= bottom + (bottom - top)
-            }
-        )
-        gaps = [later - earlier for earlier, later in zip(centers, centers[1:], strict=False) if later - earlier > 1]
+        width = max(right - left, 1)
+        height = max(bottom - top, 1)
+        by_center: dict[int, tuple[int, int]] = {}
+        for item in snapshot.elements:
+            bbox = item.bbox
+            if bbox is None or not (item.key or item.id or item.content):
+                continue
+            if bbox.width >= snapshot.width * 0.9 or not 8 <= bbox.height <= _ROW_LIKE_MAX_HEIGHT:
+                continue
+            overlap = min(bbox.right, right) - max(bbox.left, left)
+            if overlap < min(width, bbox.width) * 0.6:
+                continue
+            center = (bbox.top + bbox.bottom) // 2
+            if not (top - height <= center <= bottom + height):
+                continue
+            # 同一 y 只保留面积最大的元素：滚轮的一行里往往还嵌着若干文本子节点。
+            best = by_center.get(center)
+            if best is None or bbox.area > best[1]:
+                by_center[center] = (bbox.height, bbox.area)
+        if len(by_center) < 3:
+            return None
+        buckets: dict[int, list[int]] = {}
+        for center, (row_height, _) in by_center.items():
+            key = round(row_height / max(_ROW_PITCH_TOLERANCE, 1))
+            buckets.setdefault(key, []).append(center)
+        centers = sorted(max(buckets.values(), key=len))
+        if len(centers) < 3:
+            return None
+        gaps = [later - earlier for earlier, later in zip(centers, centers[1:], strict=False) if later - earlier >= 24]
         if not gaps:
             return None
-        gaps.sort()
-        return gaps[len(gaps) // 2]
+        best_gap, best_count = gaps[0], 0
+        for gap in gaps:
+            count = sum(1 for other in gaps if abs(other - gap) <= _ROW_PITCH_TOLERANCE)
+            if count > best_count:
+                best_gap, best_count = gap, count
+        return best_gap
 
     @staticmethod
     def _default_swipe_points(

@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fakes import element
+from fakes import CALENDAR_FIXTURES, element, snapshot_from_layout
 
 from harmony_test_agent.models import (
     CommandResult,
@@ -131,6 +131,71 @@ def test_missing_pitch_falls_back_with_warning() -> None:
 
     assert any("cannot derive wheel row pitch" in item for item in result.warnings)
     assert device.swipes  # 仍然发出一次滑动，而不是失败
+    # 回退到历史「锚点 1/4 行程 × 格数」，而不是凭空的半锚点高
+    # （实测中模型把整页容器当锚点时，半锚点高推出了 36px 的空滑动）。
+    (start, end) = device.swipes[0]
+    expected_travel = 2 * (((110 // 4) * 3) // 2)  # 行程按 half = travel // 2 对称落地
+    assert start[1] - end[1] == expected_travel
+
+
+def test_wheel_column_pitch_is_derived_from_homogeneous_rows() -> None:
+    """真实滚轮列：同高同宽的行以固定间距排列 → 格距 = 行距。"""
+    rows = [
+        element(
+            f"row-{index}",
+            key=f"picker_row_{index}",
+            content=str(index),
+            bbox=(500, 800 + index * 108, 700, 908 + index * 108),
+            clickable=True,
+        )
+        for index in range(5)
+    ]
+    # 每行内部还有同心的文本子节点（真实 dump 常见），不能被当成额外的一行。
+    inner = [
+        element(
+            f"text-{index}",
+            content=str(index),
+            type_name="Text",
+            bbox=(520, 830 + index * 108, 680, 880 + index * 108),
+        )
+        for index in range(5)
+    ]
+    snapshot = ScreenSnapshot(
+        snapshot_id="snap-wheel",
+        run_id="run-wheel",
+        image_path=Path("wheel.png"),
+        image_sha256="hash",
+        width=1222,
+        height=2670,
+        page_path="pages/EntryPage",
+        elements=rows + inner,
+    )
+    anchor = (500, 800, 700, 908 + 4 * 108)
+
+    assert ToolExecutor._row_pitch(snapshot, anchor) == 108
+    decision = ToolDecision(tool=ToolName.SWIPE, target="picker_row_0", direction="down", steps=2)
+    start, end = ToolExecutor._swipe_points(snapshot, decision, anchor)
+    assert end[1] - start[1] == 216
+
+
+def test_container_anchor_never_yields_a_degenerate_pitch() -> None:
+    """真机回归：模型把整页容器（create_agenda）当滚轮锚点时，不能得出 36px 的空滑动。"""
+    snapshot = snapshot_from_layout(CALENDAR_FIXTURES / "calendar-editor-picker.json")
+    container = next(item for item in snapshot.elements if item.key == "create_agenda")
+    assert container.bbox is not None
+    anchor = (container.bbox.left, container.bbox.top, container.bbox.right, container.bbox.bottom)
+
+    pitch = ToolExecutor._row_pitch(snapshot, anchor)
+    decision = ToolDecision(tool=ToolName.SWIPE, target="create_agenda", direction="up", steps=1)
+    start, end = ToolExecutor._swipe_points(snapshot, decision, anchor)
+
+    travel = start[1] - end[1]
+    assert travel >= 90, f"单格行程过小（{travel}px）会退化成空滑动"
+    assert pitch is None or pitch >= 90
+    # 行程随格数单调增长。
+    more = ToolDecision(tool=ToolName.SWIPE, target="create_agenda", direction="up", steps=4)
+    start4, end4 = ToolExecutor._swipe_points(snapshot, more, anchor)
+    assert (start4[1] - end4[1]) > travel
 
 
 def test_plain_direction_swipe_keeps_legacy_travel() -> None:
