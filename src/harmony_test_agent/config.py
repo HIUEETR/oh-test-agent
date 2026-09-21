@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     agent_model_timeout: float = Field(default=90, gt=0, le=300)
     agent_model_retry_limit: int = Field(default=1, ge=0, le=3)
     """单步模型决策超时后的重试次数；重试沿用同一帧并附加「只输出工具决策」的收敛提示。"""
+    agent_model_retry_backoff_seconds: float = Field(default=3.0, ge=0, le=30)
+    """瞬时 provider 故障（429/5xx/网关限流）的退避秒数；单测可设为 0 免等待。"""
     agent_retry_limit: int = Field(default=2, ge=0, le=5)
     agent_step_recovery_limit: int = Field(default=2, ge=0, le=5)
     unchanged_screen_limit: int = Field(default=2, ge=1, le=5)
@@ -95,6 +97,13 @@ class Settings(BaseSettings):
 
     model_element_limit: int = Field(default=80, ge=10, le=500)
     """送模型的元素列表上限（按分数排序取前 N），降低单次请求延迟。"""
+
+    model_observation_element_limit: int = Field(default=5, ge=0, le=50)
+    """合并观测里允许模型回吐的视觉元素上限。
+
+    Live 的合并请求把「元素表」当**输入**给出，若再让模型把整页元素逐条生成进
+    ``elements`` 输出，输出 token 会成为单次延迟的主因（真机实测一次回吐 41 条，
+    16 步模型总耗时 478s）。这里只保留极少数「层级里没有、只在画面上可见」的控件。"""
 
     model_image_format: Literal["jpeg", "png"] = "jpeg"
     """送模型的截图格式；jpeg 显著降低上传字节数与延迟。"""

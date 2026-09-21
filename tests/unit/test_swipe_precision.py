@@ -119,6 +119,38 @@ def test_explicit_distance_is_used_verbatim() -> None:
     assert start[1] - end[1] == 400
 
 
+def test_oversized_travel_is_shortened_to_stay_on_screen() -> None:
+    """真机实测：终点 y=0 会被 `uiInput swipe` 拒绝（打印 usage 且退出码仍为 0）。
+
+    模型把「移动 30 格」写成 3690px（远超屏高）时，端点裁到 0 就是静默失败；这里要求
+    行程收缩到锚点两侧都放得下的范围，并且坐标始终留在屏幕内。
+    """
+    device = RecordingDevice()
+
+    _swipe(device, target="picker_hour_11", direction="up", distance=3690)
+
+    (start, end) = device.swipes[0]
+    assert 0 < end[1] < start[1] < 2670
+    assert start[1] - end[1] < 3690
+
+
+def test_swipe_points_keep_a_margin_from_screen_edges() -> None:
+    """全屏 30% 的历史路径同样不能贴边：y=0 / y=height-1 都会被设备拒绝或不可靠。"""
+    device = RecordingDevice()
+    snapshot = _picker_snapshot().model_copy(
+        update={"elements": [], "width": 1320, "height": 2232},
+        deep=True,
+    )
+    decision = ToolDecision(tool=ToolName.SWIPE, direction="up", distance=20_000)
+
+    _executor(device).execute("step-swipe", decision, snapshot)
+
+    (start, end) = device.swipes[0]
+    for x, y in (start, end):
+        assert 0 < x < 1320
+        assert 0 < y < 2232
+
+
 def test_missing_pitch_falls_back_with_warning() -> None:
     device = RecordingDevice()
     snapshot = _picker_snapshot().model_copy(

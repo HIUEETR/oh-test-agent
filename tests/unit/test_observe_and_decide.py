@@ -267,6 +267,46 @@ def test_observe_and_decide_uses_single_prompted_output(monkeypatch, snapshot: S
     assert decision.tool is ToolName.CLICK_ELEMENT
 
 
+def test_combined_observation_is_compacted_before_use(monkeypatch, snapshot: ScreenSnapshot) -> None:
+    """合并观测必须截断：元素表已是输入，模型回吐整页元素会变成延迟主因（实测一次 41 条）。"""
+    import pydantic_ai
+
+    elements = [
+        {
+            "content": f"visual-only-{index}",
+            "type": "Button",
+            "bbox": {"left": index, "top": index, "right": index + 10, "bottom": index + 10},
+            "clickable": True,
+            "score": 0.8,
+        }
+        for index in range(12)
+    ]
+    payload = {
+        "page_title": "日历",
+        "summary": "详" * 900,
+        "elements": elements,
+        "decision": {"tool": ToolName.CLICK_ELEMENT.value, "target": "tabs_month"},
+    }
+    _spy_structured_output(monkeypatch, [])
+
+    class _RecordingAgent:
+        def __init__(self, model: object, **kwargs: Any) -> None:
+            pass
+
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            return type("R", (), {"output": ObservationAndDecision.model_validate(payload)})()
+
+    monkeypatch.setattr(pydantic_ai, "Agent", _RecordingAgent)
+
+    observation, decision = asyncio.run(_provider().observe_and_decide(STEPS[1], snapshot))
+
+    assert observation is not None
+    assert len(observation.elements) == 5
+    assert [item.content for item in observation.elements] == [f"visual-only-{index}" for index in range(5)]
+    assert len(observation.summary) <= 400
+    assert decision.tool is ToolName.CLICK_ELEMENT
+
+
 def _spy_structured_output(monkeypatch, requested: list[type]) -> None:
     """记录每条结构化输出路径请求的模型类型，便于断言「只发了一次组合请求」。"""
     real = OpenAICompatibleProvider._structured_output

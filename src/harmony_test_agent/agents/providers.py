@@ -67,13 +67,21 @@ class PlanningContext(BaseModel):
 PLANNING_PROMPT = """You are an OpenHarmony UI test planner. Convert the user's task into no more than 20
 atomic steps. Only use these tools: inspect_screen, open_app, click_element, click_coordinate, input_text, swipe,
 back, wait, assert_visible, assert_not_visible, assert_text, finish. Prefer semantic element targets over coordinates.
-Follow the requested behavior exactly: entering text does not imply submitting a search, and you must not add a search
-submission or search-result assertion unless the user explicitly asks for it. When navigating away after text input,
+Plan the shortest sufficient sequence: the executor re-observes the screen after every step, so a separate
+inspect_screen step is only warranted to establish the starting screen or to check a state that no previous step
+produced. Never insert inspect_screen between consecutive actions, and do not plan two consecutive inspect_screen
+steps. Follow the requested behavior exactly: entering text does not imply submitting a search, and you must not add
+a search submission or search-result assertion unless the user explicitly asks for it. When navigating away after
+text input,
 account for the soft keyboard: one back may dismiss the keyboard before another back changes the app page. Never plan
 login, payment, captcha, deletion, permission grant, or arbitrary shell commands. Include explicit assertions and end
 with finish. The expected text of assert_text must be copied verbatim from text you actually observed on screen in the
 most recent observation; never invent a display format from the task wording (a task that says "1pm" may render as
 "01:00 PM"). If you cannot be sure of the exact text, use assert_visible with a locator instead.
+When a step must CHANGE a value shown on a wheel or scroll picker (hour, minute, AM/PM, date or duration
+columns), plan that step as swipe with the column as target and state the required final value in the
+instruction; never plan a click on an individual picker row, and never plan a blind click_coordinate for a
+picker value. Use click_element only to open the picker.
 """
 
 VISION_PROMPT = """Analyze this OpenHarmony screenshot. Return a concise page title and summary plus actionable
@@ -91,7 +99,9 @@ the supplied image. For wheel pickers (hour/minute/AM-PM columns), set swipe tar
 swipe inside that column instead of at the screen center. When operating a wheel or time picker: first read the y
 coordinates of two adjacent visible rows to derive the row pitch, then compute how many rows you must move, choose the
 shorter direction, and express it with steps (or explicit start/end coordinates); never click a wheel row with blind
-coordinates. When recovery feedback is provided, the previous attempt at
+coordinates. This overrides the planned tool: when the planned step asks you to change a value that is displayed in a
+wheel or time-picker column (including when the plan says click_element or click_coordinate), answer with swipe on that
+column and the computed steps instead of a picker-row click. When recovery feedback is provided, the previous attempt at
 this step failed: you may first take corrective actions (for example an anchored swipe inside a wheel column or
 clicking another control) and re-attempt the planned goal, including re-issuing its assertion once the state matches.
 Do not guess that a hierarchy element represents a visual
@@ -102,6 +112,9 @@ use inspect_screen instead of navigating away. Never emit shell commands, multip
 deletion, or permission-grant actions. Never choose finish unless the planned step tool is finish.
 """
 
+# 合并观测里的摘要长度上限：摘要只用于前端思考流与恢复提示，长摘要纯属输出 token 浪费。
+_OBSERVATION_SUMMARY_LIMIT = 400
+
 OBSERVE_AND_DECIDE_PROMPT = (
     VISION_PROMPT
     + "\n"
@@ -110,6 +123,10 @@ OBSERVE_AND_DECIDE_PROMPT = (
 Return one JSON object containing BOTH the page observation (page_title, summary, elements) and the single tool
 decision (decision). The observation must describe the screenshot you are looking at; the decision must be valid for
 the planned step against that same screenshot.
+Keep the observation compact: the UI hierarchy is already supplied as Current elements, so return at most 5 entries in
+`elements` and only for visual-only controls that are absent from Current elements (for example soft-keyboard keys).
+Never echo hierarchy elements back. `summary` must be at most two short sentences stating what matters for the planned
+step; do not enumerate the screen.
 """
 )
 
@@ -782,7 +799,19 @@ class OpenAICompatibleProvider(AgentProvider):
             model_settings=self._model_settings(),
         )
         combined: ObservationAndDecision = result.output
-        return combined.observation(), combined.decision
+        return self._compact_observation(combined), combined.decision
+
+    def _compact_observation(self, combined: ObservationAndDecision) -> VisionObservation:
+        """截断合并观测：元素表已是输入，回吐的视觉元素只保留极少数（见 Settings 注释）。"""
+        limit = max(int(self.settings.model_observation_element_limit), 0)
+        observation = combined.observation()
+        if limit == 0:
+            observation.elements = []
+        elif len(observation.elements) > limit:
+            observation.elements = observation.elements[:limit]
+        if len(observation.summary) > _OBSERVATION_SUMMARY_LIMIT:
+            observation.summary = observation.summary[:_OBSERVATION_SUMMARY_LIMIT].rstrip()
+        return observation
 
     async def advise_turn(
         self,

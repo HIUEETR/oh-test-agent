@@ -37,6 +37,8 @@ class ToolExecutionError(RuntimeError):
 _ROW_LIKE_MAX_HEIGHT = 240
 #: 判定两个间距属于同一「格距」的容差（px）。
 _ROW_PITCH_TOLERANCE = 4
+#: 滑动坐标与屏幕边缘保留的最小边距（px）：真机 `uiInput swipe` 对 y=0 直接拒绝。
+_SWIPE_EDGE_INSET = 2
 
 
 @dataclass(slots=True)
@@ -216,6 +218,20 @@ class ToolExecutor:
             travel = ToolExecutor._swipe_travel(snapshot, anchor, decision, warnings=warnings)
             if travel is not None:
                 half = travel // 2
+                # 以锚点为轴的对称滑动必须两侧都落在屏幕内：真机实测 `uiInput swipe` 对
+                # y=0 直接拒绝（打印 usage 且仍以 0 退出），所以既留边距也按可用空间收缩行程。
+                vertical = direction in {"up", "down"}
+                pivot = cy if vertical else cx
+                span = snapshot.height if vertical else snapshot.width
+                available = min(pivot - _SWIPE_EDGE_INSET, span - _SWIPE_EDGE_INSET - 1 - pivot)
+                if half > available:
+                    if warnings is not None:
+                        warnings.append(
+                            f"swipe travel {travel}px does not fit around the anchor; "
+                            f"shortened to {max(available * 2, 2)}px to stay on screen"
+                        )
+                    half = available
+                half = max(half, 1)
                 mapping = {
                     "up": ((cx, cy + half), (cx, cy - half)),
                     "down": ((cx, cy - half), (cx, cy + half)),
@@ -224,8 +240,14 @@ class ToolExecutor:
                 }
                 start, end = mapping[direction]
                 clamp = lambda point: (  # noqa: E731 - 就地裁剪，避免坐标越出屏幕
-                    min(max(point[0], 0), snapshot.width - 1),
-                    min(max(point[1], 0), snapshot.height - 1),
+                    min(
+                        max(point[0], _SWIPE_EDGE_INSET),
+                        max(snapshot.width - _SWIPE_EDGE_INSET - 1, _SWIPE_EDGE_INSET),
+                    ),
+                    min(
+                        max(point[1], _SWIPE_EDGE_INSET),
+                        max(snapshot.height - _SWIPE_EDGE_INSET - 1, _SWIPE_EDGE_INSET),
+                    ),
                 )
                 return clamp(start), clamp(end)
         return ToolExecutor._default_swipe_points(snapshot, direction, anchor)

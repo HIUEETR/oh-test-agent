@@ -82,6 +82,29 @@ logger = logging.getLogger(__name__)
 
 DeviceFactory = Callable[[str], DeviceAdapter]
 
+# 瞬时 provider 故障特征：网关限流/上游暂时不可用/5xx。真机实测 commandcode 网关会间歇性
+# 返回 429 "Upstream model provider is temporarily unavailable"，一次命中就会报废整轮运行
+# （两次日历运行分别在第 1 次观测调用与规划调用上被 429 打断），退避重试的成本远低于重跑。
+_TRANSIENT_MODEL_ERROR_TOKENS = (
+    "429",
+    "rate_limit",
+    "rate limit",
+    "temporarily unavailable",
+    "overloaded",
+    "502",
+    "503",
+    "504",
+    "connection reset",
+    "connection aborted",
+    "read timed out",
+)
+
+
+def _is_transient_model_error(exc: Exception) -> bool:
+    """判断模型调用异常是否属于「等一会儿再试就好」的瞬时故障。"""
+    text = f"{type(exc).__name__}: {exc}".casefold()
+    return any(token in text for token in _TRANSIENT_MODEL_ERROR_TOKENS)
+
 
 @dataclass(frozen=True, slots=True)
 class HarvestedLocator:
@@ -152,6 +175,27 @@ class AgentOrchestrator:
                 if result is not None:
                     return _plan_from_bug_repro(result, request)
         return await self.provider.plan(request.task, context, step_limit)
+
+    async def _plan_with_transient_retry(
+        self,
+        context: PlanningContext,
+        request: RunRequest,
+        step_limit: int,
+    ) -> PlanResult:
+        """规划调用套上超时与瞬时故障重试：429 打断规划会让整轮运行零动作。"""
+        timeout = self.settings.agent_model_timeout
+        retries = max(int(self.settings.agent_model_retry_limit), 0)
+        for attempt in range(retries + 1):
+            try:
+                return await asyncio.wait_for(
+                    self._plan_for_request(request, context, step_limit),
+                    timeout=timeout,
+                )
+            except Exception as exc:  # noqa: BLE001 - 失败一律上抛，由调用方转 FAILED_MODEL
+                if _is_transient_model_error(exc) and attempt < retries:
+                    await self._wait_before_model_retry("planning", exc)
+                    continue
+                raise
 
     def request_stop(self, run_id: str) -> None:
         """记录停止请求；编排循环会在下一个安全检查点结束指定任务。"""
@@ -258,10 +302,7 @@ class AgentOrchestrator:
                 planning_context = (
                     PlanningContext.from_profile(profile) if profile else PlanningContext.from_resolved(resolved)
                 )
-                plan = await asyncio.wait_for(
-                    self._plan_for_request(request, planning_context, step_limit),
-                    timeout=self.settings.agent_model_timeout,
-                )
+                plan = await self._plan_with_transient_retry(planning_context, request, step_limit)
             except Exception as exc:
                 await self._fail(trace, emitter, RunState.FAILED_MODEL, f"planning failed: {exc}", request)
                 return trace
@@ -1491,12 +1532,22 @@ class AgentOrchestrator:
             except ToolExecutionError:
                 raise
             except Exception as exc:  # noqa: BLE001 - 模型侧故障（429/5xx/网关错误）必须可读且归类为 FAILED_MODEL
+                if _is_transient_model_error(exc) and attempt < retries:
+                    await self._wait_before_model_retry("decision", exc)
+                    continue
                 raise ToolExecutionError(
                     f"model call failed: {type(exc).__name__}: {exc}", RunState.FAILED_MODEL
                 ) from exc
         raise ToolExecutionError(  # pragma: no cover - 循环内必然 return 或 raise
             f"model decision timed out after {timeout:g} seconds", RunState.FAILED_MODEL
         )
+
+    async def _wait_before_model_retry(self, what: str, exc: Exception) -> None:
+        """瞬时 provider 故障（429/5xx/网关）退避后重试。"""
+        delay = float(self.settings.agent_model_retry_backoff_seconds)
+        logger.warning("model %s hit a transient provider error (%s); retrying in %.1fs", what, exc, delay)
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     @staticmethod
     def _record_failed_action(
@@ -1549,17 +1600,23 @@ class AgentOrchestrator:
 
     async def _analyze(self, snapshot: ScreenSnapshot) -> VisionObservation | None:
         """视觉分析（含超时与降级）；真实 provider 失败即按 FAILED_MODEL 终止。"""
-        try:
-            return await asyncio.wait_for(
-                self.provider.analyze(snapshot),
-                timeout=self.settings.agent_model_timeout,
-            )
-        except Exception as exc:
-            if not self.provider.mock:
-                message = f"vision analysis failed: {type(exc).__name__}: {exc}"
-                raise ToolExecutionError(message, RunState.FAILED_MODEL) from exc
-            snapshot.summary = f"mock vision analysis unavailable: {type(exc).__name__}: {exc}"
-            return None
+        retries = max(int(self.settings.agent_model_retry_limit), 0)
+        for attempt in range(retries + 1):
+            try:
+                return await asyncio.wait_for(
+                    self.provider.analyze(snapshot),
+                    timeout=self.settings.agent_model_timeout,
+                )
+            except Exception as exc:  # noqa: BLE001 - 真实 provider 的任何失败都要归类为 FAILED_MODEL
+                if not self.provider.mock and _is_transient_model_error(exc) and attempt < retries:
+                    await self._wait_before_model_retry("vision analysis", exc)
+                    continue
+                if not self.provider.mock:
+                    message = f"vision analysis failed: {type(exc).__name__}: {exc}"
+                    raise ToolExecutionError(message, RunState.FAILED_MODEL) from exc
+                snapshot.summary = f"mock vision analysis unavailable: {type(exc).__name__}: {exc}"
+                return None
+        return None  # pragma: no cover - 循环内必然 return 或 raise
 
     def _emit_frame(self, emitter: RunEventEmitter, snapshot: ScreenSnapshot) -> None:
         """推送一帧的画面与元素规模（摘要可能稍后由合并观测回填）。"""
@@ -1711,6 +1768,9 @@ class AgentOrchestrator:
             except ToolExecutionError:
                 raise
             except Exception as exc:  # noqa: BLE001 - 模型侧故障（429/5xx/网关错误）必须可读且归类为 FAILED_MODEL
+                if _is_transient_model_error(exc) and attempt < retries:
+                    await self._wait_before_model_retry("observe+decide", exc)
+                    continue
                 raise ToolExecutionError(
                     f"model call failed: {type(exc).__name__}: {exc}", RunState.FAILED_MODEL
                 ) from exc

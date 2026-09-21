@@ -11,6 +11,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,12 @@ _LAUNCHER_HOME_SETTLE_SECONDS = 1.0
 _LAUNCHER_PAGE_SWIPE_SLEEP = 1.0
 # `bm dump -n <missing>` 退出码为 0，仅在输出中给出该提示
 _MISSING_BUNDLE_HINT = "failed to get information"
+# `uitest uiInput` 参数非法时打印 usage 但退出码仍为 0：必须显式识别，否则静默成功。
+_UI_INPUT_REJECTION_MARKERS = (
+    "please confirm that the coordinate values are correct",
+    "usage :",
+    "usage:",
+)
 
 
 class HarmonyDeviceAdapter(DeviceAdapter):
@@ -126,8 +133,15 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         }
 
     def collect_ui_hierarchy(self) -> dict:
-        """导出并解析当前页面的 UI 层级数据。"""
-        dump = self._run("shell", "uitest", "dumpLayout", "-a")
+        """导出并解析当前页面的 UI 层级数据。
+
+        **不传 ``-a``**：该开关是「附带字体属性」，真机实测单帧 6.54s / 126.8KB，
+        不传时 3.16s / 117.0KB，而 ``normalize_layout`` 用到的 key/id/type/bounds/
+        clickable/editable/text/description 两版完全一致（2026-09-21 真机逐行比对：
+        79 个元素的 element_id/content/type/key/id/bbox/clickable/editable 全等）。
+        任务期每步都要付这一次开销，是本阶段最大的一笔可省成本。
+        """
+        dump = self._run("shell", "uitest", "dumpLayout")
         output = f"{dump.stdout}\n{dump.stderr}".strip()
         match = re.search(r"DumpLayout saved to:\s*(\S+)", output)
         if not dump.ok or not match:
@@ -141,13 +155,22 @@ class HarmonyDeviceAdapter(DeviceAdapter):
             raise DeviceError(f"invalid layout JSON: {exc}") from exc
 
     def screenshot(self, output_dir: Path, run_id: str, label: str = "screen") -> ScreenSnapshot:
-        """采集截图与 UI 层级，生成带稳定摘要的屏幕快照。"""
+        """采集截图与 UI 层级，生成带稳定摘要的屏幕快照。
+
+        图片链路（``snapshot_display`` → ``file recv`` → PNG 编码）与层级链路
+        （``dumpLayout`` → ``cat``）是两个相互独立的只读 HDC 动作：串行要付两者之和，
+        并行只付较大者。真机三轮实测：串行 9.0/10.4/9.0s，并行 7.0/8.5/8.2s，两路均成功。
+        任务期每步都要付一次，因此这里并行化。
+        """
         output_dir.mkdir(parents=True, exist_ok=True)
         snapshot_id = f"snap-{uuid.uuid4().hex[:12]}"
         remote_path = f"/data/local/tmp/{run_id}_{snapshot_id}.jpeg"
         local_path = output_dir / f"{label}_{snapshot_id}.png"
-        width, height, model_image_path = self._capture_png(remote_path, local_path)
-        hierarchy = self.collect_ui_hierarchy()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            image_future = pool.submit(self._capture_png, remote_path, local_path)
+            hierarchy_future = pool.submit(self.collect_ui_hierarchy)
+            width, height, model_image_path = image_future.result()
+            hierarchy = hierarchy_future.result()
         hierarchy_path = output_dir.parent / "layouts" / f"{label}_{snapshot_id}.json"
         hierarchy_path.parent.mkdir(parents=True, exist_ok=True)
         hierarchy_path.write_text(json.dumps(hierarchy, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -449,7 +472,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
 
     def click(self, x: int, y: int) -> CommandResult:
         """在设备屏幕的绝对像素坐标执行一次点击。"""
-        return self._run("shell", "uitest", "uiInput", "click", str(x), str(y))
+        return self._ui_input_result(self._run("shell", "uitest", "uiInput", "click", str(x), str(y)))
 
     def input_text(self, text: str, x: int | None = None, y: int | None = None) -> CommandResult:
         """可选地先聚焦坐标，再向当前输入控件写入文本。"""
@@ -457,26 +480,46 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         if x is not None and y is not None:
             args.extend([str(x), str(y)])
         args.append(text)
-        return self._run(*args)
+        return self._ui_input_result(self._run(*args))
 
     def swipe(self, start: tuple[int, int], end: tuple[int, int], duration: float = 0.5) -> CommandResult:
         """按起止坐标和持续时间执行一次滑动。"""
         velocity = max(200, min(40_000, int(15_000 - duration * 7_000)))
-        return self._run(
-            "shell",
-            "uitest",
-            "uiInput",
-            "swipe",
-            str(start[0]),
-            str(start[1]),
-            str(end[0]),
-            str(end[1]),
-            str(velocity),
+        return self._ui_input_result(
+            self._run(
+                "shell",
+                "uitest",
+                "uiInput",
+                "swipe",
+                str(start[0]),
+                str(start[1]),
+                str(end[0]),
+                str(end[1]),
+                str(velocity),
+            )
         )
+
+    @staticmethod
+    def _ui_input_result(result: CommandResult) -> CommandResult:
+        """把 ``uitest uiInput`` 的参数拒绝转成显式失败。
+
+        真机实测：``uiInput swipe 1118 2231 1118 0 11500``（终点 y=0 越界）会打印 usage 与
+        ``Please confirm that the coordinate values are correct.``，但**返回码仍是 0**，因此原先
+        会被当成「动作成功」写进 trace（日历一次滚轮滑动就是这样静默失败的）。
+        """
+        output = f"{result.stdout}\n{result.stderr}".casefold()
+        if any(marker in output for marker in _UI_INPUT_REJECTION_MARKERS):
+            return result.model_copy(
+                update={
+                    "returncode": 1,
+                    "stderr": f"uiInput rejected the arguments: {result.stdout.strip()[:400]}",
+                }
+            )
+        return result
 
     def back(self) -> CommandResult:
         """发送系统返回键事件。"""
-        return self._run("shell", "uitest", "uiInput", "keyEvent", "Back")
+        return self._ui_input_result(self._run("shell", "uitest", "uiInput", "keyEvent", "Back"))
 
     def wait(self, seconds: float) -> CommandResult:
         """等待给定秒数，并返回与其他设备动作一致的命令结果。"""

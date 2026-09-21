@@ -149,9 +149,52 @@ async def test_provider_outage_is_reported_as_failed_model(tmp_path: Path) -> No
     """模型侧故障（429/5xx）必须归类为 FAILED_MODEL 且错误可读，而不是 "unexpected error"。"""
     provider = OutageProvider(STEPS)
 
-    trace = await run_orchestrator(tmp_path, provider)
+    trace = await run_orchestrator(tmp_path, provider, agent_model_retry_backoff_seconds=0)
 
     assert trace.state == RunState.FAILED_MODEL
     assert "model call failed" in (trace.error or "")
     assert "429" in (trace.error or "")
     assert "unexpected error" not in (trace.error or "")
+
+
+class FlakyProvider(FixedPlanProvider):
+    """前 ``failures`` 次 ``decide`` 抛瞬时 429，之后正常：模拟网关间歇性限流。"""
+
+    def __init__(self, steps: list[PlannedStep], failures: int) -> None:
+        super().__init__(steps)
+        self.failures = failures
+        self.calls = 0
+
+    async def decide(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        feedback: str | None = None,
+    ) -> ToolDecision:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise _ProviderOutage(
+                "status_code: 429, body: {'message': 'Upstream model provider is temporarily unavailable.'}"
+            )
+        return await super().decide(step, snapshot, feedback)
+
+
+async def test_transient_provider_outage_is_retried_instead_of_failing_the_run(tmp_path: Path) -> None:
+    """一次 429 不该报废整轮运行：退避后重试成功，运行继续（真机两次日历运行都被 429 打断）。"""
+    provider = FlakyProvider(STEPS, failures=1)
+
+    trace = await run_orchestrator(tmp_path, provider, agent_model_retry_limit=1, agent_model_retry_backoff_seconds=0)
+
+    assert trace.state == RunState.COMPLETED, trace.error
+    # 1 次瞬时 429 + 重试成功 + 第 2 个计划步骤（finish）的决策 = 3 次；若不做瞬时重试则整轮失败。
+    assert provider.calls == 3
+
+
+async def test_transient_retry_is_bounded_by_retry_limit(tmp_path: Path) -> None:
+    """持续 429 时重试次数受 ``agent_model_retry_limit`` 约束，不做无界重试。"""
+    provider = FlakyProvider(STEPS, failures=99)
+
+    trace = await run_orchestrator(tmp_path, provider, agent_model_retry_limit=1, agent_model_retry_backoff_seconds=0)
+
+    assert trace.state == RunState.FAILED_MODEL
+    assert provider.calls == 2
