@@ -138,6 +138,56 @@ class TestScriptCatalog:
         assert entries[0].case_id is None
         assert entries[0].replay_eligible is False
 
+    def test_confidence_and_promotion_fields_are_read_from_metadata(self, tmp_path: Path) -> None:
+        """新产物的质量/晋级标注来自 metadata（config 兜底）；旧产物回退到 incomplete_reasons。"""
+        runtime_dir = tmp_path / "runs"
+        write_script(
+            runtime_dir,
+            "run-20260921T104829Z-00d18d8a",
+            "test_run_20260921T104829Z_00d18d8a.py",
+            config={
+                "case_id": "run_case",
+                "purpose": "acceptance",
+                "replay_eligible": True,
+                "confidence": "high",
+                "confidence_factors": [],
+                "promotion_eligible": False,
+                "runnable_blockers": [],
+            },
+            metadata={
+                "purpose": "acceptance",
+                "replay_eligible": True,
+                "confidence": "high",
+                "confidence_factors": [],
+                "promotion_eligible": False,
+                "promotion_blockers": ["live-mode trace is not Profile-promotion evidence"],
+                "runnable_blockers": [],
+                "incomplete_reasons": [],
+            },
+        )
+        # 旧产物：只有 incomplete_reasons，没有 confidence/promotion 键。
+        write_script(
+            runtime_dir,
+            "run-legacy",
+            "test_run_legacy.py",
+            config={"case_id": "legacy_case", "replay_eligible": False},
+            metadata={"incomplete_reasons": ["live-mode trace cannot qualify for acceptance replay"]},
+        )
+
+        by_id = {entry.script_id: entry for entry in ScriptCatalog(runtime_dir).list_entries()}
+
+        fresh = by_id["run-20260921T104829Z-00d18d8a/generated/test_run_20260921T104829Z_00d18d8a.py"]
+        assert fresh.confidence == "high"
+        assert fresh.confidence_factors == []
+        assert fresh.promotion_eligible is False
+        assert fresh.runnable_blockers == []
+        assert fresh.diagnostic is False
+
+        legacy = by_id["run-legacy/generated/test_run_legacy.py"]
+        assert legacy.confidence is None
+        assert legacy.confidence_factors == ["live-mode trace cannot qualify for acceptance replay"]
+        assert legacy.promotion_eligible is False
+
 
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
