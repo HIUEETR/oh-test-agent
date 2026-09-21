@@ -31,6 +31,7 @@ from harmony_test_agent.cases.spec import (
 from harmony_test_agent.generation import HypiumGenerator
 from harmony_test_agent.models import (
     ActionResult,
+    AssertionResult,
     BoundingBox,
     LocatorCandidate,
     LocatorKind,
@@ -665,6 +666,121 @@ def test_spatial_fallback_without_host_key_keeps_coordinate() -> None:
     assert locator is not None
     assert locator.kind == LocatorKind.COORDINATE
     assert result.counts["coordinate_fallbacks"] == 1
+
+
+# ---------------------------------------------------------------------------
+# assert_text：检查点必须落在真正持有文本的元素上
+# ---------------------------------------------------------------------------
+
+
+def test_text_assertion_retargets_from_container_to_text_holder() -> None:
+    """真机复盘：``assert_text`` 的运行时定位器是容器 key，容器 text 为空 → 必须改用文本持有者。"""
+    snapshot = ScreenSnapshot(
+        snapshot_id="search",
+        run_id="run-text-holder",
+        image_path=Path("search.png"),
+        image_sha256="hash",
+        width=1222,
+        height=2670,
+        elements=[
+            UIElement(
+                element_id="ui-container",
+                key="p2_search_input_container",
+                type="Row",
+                bbox=BoundingBox(left=60, top=160, right=1160, bottom=250),
+            ),
+            UIElement(
+                element_id="ui-input",
+                key="p2_search_input",
+                content="OpenHarmony",
+                type="TextInput",
+                editable=True,
+                bbox=BoundingBox(left=80, top=170, right=1100, bottom=240),
+            ),
+        ],
+    )
+    trace = RunTrace(
+        run_id="run-text-holder",
+        target_app_id="zhihu-plus",
+        task="搜索 OpenHarmony",
+        device_id="device-1",
+        snapshots=[snapshot],
+        actions=[
+            ActionResult(
+                step_id="assert-search-text",
+                tool=ToolName.ASSERT_TEXT,
+                success=True,
+                params={"target": "p2_search_input", "text": "OpenHarmony"},
+                before_snapshot_id="search",
+                after_snapshot_id="search",
+                locator=LocatorCandidate(kind=LocatorKind.KEY, value="p2_search_input_container"),
+                assertion=AssertionResult(
+                    kind=ToolName.ASSERT_TEXT, target="p2_search_input", passed=True, message="ok"
+                ),
+            ),
+            finish_action(),
+        ],
+    )
+
+    result = CaseBuilder(min_observed_rounds=1).from_trace(trace, profile(inventory=[]))
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.kind == CheckpointKind.TEXT_EQUALS
+    assert checkpoint.expected == "OpenHarmony"
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.value == "p2_search_input"
+    assert any("text assertion re-targeted" in item for item in result.warnings)
+
+
+def test_text_assertion_keeps_locator_when_it_already_holds_the_text() -> None:
+    """定位器本来就指向文本持有者时不动它（不得引入额外改写）。"""
+    snapshot = ScreenSnapshot(
+        snapshot_id="search",
+        run_id="run-text-holder-2",
+        image_path=Path("search.png"),
+        image_sha256="hash",
+        width=1222,
+        height=2670,
+        elements=[
+            UIElement(
+                element_id="ui-input",
+                key="p2_search_input",
+                content="OpenHarmony",
+                type="TextInput",
+                editable=True,
+                bbox=BoundingBox(left=80, top=170, right=1100, bottom=240),
+            )
+        ],
+    )
+    trace = RunTrace(
+        run_id="run-text-holder-2",
+        target_app_id="zhihu-plus",
+        task="搜索 OpenHarmony",
+        device_id="device-1",
+        snapshots=[snapshot],
+        actions=[
+            ActionResult(
+                step_id="assert-search-text",
+                tool=ToolName.ASSERT_TEXT,
+                success=True,
+                params={"target": "p2_search_input", "text": "OpenHarmony"},
+                before_snapshot_id="search",
+                after_snapshot_id="search",
+                locator=LocatorCandidate(kind=LocatorKind.KEY, value="p2_search_input"),
+                assertion=AssertionResult(
+                    kind=ToolName.ASSERT_TEXT, target="p2_search_input", passed=True, message="ok"
+                ),
+            ),
+            finish_action(),
+        ],
+    )
+
+    result = CaseBuilder(min_observed_rounds=1).from_trace(trace, profile(inventory=[]))
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.value == "p2_search_input"
+    assert not any("text assertion re-targeted" in item for item in result.warnings)
 
 
 # ---------------------------------------------------------------------------

@@ -322,6 +322,10 @@ class CaseBuilder:
                 locator = self.locator_from_candidate(action.locator, action.params.get("target"), profile, warnings)
                 if locator is not None and locator.kind not in {LocatorKind.KEY, LocatorKind.ID}:
                     locator = None
+                if locator is not None:
+                    locator = self._align_text_assertion_locator(
+                        trace, action, locator, str(expected), profile, warnings
+                    )
                 # 只有 KEY/ID 钉死了具体控件时才用精确 ``text=``；否则用包含匹配，
                 # 与运行时 ``evaluate_assertion`` 的 target_variants 模糊匹配保持一致，
                 # 避免生成脚本比录制时更严格而在回放中抖动失败。
@@ -772,6 +776,83 @@ class CaseBuilder:
     # ------------------------------------------------------------------
     # 定位器策略
     # ------------------------------------------------------------------
+
+    def _align_text_assertion_locator(
+        self,
+        trace: RunTrace,
+        action: ActionResult,
+        locator: LocatorSpec,
+        expected: str,
+        profile: TargetAppProfile | None,
+        warnings: list[str],
+    ) -> LocatorSpec:
+        """把 TEXT_EQUALS 检查点对齐到「真正持有该文本的元素」。
+
+        真机复盘（run-20260921T063745Z-ba36e30e 的知乎++回放）：``assert_text 'OpenHarmony'`` 的
+        运行时定位器是**容器** key ``p2_search_input_container``，脚本因此断言「容器的 text 等于
+        OpenHarmony」——容器自身 text 为空，回放必然失败。断言帧里真正的文本持有者是输入框本身，
+        这里改用它的 key/id，并保留精确 ``text=`` 语义。
+        """
+        if not expected:
+            return locator
+        snapshot = self._assertion_frame(trace, action)
+        if snapshot is None:
+            return locator
+        recorded = self._element_for_locator(snapshot, locator)
+        if recorded is not None and self._holds_text(recorded, expected):
+            return locator
+        holder = next(
+            (item for item in snapshot.elements if self._holds_text(item, expected)),
+            None,
+        )
+        if holder is None:
+            return locator
+        candidate = self._key_id_candidate(holder)
+        if candidate is None or candidate.value == locator.value:
+            return locator
+        warnings.append(
+            f"{action.step_id}: text assertion re-targeted from {locator.value!r} to "
+            f"{candidate.value!r} (the element that actually holds {expected!r})"
+        )
+        return self.locator_from_candidate(candidate, expected, profile, warnings)
+
+    @staticmethod
+    def _assertion_frame(trace: RunTrace, action: ActionResult) -> ScreenSnapshot | None:
+        """断言求值所用帧：优先 after 帧，其次 before 帧。"""
+        for snapshot_id in (action.after_snapshot_id, action.before_snapshot_id):
+            if not snapshot_id:
+                continue
+            snapshot = next((item for item in trace.snapshots if item.snapshot_id == snapshot_id), None)
+            if snapshot is not None:
+                return snapshot
+        return None
+
+    @staticmethod
+    def _element_for_locator(snapshot: ScreenSnapshot, locator: LocatorSpec) -> UIElement | None:
+        for item in snapshot.elements:
+            if (locator.kind == LocatorKind.KEY and item.key == locator.value) or (
+                locator.kind == LocatorKind.ID and item.id == locator.value
+            ):
+                return item
+        return None
+
+    @staticmethod
+    def _holds_text(element: UIElement, expected: str) -> bool:
+        wanted = expected.strip()
+        if not wanted:
+            return False
+        return wanted in {element.content.strip(), element.description.strip()}
+
+    @staticmethod
+    def _key_id_candidate(element: UIElement) -> LocatorCandidate | None:
+        for candidate in element.locator_candidates:
+            if candidate.kind in {LocatorKind.KEY, LocatorKind.ID} and candidate.value:
+                return candidate
+        if element.key:
+            return LocatorCandidate(kind=LocatorKind.KEY, value=element.key, score=1)
+        if element.id:
+            return LocatorCandidate(kind=LocatorKind.ID, value=element.id, score=1)
+        return None
 
     @staticmethod
     def _recorded_key_locator(
