@@ -94,6 +94,7 @@ def _dynamic_pattern_variants(prefix: str, value: str) -> set[str]:
     """
     return {prefix, re.sub(r"\d+", "#", value)}
 
+
 #: DC 占位应用身份。
 PLACEHOLDER_BUNDLE = "com.example.app"
 PLACEHOLDER_ABILITY = "EntryAbility"
@@ -225,7 +226,20 @@ class CaseBuilder:
             elif tool == ToolName.CLICK_ELEMENT:
                 target = action.params.get("target")
                 coordinate = self._runtime_element_coordinate(trace, action)
-                if action.locator and action.locator.kind in {LocatorKind.SPATIAL, LocatorKind.VLM_BBOX} and coordinate:
+                recovered = self._recorded_key_locator(trace, action, action.locator)
+                if recovered is not None:
+                    add_step(
+                        StepAction.CLICK,
+                        step_id=action.step_id,
+                        locator=self.locator_from_candidate(recovered, target, profile, warnings),
+                    )
+                    warnings.append(
+                        f"{action.step_id}: runtime locator recovered as "
+                        f"{recovered.kind}:{recovered.value!r} from the recorded frame"
+                    )
+                elif (
+                    action.locator and action.locator.kind in {LocatorKind.SPATIAL, LocatorKind.VLM_BBOX} and coordinate
+                ):
                     add_step(
                         StepAction.CLICK,
                         step_id=action.step_id,
@@ -758,6 +772,71 @@ class CaseBuilder:
     # ------------------------------------------------------------------
     # 定位器策略
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _recorded_key_locator(
+        trace: RunTrace,
+        action: ActionResult,
+        runtime_locator: LocatorCandidate | None,
+    ) -> LocatorCandidate | None:
+        """运行时只拿到空间/坐标回退时，按 ``params['target']`` 回查原始帧取 key/id 定位器。
+
+        真机复盘（run-20260921T053514Z-8418044b 的回放）：第 13 步「确认保存」在运行时是
+        SPATIAL 回退，生成脚本因此写成 ``driver.touch((1212, 237))``；回放时那一下没有落到
+        保存按钮上，编辑页一直开着，随后的 ``agenda_item_title`` 断言必然失败。原始帧里该
+        元素其实带 ``add_agenda_comfrim`` key——恢复出来就能渲染成稳定的 key 选择器。
+
+        只恢复 key/id：内容文本选择器对坐标回退不是稳定替代，保持坐标兜底语义不变。
+        """
+        if runtime_locator is not None and runtime_locator.kind in {
+            LocatorKind.KEY,
+            LocatorKind.ID,
+            LocatorKind.TEXT,
+            LocatorKind.TYPE_TEXT,
+        }:
+            return None
+        target = str(action.params.get("target") or "")
+        if not target or not action.before_snapshot_id:
+            return None
+        snapshot = next(
+            (item for item in trace.snapshots if item.snapshot_id == action.before_snapshot_id),
+            None,
+        )
+        if snapshot is None:
+            return None
+        element = next((item for item in snapshot.elements if item.element_id == target), None)
+        if element is None:
+            element = next((item for item in snapshot.elements if target in {item.key, item.id}), None)
+        if element is None:
+            return None
+        for candidate in element.locator_candidates:
+            if candidate.kind in {LocatorKind.KEY, LocatorKind.ID} and candidate.value:
+                return candidate
+        if element.key:
+            return LocatorCandidate(kind=LocatorKind.KEY, value=element.key, score=1)
+        if element.id:
+            return LocatorCandidate(kind=LocatorKind.ID, value=element.id, score=1)
+        # 自绘/图标按钮常常既无 key 也无 id，但它的宿主容器带 key（``add_agenda_comfrim`` 包裹
+        # 一个无 key 的 Button）——取「包含该元素中心的最小带 key 元素」作为归属控件。
+        # 面积相同时取层级更靠后（更靠上层）的那个：弹层里的确认按钮与背景页的 more_menu
+        # 在 dump 里 bbox 完全一致，只有顺序能区分。
+        if element.bbox is None:
+            return None
+        center_x, center_y = element.bbox.center
+        owners = [
+            (index, item)
+            for index, item in enumerate(snapshot.elements)
+            if item.bbox is not None
+            and (item.key or item.id)
+            and item.bbox.left <= center_x <= item.bbox.right
+            and item.bbox.top <= center_y <= item.bbox.bottom
+        ]
+        if not owners:
+            return None
+        _, owner = min(owners, key=lambda pair: (pair[1].bbox.area, -pair[0]))
+        if owner.key:
+            return LocatorCandidate(kind=LocatorKind.KEY, value=owner.key, score=0.9)
+        return LocatorCandidate(kind=LocatorKind.ID, value=owner.id, score=0.9)
 
     def locator_from_candidate(
         self,

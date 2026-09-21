@@ -437,6 +437,8 @@ def test_dynamic_key_without_stable_evidence_keeps_exact_value_and_feeds_incompl
     assert "source trace contains a dynamic locator without stable unique-prefix evidence" in (
         result.incomplete_reasons
     )
+    assert result.replay_eligible is False
+    assert result.purpose == "diagnostic"
 
 
 # ---------------------------------------------------------------------------
@@ -501,8 +503,168 @@ def test_hyphen_dynamic_key_without_evidence_is_flagged_as_dynamic() -> None:
     assert "source trace contains a dynamic locator without stable unique-prefix evidence" in (
         result.incomplete_reasons
     )
-    assert result.replay_eligible is False
-    assert result.purpose == "diagnostic"
+
+
+# ---------------------------------------------------------------------------
+# 无 key/id 元素的空间回退：按宿主容器恢复 key
+# ---------------------------------------------------------------------------
+
+
+def test_spatial_fallback_recovers_key_from_host_container() -> None:
+    """真机复盘：确认按钮自身无 key，宿主容器 ``add_agenda_comfrim`` 有 key → 用 key 选择器。"""
+    snapshot = ScreenSnapshot(
+        snapshot_id="editor",
+        run_id="run-host-key",
+        image_path=Path("editor.png"),
+        image_sha256="hash",
+        width=1320,
+        height=2232,
+        elements=[
+            UIElement(
+                element_id="ui-confirm-host",
+                key="add_agenda_comfrim",
+                type="__Common__",
+                bbox=BoundingBox(left=1152, top=177, right=1272, bottom=297),
+            ),
+            UIElement(
+                element_id="ui-confirm-button",
+                type="Button",
+                clickable=True,
+                bbox=BoundingBox(left=1152, top=177, right=1272, bottom=297),
+            ),
+        ],
+    )
+    trace = RunTrace(
+        run_id="run-host-key",
+        target_app_id="com-huawei-hmos-calendar",
+        task="保存日程",
+        device_id="device-1",
+        snapshots=[snapshot],
+        actions=[
+            ActionResult(
+                step_id="confirm",
+                tool=ToolName.CLICK_ELEMENT,
+                success=True,
+                params={"target": "ui-confirm-button"},
+                before_snapshot_id="editor",
+                locator=LocatorCandidate(kind=LocatorKind.SPATIAL, value="ui-confirm-button"),
+            ),
+            assert_visible_action(),
+            finish_action(),
+        ],
+    )
+
+    result = CaseBuilder(min_observed_rounds=1).from_trace(trace, profile(inventory=[]))
+
+    locator = result.spec.steps[0].locator
+    assert locator is not None
+    assert locator.kind == LocatorKind.KEY
+    assert locator.value == "add_agenda_comfrim"
+    assert result.counts["coordinate_fallbacks"] == 0
+    assert any("runtime locator recovered as" in item for item in result.warnings)
+
+
+def test_host_container_recovery_prefers_the_topmost_owner() -> None:
+    """弹层确认按钮与背景页 more_menu 的 bbox 完全一致：取层级更靠后的那个（弹层在上面）。"""
+    snapshot = ScreenSnapshot(
+        snapshot_id="sheet",
+        run_id="run-topmost",
+        image_path=Path("sheet.png"),
+        image_sha256="hash",
+        width=1320,
+        height=2232,
+        elements=[
+            UIElement(
+                element_id="ui-more-menu",
+                key="more_menu",
+                type="Button",
+                bbox=BoundingBox(left=1152, top=177, right=1272, bottom=297),
+            ),
+            UIElement(
+                element_id="ui-bare-icon",
+                type="Button",
+                clickable=True,
+                bbox=BoundingBox(left=1152, top=177, right=1272, bottom=297),
+            ),
+            UIElement(
+                element_id="ui-confirm-host",
+                key="add_agenda_comfrim",
+                type="__Common__",
+                bbox=BoundingBox(left=1152, top=177, right=1272, bottom=297),
+            ),
+        ],
+    )
+    trace = RunTrace(
+        run_id="run-topmost",
+        target_app_id="com-huawei-hmos-calendar",
+        task="保存日程",
+        device_id="device-1",
+        snapshots=[snapshot],
+        actions=[
+            ActionResult(
+                step_id="confirm",
+                tool=ToolName.CLICK_ELEMENT,
+                success=True,
+                params={"target": "ui-bare-icon"},
+                before_snapshot_id="sheet",
+                locator=LocatorCandidate(kind=LocatorKind.SPATIAL, value="ui-bare-icon"),
+            ),
+            assert_visible_action(),
+            finish_action(),
+        ],
+    )
+
+    result = CaseBuilder(min_observed_rounds=1).from_trace(trace, profile(inventory=[]))
+
+    locator = result.spec.steps[0].locator
+    assert locator is not None
+    assert locator.value == "add_agenda_comfrim"
+
+
+def test_spatial_fallback_without_host_key_keeps_coordinate() -> None:
+    """没有可归属的带 key 宿主时保持坐标兜底语义不变。"""
+    snapshot = ScreenSnapshot(
+        snapshot_id="editor",
+        run_id="run-no-host",
+        image_path=Path("editor.png"),
+        image_sha256="hash",
+        width=1320,
+        height=2232,
+        elements=[
+            UIElement(
+                element_id="ui-bare-button",
+                type="Button",
+                clickable=True,
+                bbox=BoundingBox(left=1152, top=177, right=1272, bottom=297),
+            )
+        ],
+    )
+    trace = RunTrace(
+        run_id="run-no-host",
+        target_app_id="com-huawei-hmos-calendar",
+        task="保存日程",
+        device_id="device-1",
+        snapshots=[snapshot],
+        actions=[
+            ActionResult(
+                step_id="confirm",
+                tool=ToolName.CLICK_ELEMENT,
+                success=True,
+                params={"target": "ui-bare-button"},
+                before_snapshot_id="editor",
+                locator=LocatorCandidate(kind=LocatorKind.SPATIAL, value="ui-bare-button"),
+            ),
+            assert_visible_action(),
+            finish_action(),
+        ],
+    )
+
+    result = CaseBuilder(min_observed_rounds=1).from_trace(trace, profile(inventory=[]))
+
+    locator = result.spec.steps[0].locator
+    assert locator is not None
+    assert locator.kind == LocatorKind.COORDINATE
+    assert result.counts["coordinate_fallbacks"] == 1
 
 
 # ---------------------------------------------------------------------------
