@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     bootstrap_max_actions_per_page: int = Field(default=6, ge=1, le=8)
     bootstrap_max_duration_seconds: int = Field(default=300, ge=30, le=900)
     bootstrap_advisor_enabled: bool = True
+    bootstrap_settle_timeout_seconds: int = Field(default=0, ge=0, le=30)
+    """任务期每帧采集前的稳定轮询预算（秒）。
+
+    ``ExplorationPolicy.settle_timeout_seconds`` 默认 1s：真机实测该轮询会再付一次
+    ``dumpLayout + cat``（≈6s/帧），而每步已经在动作后固定 ``settle_seconds`` 等待，
+    因此任务期默认关闭轮询（0）；需要更严格的过渡帧过滤时用 env 调回。"""
     """探索预算上界必须落在 ``ExplorationPolicy`` 的字段约束内（tests/unit/test_discovery.py 钉住）。"""
 
     profile_min_stable_locators: int = Field(default=3, ge=1, le=20)

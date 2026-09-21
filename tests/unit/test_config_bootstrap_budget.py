@@ -43,11 +43,15 @@ def test_bootstrap_defaults_match_plan_and_policy_bounds() -> None:
     assert settings.bootstrap_max_actions_per_page == 6
     assert settings.bootstrap_max_duration_seconds == 300
     assert settings.bootstrap_advisor_enabled is True
+    # 任务期默认关闭每帧稳定轮询：真机实测该轮询要再付一次 dumpLayout+cat（≈6s/帧），
+    # 而每步动作后已有固定 settle_seconds 等待。
+    assert settings.bootstrap_settle_timeout_seconds == 0
 
     # 默认值必须落在 ExplorationPolicy 的守恒上界内（tests/unit/test_discovery.py 钉住上界）。
     assert 1 <= settings.bootstrap_max_pages <= 20
     assert 1 <= settings.bootstrap_max_actions_per_page <= 8
     assert 1 <= settings.bootstrap_max_duration_seconds <= 900
+    assert 0 <= settings.bootstrap_settle_timeout_seconds <= 30
 
 
 @pytest.mark.parametrize(
@@ -95,18 +99,24 @@ def test_profile_gate_thresholds_are_env_overridable(monkeypatch: pytest.MonkeyP
 
 
 def test_orchestrator_injects_bootstrap_budget_and_request_wins(tmp_path: Path) -> None:
-    orchestrator = _orchestrator(tmp_path, bootstrap_max_pages=4, bootstrap_max_duration_seconds=60)
+    orchestrator = _orchestrator(
+        tmp_path, bootstrap_max_pages=4, bootstrap_max_duration_seconds=60, bootstrap_settle_timeout_seconds=0
+    )
 
     injected = orchestrator._bootstrap_policy(ExplorationPolicy())
 
     assert injected.max_pages == 4
     assert injected.max_duration_seconds == 60
     assert injected.max_actions_per_page == 6
+    assert injected.settle_timeout_seconds == 0
 
-    explicit = orchestrator._bootstrap_policy(ExplorationPolicy(max_pages=12, max_duration_seconds=800))
+    explicit = orchestrator._bootstrap_policy(
+        ExplorationPolicy(max_pages=12, max_duration_seconds=800, settle_timeout_seconds=2)
+    )
 
     assert explicit.max_pages == 12
     assert explicit.max_duration_seconds == 800
+    assert explicit.settle_timeout_seconds == 2
     # 未显式给出的字段仍按预算收紧。
     assert explicit.max_actions_per_page == 6
 

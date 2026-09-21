@@ -1321,10 +1321,16 @@ class AgentOrchestrator:
 
     @staticmethod
     def _capture_stable_frame(device, run_dir: Path, trace, label: str):
-        """采集前轮询 UI 层级稳定：静止页返回首帧，持续变化页在预算耗尽后补截一帧。
+        """采集前轮询 UI 层级稳定：静止页返回首帧，持续变化页复用最新层级而不是补抓一帧。
 
         与探索阶段 `_capture_settled` 同语义，用于过滤点击/输入后的加载动画与过渡帧；
         静态启动页对轮询完全"稳定"，由 OPEN_APP 的冷启动静默期兜底。
+
+        预算耗尽时**不再补抓一帧**：补抓要走「snapshot_display + file recv + PNG 编码 +
+        dumpLayout + cat」整条链路。实测（run-20260921T063745Z-ba36e30e /
+        run-20260921T053514Z-8418044b 的逐步耗时拆解）动态页面每步都要付一次，是任务阶段
+        最大的单笔开销（≈15-25s/步，而模型往返仅 ≈9s）；复用最后一次轮询到的层级刷新元素表
+        即可，画面只比元素表早一个轮询周期。
         """
         snapshot = device.screenshot(run_dir / "screens", trace.run_id, label)
         budget = trace.exploration_policy.settle_timeout_seconds if trace.exploration_policy else 0
@@ -1332,16 +1338,27 @@ class AgentOrchestrator:
             return snapshot
         fingerprint = BoundedExplorer._stability_fingerprint(snapshot.page_path, snapshot.elements)
         deadline = time.monotonic() + budget
+        latest_hierarchy: dict | None = None
         while time.monotonic() < deadline:
             device.wait(0.5)
             try:
                 hierarchy = device.collect_ui_hierarchy()
             except DeviceError:
                 break
+            latest_hierarchy = hierarchy
             elements = normalize_layout(hierarchy, snapshot.width, snapshot.height)
             if BoundedExplorer._stability_fingerprint(page_path(hierarchy), elements) == fingerprint:
                 return snapshot
-        return device.screenshot(run_dir / "screens", trace.run_id, f"{label}-settled")
+        if latest_hierarchy is None:
+            return snapshot
+        polled_elements = normalize_layout(latest_hierarchy, snapshot.width, snapshot.height)
+        if not polled_elements:
+            # 轮询到的层级为空（dump 失败或空帧）：保留首帧自带的元素表，绝不把元素清空。
+            return snapshot
+        return snapshot.model_copy(
+            update={"elements": polled_elements, "page_path": page_path(latest_hierarchy)},
+            deep=True,
+        )
 
     async def _decide_and_execute(
         self,
@@ -1471,6 +1488,12 @@ class AgentOrchestrator:
                     "and do not expand long reasoning."
                 )
                 attempt_feedback = timeout_hint + (f" Previous failure feedback: {feedback}" if feedback else "")
+            except ToolExecutionError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 模型侧故障（429/5xx/网关错误）必须可读且归类为 FAILED_MODEL
+                raise ToolExecutionError(
+                    f"model call failed: {type(exc).__name__}: {exc}", RunState.FAILED_MODEL
+                ) from exc
         raise ToolExecutionError(  # pragma: no cover - 循环内必然 return 或 raise
             f"model decision timed out after {timeout:g} seconds", RunState.FAILED_MODEL
         )
@@ -1685,6 +1708,12 @@ class AgentOrchestrator:
                     "the previous attempt timed out. Reply with ONLY the single observation+decision JSON object "
                     "and do not expand long reasoning."
                 )
+            except ToolExecutionError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 模型侧故障（429/5xx/网关错误）必须可读且归类为 FAILED_MODEL
+                raise ToolExecutionError(
+                    f"model call failed: {type(exc).__name__}: {exc}", RunState.FAILED_MODEL
+                ) from exc
         raise ToolExecutionError(  # pragma: no cover - 循环内必然 return 或 raise
             f"model decision timed out after {timeout:g} seconds", RunState.FAILED_MODEL
         )
@@ -1943,6 +1972,8 @@ class AgentOrchestrator:
             updates["max_actions_per_page"] = min(int(self.settings.bootstrap_max_actions_per_page), 8)
         if "max_duration_seconds" not in explicit:
             updates["max_duration_seconds"] = min(int(self.settings.bootstrap_max_duration_seconds), 900)
+        if "settle_timeout_seconds" not in explicit:
+            updates["settle_timeout_seconds"] = min(int(self.settings.bootstrap_settle_timeout_seconds), 30)
         if "advisor_enabled" not in explicit:
             updates["advisor_enabled"] = bool(self.settings.bootstrap_advisor_enabled)
         return requested.model_copy(update=updates) if updates else requested

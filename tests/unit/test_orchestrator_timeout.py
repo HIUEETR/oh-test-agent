@@ -121,3 +121,37 @@ async def test_retry_limit_bounds_decide_attempts(tmp_path: Path, retry_limit: i
 
     assert trace.state == RunState.FAILED_MODEL
     assert provider.decide_calls == retry_limit + 1
+
+
+class _ProviderOutage(RuntimeError):
+    """模拟 provider 侧故障（真机实测 429 rate_limit_error）。"""
+
+
+class OutageProvider(FixedPlanProvider):
+    name = "outage"
+    mock = True
+
+    def __init__(self, steps: list[PlannedStep]) -> None:
+        super().__init__(steps)
+        self.calls = 0
+
+    async def decide(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        feedback: str | None = None,
+    ) -> ToolDecision:
+        self.calls += 1
+        raise _ProviderOutage("status_code: 429 rate_limit_error")
+
+
+async def test_provider_outage_is_reported_as_failed_model(tmp_path: Path) -> None:
+    """模型侧故障（429/5xx）必须归类为 FAILED_MODEL 且错误可读，而不是 "unexpected error"。"""
+    provider = OutageProvider(STEPS)
+
+    trace = await run_orchestrator(tmp_path, provider)
+
+    assert trace.state == RunState.FAILED_MODEL
+    assert "model call failed" in (trace.error or "")
+    assert "429" in (trace.error or "")
+    assert "unexpected error" not in (trace.error or "")
