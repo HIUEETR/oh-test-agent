@@ -73,7 +73,11 @@ produced. Never insert inspect_screen between consecutive actions, and do not pl
 steps. Follow the requested behavior exactly: entering text does not imply submitting a search, and you must not add
 a search submission or search-result assertion unless the user explicitly asks for it. When navigating away after
 text input,
-account for the soft keyboard: one back may dismiss the keyboard before another back changes the app page. Never plan
+account for the soft keyboard: one back may dismiss the keyboard before another back changes the app page. In a form,
+the on-screen keyboard covers the lower rows: plan a back step to dismiss it before operating any control that sits
+below the text input, because covered rows collapse to a few pixels and cannot be clicked (real case: the calendar
+reminder row shrinks to 5px while the keyboard is up, so a click aimed at it lands on the start-time row instead).
+Never plan
 login, payment, captcha, deletion, permission grant, or arbitrary shell commands. Include explicit assertions and end
 with finish. The expected text of assert_text must be copied verbatim from text you actually observed on screen in the
 most recent observation; never invent a display format from the task wording (a task that says "1pm" may render as
@@ -105,7 +109,15 @@ column and the computed steps instead of a picker-row click. When recovery feedb
 this step failed: you may first take corrective actions (for example an anchored swipe inside a wheel column or
 clicking another control) and re-attempt the planned goal, including re-issuing its assertion once the state matches.
 Do not guess that a hierarchy element represents a visual
-control when its content or bbox does not support that conclusion. If a back step intends to navigate while a soft
+control when its content or bbox does not support that conclusion. When the planned control's bbox is collapsed (a few
+pixels tall) or missing while a soft keyboard is visible, the keyboard is covering it: dismiss the keyboard with back
+first and then interact with the row, instead of clicking a nearby visible row. If the planned target is present in
+Current
+elements, always answer with click_element and its element_id — even when that element is not marked clickable, because
+the runtime clicks its bounds centre (and the enclosing row) anyway. Never replace a present target with a guessed
+click_coordinate: a coordinate guess lands on whatever happens to be at that point, which in a form with several
+similar rows means changing the wrong field. Reserve click_coordinate for controls that are genuinely absent from
+Current elements. If a back step intends to navigate while a soft
 keyboard is visible, prefer the visible
 in-app back control because a system back may only dismiss the keyboard. If the desired destination is already visible,
 use inspect_screen instead of navigating away. Never emit shell commands, multiple actions, login, payment, captcha,
