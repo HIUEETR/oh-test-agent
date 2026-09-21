@@ -1986,6 +1986,13 @@ class AgentOrchestrator:
         ``registry.save_candidate`` 的准入校验必然拒绝它，只能停留在 draft；要晋级必须真的
         跑绿一次 ``ProfileVerifier.verify``。若未来配置使准入通过，这里也会自然走 candidate。
         """
+        if profile.status == ProfileStatus.VERIFIED:
+            # 已验证 Profile 已含设备验证证据与完整资产：把任务期观测并进去会生成一份继承了
+            # verification_passed 的 candidate（真机 run-20260921T063745Z-ba36e30e 实测），
+            # 之后可被 append_replay_evidence 直接晋级——等于用未经设备验证的定位器替换已验证
+            # 资产。明确不做：已验证 Profile 的资产更新只能走完整验证 + 晋级。
+            logger.info("skip task evidence harvest for verified profile %s", profile.target_app_id)
+            return None
         locators = self._collect_task_evidence(trace, profile)
         assertions = [item for item in trace.assertions if item.passed]
         if not locators and not assertions:
@@ -2100,11 +2107,17 @@ class AgentOrchestrator:
         merged_assertions = AgentOrchestrator._merge_assertions(
             profile.assertion_inventory, assertions, merged_locators, trace.run_id
         )
+        evidence = dict(profile.provenance.evidence)
+        if evidence.get("verification_passed"):
+            # 纵深防御：回收证据不是设备验证证据，合并结果永远不得继承「验证通过」。
+            evidence["verification_passed"] = False
+            evidence["verification_invalidated_by_harvest"] = True
         return profile.model_copy(
             update={
                 "status": ProfileStatus.DRAFT,
                 "stable_locator_inventory": merged_locators,
                 "assertion_inventory": merged_assertions,
+                "provenance": profile.provenance.model_copy(update={"evidence": evidence}, deep=True),
             },
             deep=True,
         )

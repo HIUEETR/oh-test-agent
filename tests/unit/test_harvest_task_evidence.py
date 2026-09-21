@@ -221,6 +221,90 @@ def test_harvest_does_not_fabricate_verification_evidence(tmp_path: Path) -> Non
     assert not registry.list(ProfileStatus.VERIFIED)
 
 
+def test_harvest_skips_verified_profile(tmp_path: Path) -> None:
+    """真机复盘：已验证 Profile 不得被回收改写成可晋级的 candidate。
+
+    run-20260921T063745Z-ba36e30e（知乎++ verified Profile）实测：回收把任务期定位器并进
+    已验证 Profile，产出一份**继承 verification_passed=True** 的 candidate——之后可被
+    append_replay_evidence 直接晋级，等于用未经设备验证的定位器替换已验证资产。
+    """
+    orchestrator, settings, registry = _harness(tmp_path)
+    trace = _trace("snap-harvest")
+    emitter = RunEventEmitter(trace, orchestrator.repository, orchestrator.artifacts)
+
+    verified = _verified_profile()
+    (settings.resolved_profiles_dir / f"{verified.target_app_id}.json").write_text(
+        verified.model_dump_json(indent=2), encoding="utf-8"
+    )
+    before = (settings.resolved_profiles_dir / f"{verified.target_app_id}.json").read_text(encoding="utf-8")
+
+    merged = orchestrator._harvest_task_evidence(trace, verified, registry, emitter)
+
+    assert merged is None
+    assert not registry.list(ProfileStatus.CANDIDATE)
+    after = (settings.resolved_profiles_dir / f"{verified.target_app_id}.json").read_text(encoding="utf-8")
+    assert after == before
+    assert not any(event.type == EventType.PROFILE_HARVESTED for event in trace.events)
+
+
+def test_merge_profile_evidence_never_inherits_verification_passed() -> None:
+    """纵深防御：合并结果即便来自已验证 Profile，也必须清掉 verification_passed。"""
+    from harmony_test_agent.agents.orchestrator import AgentOrchestrator as AO
+
+    trace = _trace("snap-harvest")
+    collected = [
+        HarvestedLocator(
+            candidate=LocatorCandidate(kind=LocatorKind.KEY, value="tabs_month"),
+            page_signature="page-x",
+            snapshot_id="snap-harvest",
+        )
+    ]
+
+    merged = AO._merge_profile_evidence(trace, _verified_profile(), collected, [])
+
+    assert merged.status == ProfileStatus.DRAFT
+    assert merged.provenance.evidence.get("verification_passed") is False
+    assert merged.provenance.evidence.get("verification_invalidated_by_harvest") is True
+
+
+def _verified_profile() -> TargetAppProfile:
+    """一份已验证 Profile（证据齐全），用于验证「回收不得改写已验证资产」。"""
+    return TargetAppProfile.model_validate(
+        {
+            **_profile().model_dump(mode="python"),
+            "status": ProfileStatus.VERIFIED,
+            "stable_locator_inventory": [
+                {
+                    "name": f"page-{index}",
+                    "page_signature": f"page-{index}",
+                    "key": f"page-key-{index}",
+                    "observed_rounds": 1,
+                    "unique_match_rounds": 1,
+                    "evidence_snapshot_ids": [f"snap-{index}"],
+                }
+                for index in range(1, 4)
+            ],
+            "assertion_inventory": [
+                {
+                    "name": f"assertion-{index}",
+                    "kind": "visible",
+                    "target": f"page-key-{index}",
+                    "page_signature": f"page-{index}",
+                    "observed_rounds": 1,
+                    "evidence_snapshot_ids": [f"snap-{index}"],
+                }
+                for index in range(1, 3)
+            ],
+            "core_flows": [{"pages": ["page-1", "page-2", "page-3"], "steps": [], "interaction_types": []}],
+            "provenance": {
+                "verified_at": "2026-09-21T00:00:00Z",
+                "hypium_replay_run_ids": ["run-old:profile-attempt-1"],
+                "evidence": {"verification_passed": True},
+            },
+        }
+    )
+
+
 def test_harvested_locator_dataclass_exposes_candidate() -> None:
     item = HarvestedLocator(
         candidate=LocatorCandidate(kind=LocatorKind.KEY, value="tabs_month"),
