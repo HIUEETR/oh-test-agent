@@ -15,17 +15,21 @@ def artifact(tmp_path: Path, *, eligible: bool = True) -> GeneratedArtifact:
     config_path.write_text("{}", encoding="utf-8")
     metadata_path = generated_dir / "generation_metadata.json"
     metadata_path.write_text("{}", encoding="utf-8")
+    # 不可执行只能由 G3 的两条物理必要条件造成（例如没有可回放动作），
+    # 质量顾虑（confidence_factors）不再让 execute() 拒绝脚本。
     return GeneratedArtifact(
         python_path=python_path,
         config_path=config_path,
         metadata_path=metadata_path,
         purpose="acceptance" if eligible else "diagnostic",
         replay_eligible=eligible,
+        confidence="high" if eligible else "low",
+        runnable_blockers=[] if eligible else ["script has no replayable action"],
         incomplete_reasons=[] if eligible else ["source trace is incomplete"],
     )
 
 
-def test_runner_rejects_diagnostic_artifact_without_starting_process(tmp_path: Path, monkeypatch) -> None:
+def test_runner_rejects_unrunnable_artifact_without_starting_process(tmp_path: Path, monkeypatch) -> None:
     generated = artifact(tmp_path, eligible=False)
 
     def unexpected_run(*args, **kwargs):
@@ -37,6 +41,8 @@ def test_runner_rejects_diagnostic_artifact_without_starting_process(tmp_path: P
     assert result.status == "ineligible"
     assert result.passed is False
     assert result.error and result.error.kind == "ineligible"
+    assert result.error.message == "generated script is not runnable"
+    assert result.error.details["runnable_blockers"] == ["script has no replayable action"]
     assert result.exit_code is None
     assert all(not Path(path).is_absolute() for path in result.evidence_paths)
     assert "hypium/attempt-01/command.json" in result.evidence_paths

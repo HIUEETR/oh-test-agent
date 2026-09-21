@@ -95,10 +95,10 @@ class TestExecuteDiagnostic:
             raise AssertionError("missing script must raise ValueError")
 
 
-class TestEligibilityGateUnchanged:
-    """回归护栏：正式 execute() 仍然拦截不合格产物。"""
+class TestRunnableGateUnchanged:
+    """回归护栏：正式 ``execute()`` 仍然拦截**不可执行**（runnable=False）的产物。"""
 
-    def test_execute_refuses_ineligible_artifact(self, tmp_path: Path) -> None:
+    def test_execute_refuses_unrunnable_artifact(self, tmp_path: Path) -> None:
         script = write_dc_script(tmp_path, "dc_test_dc_4.py", PASSING_SCRIPT)
         generated = GeneratedArtifact(
             python_path=script,
@@ -106,6 +106,7 @@ class TestEligibilityGateUnchanged:
             metadata_path=script.with_suffix(".json"),
             purpose="diagnostic",
             replay_eligible=False,
+            runnable_blockers=["app identity is a placeholder (com.example.app/EntryAbility)"],
         )
 
         result = make_runner(tmp_path).execute(generated)
@@ -113,3 +114,7 @@ class TestEligibilityGateUnchanged:
         assert result.status == "ineligible"
         assert result.passed is False
         assert result.error is not None and result.error.kind == "ineligible"
+        assert result.error.message == "generated script is not runnable"
+        assert result.error.details["runnable_blockers"] == [
+            "app identity is a placeholder (com.example.app/EntryAbility)"
+        ]
