@@ -1,0 +1,10 @@
+02-10 10:00:00.101  4321  4321 I C01310/com.zhihu.hmos/ArkUI: [Engine Log] pageIndex 0 pagePath pages/Index
+02-10 10:00:01.200  4321  4321 E C01310/com.zhihu.hmos/Crash: cppcrash happened, process name com.zhihu.hmos
+02-10 10:00:01.300  4321  4321 E C01310/com.zhihu.hmos/Crash: Reason: Signal:SIGSEGV(SEGV_MAPERR)@0x0000000000000000
+02-10 10:00:02.400  4321  4321 E C01310/com.zhihu.hmos/JsError: jscrash happened, Error name: TypeError
+02-10 10:00:03.600  4321  4321 E C01310/com.zhihu.hmos/AppFreeze: appfreeze detected in com.zhihu.hmos
+02-10 10:00:04.700  4321  4321 E C01310/com.zhihu.hmos/ANR: THREAD_BLOCK_6S main thread blocked
+02-10 10:00:04.900  4321  4321 E C01310/com.zhihu.hmos/ANR: LIFECYCLE_TIMEOUT timeout happens
+02-10 10:00:05.100  4321  4321 E C01310/com.zhihu.hmos/Input: APP_INPUT_BLOCK input dispatch blocked
+02-10 10:00:05.800  9001  9001 E C01310/com.other.app/Crash: cppcrash happened, process name com.other.app
+no-timestamp raw cppcrash line from kernel

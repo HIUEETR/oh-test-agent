@@ -59,6 +59,9 @@ class FakeDiscoveryDevice:
         self.foreign_state = 9
         self.force_poll_state: int | None = None
         self.last_catalog_raw = "fake installed-app catalog"
+        # 计划 4.3：back 现在是冷恢复之前的廉价恢复手段之一；需要专门验证「只能冷启动」
+        # 失败路径的用例可关掉它，让场景不受恢复策略变化影响。
+        self.back_enabled = True
 
     def list_installed_apps(self) -> list[object]:
         return []
@@ -180,6 +183,8 @@ class FakeDiscoveryDevice:
 
     def back(self) -> CommandResult:
         self.back_calls += 1
+        if not self.back_enabled:
+            return CommandResult(command="back", returncode=1, stderr="back disabled")
         self.foreground_bundle = _target().bundle_name
         self.state = max(0, self.state - 1)
         return _ok("back")
@@ -466,12 +471,13 @@ def test_restore_path_fails_when_expected_interactive_structure_is_missing(tmp_p
 def test_explore_skips_pages_that_cannot_be_restored(tmp_path: Path) -> None:
     device = FakeDiscoveryDevice(tmp_path, home_actions=3)
     device.foreign_start_after = 1
+    device.back_enabled = False
     explorer = _explorer(tmp_path, device, max_pages=3, max_actions_per_page=2)
 
     result = explorer.explore()
 
     assert result.stop_reason == "queue_exhausted"
-    # 首页首个动作成功、目标页照常入队；随后 back 失效且冷启动全部落在外包应用，
+    # 首页首个动作成功、目标页照常入队；廉价 back 恢复被禁用且冷启动全部落在外包应用，
     # 源页候选中止，排队页恢复三次全部失败后被跳过。
     assert len(result.pages) == 2
     assert len(result.transitions) == 1
@@ -484,6 +490,7 @@ def test_explore_skips_pages_that_cannot_be_restored(tmp_path: Path) -> None:
 def test_explore_stops_candidates_on_source_page_that_cannot_be_restored(tmp_path: Path) -> None:
     device = FakeDiscoveryDevice(tmp_path, home_actions=3)
     device.foreign_start_after = 2
+    device.back_enabled = False
     explorer = _explorer(tmp_path, device, max_pages=3, max_actions_per_page=3)
 
     result = explorer.explore()
@@ -494,6 +501,21 @@ def test_explore_stops_candidates_on_source_page_that_cannot_be_restored(tmp_pat
     assert all(item.success for item in result.transitions)
     assert len(result.pages) == 3
     assert all(item.source_page_id == result.pages[0].page_id for item in result.transitions)
+
+
+def test_cheap_back_recovery_avoids_cold_restart_when_it_can(tmp_path: Path) -> None:
+    """计划 4.3：连续 back 可回到源页时不再冷启动（冷启动要停/启应用并重放整条路径）。"""
+    device = FakeDiscoveryDevice(tmp_path, home_actions=3)
+    device.foreign_start_after = 1
+    explorer = _explorer(tmp_path, device, max_pages=3, max_actions_per_page=2)
+
+    result = explorer.explore()
+
+    assert result.stop_reason == "queue_exhausted"
+    # back 恢复生效：探索走得更远（3 页 / 2 条成功跃迁），且冷启动次数不再随候选数增长。
+    assert len(result.pages) == 3
+    assert len(result.transitions) == 2
+    assert device.back_calls >= 1
 
 
 def test_capture_settled_returns_initial_frame_when_hierarchy_is_stable(tmp_path: Path) -> None:
@@ -735,7 +757,8 @@ def test_recovery_uses_back_instead_of_cold_restart_when_possible(tmp_path: Path
     assert device.back_calls == 1
 
 
-def test_input_actions_always_cold_restore_for_keyboard_state(tmp_path: Path) -> None:
+def test_input_actions_reuse_landed_frame_when_identity_is_unchanged(tmp_path: Path) -> None:
+    """计划 4.3：input 不再无条件冷恢复——软键盘不会换页时直接复用当前帧。"""
     device = FakeDiscoveryDevice(tmp_path, home_actions=0)
     explorer = _explorer(tmp_path, device)
     input_hierarchy = {
@@ -761,9 +784,52 @@ def test_input_actions_always_cold_restore_for_keyboard_state(tmp_path: Path) ->
 
     assert result.stop_reason == "queue_exhausted"
     assert any(item.action.kind == "input" for item in result.transitions)
-    # input 后跳过 back 直接冷恢复：初始 1 次 + input 后 1 次
-    assert device.stop_calls == 2
+    # 落地页身份未变（只有软键盘）⇒ 复用完当前帧：既无 back 也无冷启动。
+    assert device.stop_calls == 1
     assert device.back_calls == 0
+
+
+def test_input_action_cold_restores_when_landing_identity_changes(tmp_path: Path) -> None:
+    """input 之后确实换了页面（identity 偏离）时仍必须恢复源页。"""
+    device = FakeDiscoveryDevice(tmp_path, home_actions=1)
+    explorer = _explorer(tmp_path, device)
+
+    def input_hierarchy(state: int) -> dict:
+        if state != 0:
+            return original_hierarchy(state)
+        return {
+            "attributes": {"pagePath": "/page/0"},
+            "children": [
+                {
+                    "attributes": {
+                        "key": "p2_search_input",
+                        "type": "TextInput",
+                        "editable": "true",
+                        "visible": "true",
+                        "enabled": "true",
+                        "bounds": "[80,100][700,180]",
+                    },
+                    "children": [],
+                }
+            ],
+        }
+
+    original_hierarchy = device._hierarchy
+    device._hierarchy = input_hierarchy  # type: ignore[method-assign]
+
+    def jumping_input(text: str, x: int | None = None, y: int | None = None) -> CommandResult:
+        del text, x, y
+        device.state = 1
+        return CommandResult(command="input", returncode=0)
+
+    device.input_text = jumping_input  # type: ignore[method-assign]
+
+    result = explorer.explore()
+
+    assert result.stop_reason == "queue_exhausted"
+    assert any(item.action.kind == "input" for item in result.transitions)
+    # 偏离后按代价递增恢复：先 back，成功即返回源页（不再无条件冷启动）。
+    assert device.back_calls >= 1
 
 
 def test_early_success_requires_configurable_interaction_kinds(tmp_path: Path) -> None:

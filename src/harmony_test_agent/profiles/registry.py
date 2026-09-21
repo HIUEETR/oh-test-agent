@@ -12,6 +12,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..models import ProfileStatus, TargetAppProfile, utc_now
+from .admission import (
+    REGISTRY_GATES,
+    AdmissionEvidence,
+    AdmissionThresholds,
+    describe_admission_failure,
+    evaluate_admission,
+    pick_first_failure,
+)
 from .compat import load_compatible_profile
 
 # 比赛「3 次连续成功」要求的总回放证据上限（主流程 1 次 + 异步追加 2 次）。
@@ -515,37 +523,27 @@ class ProfileRegistry:
         return path
 
     def _validate_admission_assets(self, profile: TargetAppProfile, transition: str) -> None:
-        locators = profile.stable_locator_inventory
-        if len(locators) < 3:
-            raise ProfileTransitionError(f"{transition} requires three stable locators")
-        if len({item.page_signature for item in locators}) < 3:
-            raise ProfileTransitionError(f"{transition} requires stable locators on three pages")
-        # 仅「轮次」维度可配置（默认 1 轮）；资产丰富度门槛（3 定位器 / 3 页面 /
-        # 2 断言 / 核心流 3 页）保持不变，仍是比赛硬性要求。
-        min_rounds = self.min_evidence_rounds
-        admitted_locators = [
-            item
-            for item in locators
-            if item.observed_rounds >= min_rounds
-            and item.unique_match_rounds >= min_rounds
-            and item.evidence_snapshot_ids
-        ]
-        if len(admitted_locators) < 3:
-            raise ProfileTransitionError(f"{transition} requires {min_rounds}-round unique locator evidence")
-        assertions = profile.assertion_inventory
-        if len(assertions) < 2:
-            raise ProfileTransitionError(f"{transition} requires two application-level assertions")
-        if any(item.observed_rounds < min_rounds or not item.evidence_snapshot_ids for item in assertions):
-            raise ProfileTransitionError(f"{transition} requires {min_rounds}-round assertion evidence")
-        if not profile.core_flows or len(profile.core_flows[0].get("pages", [])) < 3:
-            raise ProfileTransitionError(f"{transition} requires a replayable three-page core flow")
-        if len(set(profile.core_flows[0].get("interaction_types", []))) < self.min_interaction_kinds:
-            raise ProfileTransitionError(f"{transition} requires {self.min_interaction_kinds} interaction types")
-        evidence = profile.provenance.evidence
-        if not evidence.get("verification_passed"):
-            raise ProfileTransitionError(f"{transition} requires passed device verification evidence")
-        if evidence.get("cross_bundle_recovery_failed", False):
-            raise ProfileTransitionError(f"{transition} cannot contain unrecovered cross-bundle violations")
+        """准入门禁：唯一实现见 ``profiles/admission.py``（计划 4.1/R15）。"""
+        thresholds = self._admission_thresholds()
+        failures = evaluate_admission(
+            AdmissionEvidence.from_profile(profile, thresholds, include=REGISTRY_GATES),
+            thresholds=thresholds,
+        )
+        gate = pick_first_failure(failures, style="registry")
+        if gate is not None:
+            raise ProfileTransitionError(
+                describe_admission_failure(gate, style="registry", thresholds=thresholds, prefix=f"{transition} ")
+            )
+
+    def _admission_thresholds(self) -> AdmissionThresholds:
+        """阈值来源：Settings + 本实例的运行态覆盖（interaction kinds / 证据轮数）。"""
+        from ..config import get_settings
+
+        return AdmissionThresholds.from_settings(
+            get_settings(),
+            min_interaction_kinds=self.min_interaction_kinds,
+            min_evidence_rounds=self.min_evidence_rounds,
+        )
 
     @staticmethod
     def _immutable_profile_payload(profile: TargetAppProfile) -> dict[str, object]:

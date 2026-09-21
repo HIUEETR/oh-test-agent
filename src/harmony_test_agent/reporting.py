@@ -5,9 +5,13 @@ from __future__ import annotations
 import html
 import json
 from pathlib import Path
+from typing import Any
 
-from .models import RunTrace
+from .models import AnomalyFinding, ExecutionAnalysis, RunTrace
 from .storage import ArtifactStore
+
+_ARTIFACT_SUFFIXES = (".jpeg", ".jpg", ".png", ".webp", ".json", ".log", ".txt", ".xml", ".html", ".zip")
+_EVIDENCE_EXCERPT_CHARS = 300
 
 
 class ReportBuilder:
@@ -38,6 +42,7 @@ class ReportBuilder:
             "".join(cards),
             self._coverage_markup(trace),
             self._replay_markup(trace),
+            self._analysis_markup(trace.analysis),
             self._failure_markup(trace),
         )
         report_path.write_text(document, encoding="utf-8")
@@ -88,6 +93,78 @@ class ReportBuilder:
 <tbody>{body}</tbody></table></section>"""
 
     @staticmethod
+    def _analysis_markup(analysis: ExecutionAnalysis | None) -> str:
+        """渲染「执行结果分析」章节；``None`` 时返回空串，既有报告输出保持不变。"""
+        if analysis is None:
+            return ""
+        run_id = analysis.subject_id.split("#", 1)[0] or analysis.subject_id
+        if analysis.healthy:
+            banner = '<p class="ok">健康</p>'
+        else:
+            banner = f'<p class="bad">发现 {len(analysis.findings)} 项异常</p>'
+        rows = "".join(ReportBuilder._finding_row(finding, run_id) for finding in analysis.findings)
+        body = rows or '<tr><td colspan="4">无异常发现</td></tr>'
+        symptom = ""
+        if analysis.symptom_reproduced is not None:
+            symptom_class = "ok" if analysis.symptom_reproduced else "bad"
+            verdict = "已复现" if analysis.symptom_reproduced else "未复现"
+            symptom = f'<p class="{symptom_class}">症状复现：<b>{verdict}</b></p>'
+        meta = (
+            f"<p>对象：<code>{html.escape(analysis.subject)}</code>"
+            f" · 编号：<code>{html.escape(analysis.subject_id)}</code>"
+            f" · 包名：<b>{html.escape(analysis.bundle_name or '—')}</b>"
+            f" · 设备：<b>{html.escape(analysis.device_id or '—')}</b>"
+            f" · 日志覆盖：<b>{html.escape(analysis.log_coverage)}</b></p>"
+        )
+        return f"""<section class="summary"><h2>执行结果分析</h2>
+{banner}{meta}
+<table><thead><tr><th>类别</th><th>严重度</th><th>摘要</th><th>证据摘录</th></tr></thead>
+<tbody>{body}</tbody></table>{symptom}</section>"""
+
+    @staticmethod
+    def _finding_row(finding: AnomalyFinding, run_id: str) -> str:
+        """渲染一条 finding：类别 / 严重度 / 摘要 / 证据摘录与产物链接。"""
+        severity_class = "ok" if finding.severity == "info" else "bad"
+        excerpt = json.dumps(finding.evidence, ensure_ascii=False)
+        if len(excerpt) > _EVIDENCE_EXCERPT_CHARS:
+            excerpt = excerpt[:_EVIDENCE_EXCERPT_CHARS] + "…"
+        detail = f"<br><small>{html.escape(finding.detail)}</small>" if finding.detail else ""
+        links = ReportBuilder._artifact_links(finding.evidence, run_id)
+        return (
+            f'<tr><td><span class="{severity_class}">{html.escape(str(finding.kind))}</span></td>'
+            f'<td><span class="{severity_class}">{html.escape(finding.severity)}</span></td>'
+            f"<td>{html.escape(finding.summary_zh)}{detail}</td>"
+            f"<td>{html.escape(excerpt)}{links}</td></tr>"
+        )
+
+    @staticmethod
+    def _artifact_links(evidence: dict[str, Any], run_id: str) -> str:
+        """把证据里的 Run 内相对产物路径渲染成现有 ``/api/runs/{id}/artifacts`` 链接。"""
+        links = [
+            f'<a href="/api/runs/{html.escape(run_id, quote=True)}/artifacts/{html.escape(path, quote=True)}">'
+            f"{html.escape(path)}</a>"
+            for path in ReportBuilder._artifact_paths(evidence)
+        ]
+        return "<br>" + "<br>".join(links) if links else ""
+
+    @staticmethod
+    def _artifact_paths(evidence: dict[str, Any]) -> list[str]:
+        """挑出证据中 Run 内相对产物路径；绝对路径与裸文件名不建链接。"""
+        paths: list[str] = []
+        for value in evidence.values():
+            candidates = value if isinstance(value, list) else [value]
+            for candidate in candidates:
+                if not isinstance(candidate, str):
+                    continue
+                text = candidate.replace("\\", "/")
+                parts = text.split("/")
+                if "/" not in text or text.startswith("/") or ":" in parts[0] or ".." in parts:
+                    continue
+                if text.lower().endswith(_ARTIFACT_SUFFIXES) and text not in paths:
+                    paths.append(text)
+        return paths
+
+    @staticmethod
     def _failure_markup(trace: RunTrace) -> str:
         failures = []
         if trace.agent_error or trace.error:
@@ -97,7 +174,7 @@ class ReportBuilder:
         return f'<section class="summary"><h2>失败摘要</h2><ul>{content or "<li>无失败</li>"}</ul></section>'
 
     @staticmethod
-    def _document(trace: RunTrace, cards: str, coverage: str, replays: str, failures: str) -> str:
+    def _document(trace: RunTrace, cards: str, coverage: str, replays: str, analysis: str, failures: str) -> str:
         css = """
 body { font-family: "HarmonyOS Sans SC", Inter, "Microsoft YaHei", sans-serif; background: #eef3f9; color: #17212b;
   margin: 0; padding: 32px; }
@@ -140,5 +217,5 @@ th, td { border-bottom: 1px solid #e3ecf5; padding: 10px; text-align: left; }
 <div class="metric">动作<br><b>{len(trace.actions)}</b></div>
 <div class="metric">断言<br><b>{len(trace.assertions)}</b></div></div>
 {"<p class='bad'>" + error + "</p>" if error else ""}</section>
-{gate_markup}{coverage}{replays}{failures}{cards}
+{gate_markup}{coverage}{replays}{analysis}{failures}{cards}
 </main></body></html>"""

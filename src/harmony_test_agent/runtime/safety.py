@@ -101,5 +101,13 @@ class SafetyPolicy:
             x, y = decision.coordinate
             if not 0 <= x < snapshot.width or not 0 <= y < snapshot.height:
                 raise SafetyError(f"coordinate {(x, y)} is outside {snapshot.width}x{snapshot.height}")
+        if decision.tool == ToolName.SWIPE and snapshot is not None:
+            # 计划 5.5：显式起止坐标同样必须做边界校验（缺帧时由执行器给出 FAILED_ELEMENT）。
+            for label, point in (("start", decision.start), ("end", decision.end)):
+                if point is None:
+                    continue
+                x, y = point
+                if not 0 <= x < snapshot.width or not 0 <= y < snapshot.height:
+                    raise SafetyError(f"swipe {label} {(x, y)} is outside {snapshot.width}x{snapshot.height}")
         if decision.tool == ToolName.WAIT and (decision.wait_seconds or 0) > 30:
             raise SafetyError("wait may not exceed 30 seconds")

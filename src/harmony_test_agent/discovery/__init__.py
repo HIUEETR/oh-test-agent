@@ -9,6 +9,8 @@ from .explorer import (
     DiscoveryResult,
     DiscoveryTransition,
     ExplorationAction,
+    is_volatile_evidence_key,
+    is_volatile_structural_key,
 )
 from .stability import (
     AssertionObservation,
@@ -16,6 +18,8 @@ from .stability import (
     StabilityAnalyzer,
     StabilityLevel,
     StabilityReport,
+    dynamic_identifier_pattern,
+    is_dynamic_identifier,
 )
 from .verification import ProfileVerificationResult, ProfileVerifier, VerificationRound
 
@@ -36,4 +40,8 @@ __all__ = [
     "StabilityLevel",
     "StabilityReport",
     "VerificationRound",
+    "dynamic_identifier_pattern",
+    "is_dynamic_identifier",
+    "is_volatile_evidence_key",
+    "is_volatile_structural_key",
 ]

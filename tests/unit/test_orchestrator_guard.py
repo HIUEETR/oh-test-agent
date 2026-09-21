@@ -116,8 +116,13 @@ def test_capture_stable_frame_returns_first_frame_when_hierarchy_is_stable(tmp_p
     assert device.labels == ["step_01_after"]
 
 
-def test_capture_stable_frame_recaptures_when_hierarchy_keeps_changing(tmp_path: Path) -> None:
-    # 层级与首帧持续不同（不回到初始状态）：预算耗尽后补截 -settled 帧
+def test_capture_stable_frame_reuses_latest_hierarchy_when_hierarchy_keeps_changing(tmp_path: Path) -> None:
+    """预算耗尽（页面持续变化）时复用最后轮询到的层级，**不再**补抓第二帧。
+
+    真机复盘（run-20260921T063745Z-ba36e30e / run-20260921T053514Z-8418044b）：补抓要走
+    snapshot_display + file recv + PNG 编码 + dumpLayout + cat 整条链路，动态页面每步都要付
+    一次，是任务阶段最大的单笔开销（≈15-25s/步）。
+    """
     device = _HierarchyDevice(
         [_hierarchy("btn_home", "首页"), _hierarchy("btn_other", "加载中"), _hierarchy("btn_other", "加载中")]
     )
@@ -125,6 +130,8 @@ def test_capture_stable_frame_recaptures_when_hierarchy_keeps_changing(tmp_path:
 
     snapshot = AgentOrchestrator._capture_stable_frame(device, tmp_path, _stable_frame_trace(), "step_02_after")
 
-    assert device.labels == ["step_02_after", "step_02_after-settled"]
-    assert snapshot.snapshot_id == "shot-2"
+    # 只抓了一帧；元素表来自最后一次轮询到的层级（"加载中" 那一版）。
+    assert device.labels == ["step_02_after"]
+    assert snapshot.snapshot_id == "shot-1"
+    assert any(item.content == "加载中" for item in snapshot.elements)
     assert time.monotonic() - started >= 0.5

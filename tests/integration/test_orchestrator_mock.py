@@ -144,6 +144,7 @@ async def test_mock_agent_runs_full_vertical_slice(tmp_path):
         runtime_dir=tmp_path / "runs",
         database_path=tmp_path / "agent.db",
         target_profile_path=profile_path,
+        profiles_dir=tmp_path / "profiles",
         runtime_home=tmp_path / "home",
         unchanged_screen_limit=2,
     )
@@ -165,9 +166,14 @@ async def test_mock_agent_runs_full_vertical_slice(tmp_path):
     )
     assert trace.state == RunState.COMPLETED, trace.error
     # FakeDevice 无法通过 Profile 引导（无前台查询/探索面），按实时模式降级继续任务：
-    # 全链路仍然覆盖 规划 → 决策 → 执行 → 页面图 → 断言 → 报告，但不生成 Hypium 脚本。
+    # 全链路仍然覆盖 规划 → 决策 → 执行 → 页面图 → 断言 → 报告。
+    # 2026-09 修复（计划 R2）：实时模式不再永久放弃脚本生成，产物以 diagnostic 形式保留。
     assert trace.live_mode is True
-    assert trace.generated is None
+    assert trace.generated is not None
+    assert trace.generated.purpose == "diagnostic"
+    assert trace.generated.replay_eligible is False
+    assert trace.generated.python_path.exists()
+    assert trace.generated.case_spec_path is not None and trace.generated.case_spec_path.exists()
     assert len(trace.graph.nodes) >= 4
     assert len(trace.graph.edges) >= 3
     assert len(trace.assertions) == 3

@@ -565,9 +565,15 @@ async def tool_screenshot(ctx: RunContext[DcToolContext]) -> str:
             on_phase=deps.recorder.note_phase,
         )
         changed = deps.snapshot_holder.update_jpeg(jpeg_path, jpeg_bytes, width, height)
-        # PNG 存档（用于产物）
-        deps.recorder.note_phase("archive_png")
-        snapshot = deps.device.screenshot(screens_dir, deps.session_id, f"dc_{int(time.time())}")
+        # 元素表复用同一帧：只补采 UI 层级，不再走一次完整截图（计划 5.3，实测省掉单次一半耗时）。
+        # 不支持该能力的设备替身回退到完整 screenshot，保持既有行为。
+        deps.recorder.note_phase("collect_hierarchy")
+        label = f"dc_{int(time.time())}"
+        collector = getattr(deps.device, "snapshot_from_capture", None)
+        if callable(collector):
+            snapshot = collector(jpeg_path, deps.session_id, width=width, height=height, label=label)
+        else:  # pragma: no cover - 仅旧适配器/替身走这里
+            snapshot = deps.device.screenshot(screens_dir, deps.session_id, label)
         deps.snapshot_holder.record(snapshot)
         # 发射截图事件（snapshot_path 为会话相对 POSIX 路径，供前端拼 artifact URL）
         deps.recorder._emit_event(

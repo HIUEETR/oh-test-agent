@@ -334,6 +334,7 @@ export const RUN_EVENT_TYPES = [
   "run_started", "target_candidates_found", "target_resolved", "target_started", "profile_found",
   "profile_revalidation_started", "profile_revalidation_finished", "discovery_started", "discovery_progress",
   "discovery_finished", "discovery_path_blocked", "locator_candidate_observed", "profile_live_mode",
+  "profile_incremental", "profile_harvested",
   "profile_draft_saved", "profile_verification_started", "profile_verification_round_started",
   "profile_verification_round_finished", "hypium_replay_started", "hypium_replay_finished", "profile_promoted",
   "original_task_started", "preflight_passed", "screen_captured", "elements_detected", "plan_created",

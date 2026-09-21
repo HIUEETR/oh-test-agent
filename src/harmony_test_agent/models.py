@@ -121,6 +121,8 @@ class EventType(StrEnum):
     DISCOVERY_PATH_BLOCKED = "discovery_path_blocked"
     LOCATOR_CANDIDATE_OBSERVED = "locator_candidate_observed"
     PROFILE_LIVE_MODE = "profile_live_mode"
+    PROFILE_INCREMENTAL = "profile_incremental"
+    PROFILE_HARVESTED = "profile_harvested"
     PROFILE_DRAFT_SAVED = "profile_draft_saved"
     PROFILE_VERIFICATION_STARTED = "profile_verification_started"
     PROFILE_VERIFICATION_ROUND_STARTED = "profile_verification_round_started"
@@ -144,6 +146,8 @@ class EventType(StrEnum):
     EXECUTION_FINISHED = "execution_finished"
     RUN_FAILED = "run_failed"
     RUN_FINISHED = "run_finished"
+    RESULT_ANALYSIS_FINISHED = "result_analysis_finished"
+    CASE_SAVED = "case_saved"
 
 
 class ToolName(StrEnum):
@@ -173,6 +177,65 @@ class LocatorKind(StrEnum):
     SPATIAL = "spatial"
     VLM_BBOX = "vlm_bbox"
     COORDINATE = "coordinate"
+
+
+class ScenarioKind(StrEnum):
+    """用例 IR 的场景分类；场景是用例的属性，不复活 RunMode 业务分支。"""
+
+    CORE_FLOW = "core_flow"
+    BUG_REPRODUCTION = "bug_reproduction"
+    EXPLORATORY = "exploratory"
+    STRESS = "stress"
+    SMOKE = "smoke"
+
+
+class StressKind(StrEnum):
+    """压力测试循环体的构造方式。"""
+
+    REPEAT_CLICK = "repeat_click"
+    CONTINUOUS_SWIPE = "continuous_swipe"
+    PAGE_ENTER_EXIT = "page_enter_exit"
+    SOAK = "soak"
+
+
+class AnomalyKind(StrEnum):
+    """执行结果分析可以报出的异常类别。"""
+
+    CPP_CRASH = "cppcrash"
+    JS_CRASH = "jscrash"
+    APP_FREEZE = "appfreeze"
+    ANR = "anr"
+    WHITE_SCREEN = "white_screen"
+    PAGE_UNRESPONSIVE = "page_unresponsive"
+    LAYOUT_ANOMALY = "layout_anomaly"
+    MEMORY_GROWTH = "memory_growth"
+
+
+class AnomalyFinding(BaseModel):
+    """单条异常发现；仅作附加信息，永不翻转用例的 passed。"""
+
+    kind: AnomalyKind
+    severity: Literal["info", "warning", "critical"]
+    summary_zh: str
+    detail: str = ""
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    source: Literal["hilog", "faultlog", "screenshot", "ui_dump", "stdout", "stress_stats"]
+
+
+class ExecutionAnalysis(BaseModel):
+    """一次执行（Live 运行 / 回放 / xdevice / 用例重跑）的结果分析。"""
+
+    schema_version: Literal[1] = 1
+    subject: Literal["live_run", "hypium_replay", "xdevice_run", "dc_script", "case_execution"]
+    subject_id: str
+    bundle_name: str = ""
+    device_id: str = ""
+    healthy: bool = True
+    findings: list[AnomalyFinding] = Field(default_factory=list)
+    symptom_reproduced: bool | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    log_coverage: Literal["full", "partial", "unavailable"] = "unavailable"
+    analyzed_at: datetime = Field(default_factory=utc_now)
 
 
 class BoundingBox(BaseModel):
@@ -245,6 +308,9 @@ class ScreenSnapshot(BaseModel):
     captured_at: datetime = Field(default_factory=utc_now)
     image_path: Path
     image_sha256: str
+    # 设备返回的原始 JPEG（计划 5.3）：模型上传直接用它，省掉 PNG 转码与 3-8× 传输量。
+    # PNG 落盘版本仍然保留，用于报告与证据。旧快照缺省为 None。
+    model_image_path: Path | None = None
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     page_title: str = ""
@@ -423,19 +489,23 @@ class TargetAppProfile(BaseModel):
             if locator.coordinate is not None and (locator.resolution_bound is None or not locator.warning):
                 raise ValueError("coordinate locators require a resolution bound and warning")
         if self.status == ProfileStatus.VERIFIED:
-            if self.provenance.verified_at is None:
-                raise ValueError("verified Profile requires provenance.verified_at")
-            replay_ids = self.provenance.hypium_replay_run_ids
-            # 2026-09-17 重构：主流程内联 1 次回放即可晋级，剩余 2 次由
-            # POST /api/profiles/{id}/replay 异步追加，因此门禁只要求「至少一次」。
-            if len(replay_ids) < 1 or len(set(replay_ids)) != len(replay_ids):
-                raise ValueError("verified Profile requires at least one unique Hypium replay run ID")
-            if not self.provenance.evidence.get("verification_passed"):
-                raise ValueError("verified Profile requires passed device verification evidence")
-            if len({item.page_signature for item in self.stable_locator_inventory}) < 3:
-                raise ValueError("verified Profile requires locators on three pages")
-            if len(self.assertion_inventory) < 2:
-                raise ValueError("verified Profile requires two application assertions")
+            # 门禁唯一实现见 profiles/admission.py（计划 4.1/R15）；文案保持历史字面量。
+            from .config import get_settings
+            from .profiles.admission import (
+                MODEL_GATES,
+                AdmissionEvidence,
+                AdmissionThresholds,
+                describe_admission_failure,
+                evaluate_admission,
+                pick_first_failure,
+            )
+
+            thresholds = AdmissionThresholds.from_settings(get_settings())
+            evidence = AdmissionEvidence.from_profile(self, thresholds, include=MODEL_GATES)
+            failures = evaluate_admission(evidence, thresholds=thresholds)
+            gate = pick_first_failure(failures, style="model")
+            if gate is not None:
+                raise ValueError(describe_admission_failure(gate, style="model", thresholds=thresholds))
         return self
 
 
@@ -468,6 +538,23 @@ class PlannedStep(BaseModel):
     direction: Literal["up", "down", "left", "right"] | None = None
     wait_seconds: float | None = None
     expected: str | None = None
+    # 精确滑动参数（计划 5.5，additive）：显式起止坐标优先于方向 + 锚点，格距 × 格数次之。
+    start: tuple[int, int] | None = None
+    end: tuple[int, int] | None = None
+    distance: int | None = Field(default=None, ge=0)
+    steps: int | None = Field(default=None, ge=0)
+
+
+class StepHistoryEntry(BaseModel):
+    """紧凑的跨步历史条目，供 Live 决策携带（计划 5.4，借鉴 DC 的连续上下文）。"""
+
+    index: int = Field(ge=0)
+    instruction: str = ""
+    tool: str = ""
+    target: str = ""
+    ok: bool = False
+    page_path: str = ""
+    note: str = ""
 
 
 class PlanResult(BaseModel):
@@ -488,6 +575,12 @@ class ToolDecision(BaseModel):
     coordinate: tuple[int, int] | None = None
     direction: Literal["up", "down", "left", "right"] | None = None
     wait_seconds: float | None = None
+    # 精确滑动（计划 5.5）：``start``/``end`` 为屏幕绝对像素坐标；
+    # ``steps`` 表示滚轮列上要移动的格数（配合 ``direction``），``distance`` 为像素行程下限。
+    start: tuple[int, int] | None = None
+    end: tuple[int, int] | None = None
+    distance: int | None = Field(default=None, ge=0)
+    steps: int | None = Field(default=None, ge=0)
     reasoning: str = ""
 
 
@@ -607,6 +700,10 @@ class GeneratedArtifact(BaseModel):
     counts: dict[str, int] = Field(default_factory=dict)
     incomplete_reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    # 用例 IR 产物（additive）：case_spec.json 与官方 xdevice 工程目录。
+    case_spec_path: Path | None = None
+    xdevice_project_path: Path | None = None
+    case_id: str | None = None
 
 
 class ReplayError(BaseModel):
@@ -631,6 +728,7 @@ class ReplayResult(BaseModel):
     evidence_paths: list[str] = Field(default_factory=list)
     generated_result_path: str | None = None
     generated_result: dict[str, Any] | None = None
+    analysis: ExecutionAnalysis | None = None
 
     @model_validator(mode="after")
     def populate_legacy_status(self) -> ReplayResult:
@@ -663,6 +761,7 @@ class RunTrace(BaseModel):
     target_app_id: str
     task: str
     mode: RunMode = RunMode.REGRESSION
+    scenario: ScenarioKind | None = None
     device_id: str
     state: RunState = RunState.CREATED
     started_at: datetime = Field(default_factory=utc_now)
@@ -697,6 +796,7 @@ class RunTrace(BaseModel):
     replay_completed: int = 0
     replay_passed: int = 0
     error: str | None = None
+    analysis: ExecutionAnalysis | None = None
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -765,6 +865,28 @@ class VisionObservation(BaseModel):
     elements: list[VisionElement] = Field(default_factory=list)
 
 
+class BugReproRequest(BaseModel):
+    """自然语言缺陷复现请求。
+
+    放在 ``models.py`` 而不是 ``cases/bug_repro.py``：``RunRequest.bug_report`` 需要它，
+    而 ``models.py`` 不得 import ``cases/``（会成环）。``cases/bug_repro.py`` 原样再导出。
+    """
+
+    target: TargetQuery | None = None
+    title: str = Field(min_length=1, max_length=200)
+    symptom: str = Field(min_length=1)
+    symptom_kind: Literal["crash", "freeze", "white_screen", "unresponsive", "layout", "functional", "other"] = (
+        "functional"
+    )
+    preconditions: list[str] = Field(default_factory=list)
+    repro_steps_nl: list[str] = Field(min_length=1)
+    expected: str = Field(min_length=1)
+    actual: str = Field(min_length=1)
+    device_id: str | None = None
+    auto_execute: bool = False
+    max_steps: int = Field(default=20, ge=1, le=50)
+
+
 class RunRequest(BaseModel):
     """Creates a run from a target query while retaining the legacy target_app_id entry point."""
 
@@ -772,6 +894,8 @@ class RunRequest(BaseModel):
     target_app_id: str | None = None
     task: str = "启动应用，探索可达页面，验证返回和重启恢复"
     mode: RunMode = RunMode.REGRESSION
+    scenario: ScenarioKind | None = None
+    bug_report: BugReproRequest | None = None
     device_id: str | None = None
     max_steps: int = Field(default=20, ge=1, le=100)
     auto_generate: bool = True

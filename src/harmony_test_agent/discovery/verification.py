@@ -23,6 +23,13 @@ from pydantic import BaseModel, Field
 
 from ..devices import DeviceAdapter, DeviceError
 from ..models import CommandResult, ScreenSnapshot
+from ..profiles.admission import (
+    AdmissionEvidence,
+    AdmissionThresholds,
+    describe_admission_failure,
+    evaluate_admission,
+    order_admission_failures,
+)
 from ..targets import ForegroundApp, ResolvedTarget
 from .explorer import BoundedExplorer, DiscoveryPage, DiscoveryResult, ExplorationAction
 from .stability import (
@@ -157,10 +164,10 @@ class ProfileVerifier:
             current.snapshots.append(snapshot)
 
             for page_index, page in enumerate(core_pages):
+                flow_failed = False
                 if page_index:
                     previous = core_pages[page_index - 1]
                     pending = page.path_actions[len(previous.path_actions) :]
-                    flow_failed = False
                     for step_index, step in enumerate(pending):
                         try:
                             action = self._replay_resolver.resolve_replay_action(step, snapshot)
@@ -186,18 +193,19 @@ class ProfileVerifier:
                         if foreground is None:
                             flow_failed = True
                             break
-                    if flow_failed:
-                        break
                 identity = BoundedExplorer._structural_identity(snapshot, foreground)
                 if (
                     page.structural_identity
                     and identity != page.structural_identity
                     and not (page_index == 0 and self._identity_subset(page, snapshot))
                 ):
-                    # 仅核心流第一页（应用启动态）允许结构子集放宽：冷启动首页常带多内容抖动；
-                    # 后续页保持全等，防止重放动作静默落在错误页面。
+                    # 身份不匹配不再在采集证据之前 break（计划 R4）：观测采集在下方进行，
+                    # 提前退出会把已经拿到的真实定位器整体丢弃。
+                    # 冷启动首页（page_index == 0）抖动最常见，登记失败后继续采集并按帧继续回放；
+                    # 更深页面先登记观测，再停止重放，避免动作静默落在错误页面。
                     current.failures.append(f"page identity mismatch: {page.page_id}")
-                    break
+                    if page_index > 0:
+                        flow_failed = True
                 signature = BoundedExplorer._snapshot_signature(snapshot, foreground)
                 current.visited_page_signatures.append(signature)
                 current.visited_page_identities.append(identity)
@@ -213,6 +221,9 @@ class ProfileVerifier:
                 current.assertion_observations.extend(assertion_observations)
                 all_locators.extend(locator_observations)
                 all_assertions.extend(assertion_observations)
+                if flow_failed:
+                    # 证据已入账；重放路径已偏离核心流，不再继续更深的页面动作。
+                    break
 
             back_result = self.device.back()
             stopped_again = self.device.stop_app(self.target.bundle_name) if back_result.ok else None
@@ -250,8 +261,15 @@ class ProfileVerifier:
             )
             if not current.recovery_passed:
                 current.failures.append("return and restart recovery failed")
-            if len(set(current.visited_page_signatures)) < 3:
-                current.failures.append("verification round did not replay 3 distinct pages")
+            # 三个「≥3 页」门禁统一到结构身份（计划 2.3/R8）：整树签名 `visited_page_signatures`
+            # 会被信息流内容抖动拆散，同一份证据在一个门禁上达标、在另一个上失败。
+            distinct_states = sorted(set(current.visited_page_identities))
+            if len(distinct_states) < 3:
+                current.failures.append(
+                    "verification round did not replay 3 distinct page states: "
+                    f"{len(distinct_states)} observed"
+                    + (f" ({', '.join(item[:12] for item in distinct_states[:3])})" if distinct_states else "")
+                )
             executed_kinds = {action.kind for action in core_pages[-1].path_actions}
             if len(executed_kinds) < self.min_interaction_kinds:
                 current.failures.append(
@@ -264,25 +282,40 @@ class ProfileVerifier:
             finish_round(current)
 
         result.stability = self.analyzer.analyze(all_locators, all_assertions)
-        if len(discovery.interaction_types) < self.min_interaction_kinds:
-            result.failures.append(f"fewer than {self.min_interaction_kinds} interaction types")
         # 跨轮重复页按逻辑页身份判定：整树签名会被信息流内容抖动拆散。
         repeated_pages = (
             set.intersection(*(set(item.visited_page_identities) for item in result.rounds))
             if len(result.rounds) == self.rounds
             else set()
         )
-        if len(repeated_pages) < 3:
-            result.failures.append("fewer than 3 pages repeated in every verification round")
-        if result.stability.promotable_locator_count < 3:
-            result.failures.append("fewer than 3 stable high/medium locators")
-        if result.stability.app_assertion_count < 2:
-            result.failures.append("fewer than 2 stable application-level assertions")
+        # 结果级门禁统一走 profiles/admission.py（计划 4.1/R15）：计数与文案都只此一处。
+        thresholds = self._admission_thresholds()
+        repeated_pages_count = len(repeated_pages)
+        evidence = AdmissionEvidence(
+            stable_locator_count=result.stability.promotable_locator_count,
+            distinct_page_state_count=repeated_pages_count,
+            app_assertion_count=result.stability.app_assertion_count,
+            interaction_kind_count=len(discovery.interaction_types),
+        )
+        for gate in order_admission_failures(evaluate_admission(evidence, thresholds=thresholds), style="verification"):
+            result.failures.append(
+                describe_admission_failure(
+                    gate,
+                    style="verification",
+                    thresholds=thresholds,
+                    observed_count=repeated_pages_count,
+                )
+            )
         if len(result.rounds) != self.rounds or not all(item.passed for item in result.rounds):
             result.failures.append("one or more device verification rounds failed")
         result.passed = not result.failures
         self._save(result)
         return result
+
+    def _admission_thresholds(self) -> AdmissionThresholds:
+        from ..config import get_settings
+
+        return AdmissionThresholds.from_settings(get_settings(), min_interaction_kinds=self.min_interaction_kinds)
 
     @staticmethod
     def _identity_subset(page: DiscoveryPage, snapshot: ScreenSnapshot) -> bool:
@@ -331,7 +364,9 @@ class ProfileVerifier:
             if page is None:
                 continue
             carried = page
-            if page.signature not in {item.signature for item in pages}:
+            # 去重键统一为结构身份：整树签名随内容抖动，会把同一逻辑页拆成多个"页面"。
+            page_key = page.structural_identity or page.signature
+            if page_key not in {item.structural_identity or item.signature for item in pages}:
                 pages.append(page)
         return pages[:4]
 

@@ -23,6 +23,9 @@ GENERATED_DIR = "generated"
 SCRIPT_SUFFIX = ".py"
 # Live 运行的生成元数据（比 config 多出动作计数与不合格原因）
 _METADATA_NAME = "generation_metadata.json"
+# 用例 IR 产物（2026-09 用例库）：存在时给目录项补上用例身份字段。
+_CASE_SPEC_NAME = "case_spec.json"
+_XDEVICE_DIR = "xdevice"
 
 
 class ScriptCatalogEntry(BaseModel):
@@ -34,6 +37,15 @@ class ScriptCatalogEntry(BaseModel):
     filename: str
     python_path: str
     case_id: str | None = None
+    """脚本级 ID（config 的 ``case_id``，即 ``safe_id``）；与用例 IR 的 ID 不同。"""
+    ir_case_id: str | None = None
+    """用例 IR 的 ``case_id``（``case_spec.json``）；无用例产物时为 ``None``。"""
+    scenario: str | None = None
+    """用例场景（``core_flow`` / ``bug_reproduction`` / ``stress`` / …）。"""
+    case_version: int | None = None
+    """用例 IR 的 ``schema_version``；缺 ``case_spec.json`` 时为 ``None``。"""
+    xdevice_project: str | None = None
+    """官方 devicetest 工程目录（存在时为绝对路径）。"""
     bundle_name: str | None = None
     main_ability: str | None = None
     purpose: str | None = None
@@ -88,6 +100,8 @@ class ScriptCatalog:
             return None
         config = self._read_json(script.with_suffix(".json"))
         metadata = self._read_json(directory / _METADATA_NAME)
+        case_spec = self._read_json(directory / _CASE_SPEC_NAME)
+        xdevice_dir = directory / _XDEVICE_DIR
         run_id = directory.parent.name
         return ScriptCatalogEntry(
             script_id=script_id,
@@ -96,6 +110,10 @@ class ScriptCatalog:
             filename=script.name,
             python_path=str(script.resolve()),
             case_id=_str_or_none(config.get("case_id")),
+            ir_case_id=_str_or_none(case_spec.get("case_id")),
+            scenario=_str_or_none(case_spec.get("scenario")),
+            case_version=_int_or_none(case_spec.get("schema_version")),
+            xdevice_project=str(xdevice_dir.resolve()) if xdevice_dir.is_dir() else None,
             bundle_name=_str_or_none(config.get("bundle_name")),
             main_ability=_str_or_none(config.get("main_ability")),
             purpose=_str_or_none(config.get("purpose")) or _str_or_none(metadata.get("purpose")),

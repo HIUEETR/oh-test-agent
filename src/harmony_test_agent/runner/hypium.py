@@ -3,45 +3,70 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..models import CommandResult, GeneratedArtifact, ReplayError, ReplayResult
+from ..models import CommandResult, ExecutionAnalysis, GeneratedArtifact, ReplayError, ReplayResult
+
+logger = logging.getLogger(__name__)
 
 
 class HypiumRunner:
     """管理回放资格、超时、生成结果解析和 Run 内相对证据路径。"""
 
-    def __init__(self, runtime_home: Path, timeout: float = 300):
+    def __init__(
+        self,
+        runtime_home: Path,
+        timeout: float = 300,
+        analysis_hook: Callable[[ReplayResult, Path], ExecutionAnalysis | None] | None = None,
+    ):
         self.runtime_home = runtime_home.resolve()
         self.runtime_home.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout
+        self.analysis_hook = analysis_hook
 
-    def environment(self, report_dir: Path | None = None) -> dict[str, str]:
-        """构造回放子进程环境，并把 HOME 与报告目录限制到运行产物区域。"""
+    def environment(self, report_dir: Path | None = None, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        """构造回放子进程环境，并把 HOME 与报告目录限制到运行产物区域。
+
+        ``extra_env`` 在受控变量之后合并，用于追加或覆盖调用方需要的变量；
+        证据落盘仍只保留受控白名单变量。
+        """
         env = os.environ.copy()
         env["HOME"] = str(self.runtime_home)
         env["USERPROFILE"] = str(self.runtime_home)
         env["PYTHONIOENCODING"] = "utf-8"
         if report_dir is not None:
             env["HARMONY_AGENT_REPORT_DIR"] = str(report_dir.resolve())
+        if extra_env:
+            env.update({str(key): str(value) for key, value in extra_env.items()})
         return env
 
     def execute(self, generated: GeneratedArtifact, attempt: int = 1) -> ReplayResult:
         """执行一次回放，并结构化保留资格、进程和 generated_result 错误。"""
         return self._execute(generated, attempt, enforce_eligibility=True)
 
-    def execute_diagnostic(self, python_path: Path, attempt: int = 1) -> ReplayResult:
+    def execute_diagnostic(
+        self,
+        python_path: Path,
+        attempt: int = 1,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> ReplayResult:
         """诊断执行一个脚本，跳过 ``replay_eligible`` 门禁。
 
-        用于直流模式录制的脚本（``purpose=dc_recording`` / ``replay_eligible=False``）：
-        证据仍按 ``<产物目录>/hypium/attempt-XX/`` 落盘，但**不**写入任何 Run 的
-        trace/report，因此不会影响验收结论。
+        用于直流模式录制的脚本（``purpose=dc_recording`` / ``replay_eligible=False``）
+        与用例库重跑：证据仍按 ``<产物目录>/hypium/attempt-XX/`` 落盘，但**不**写入任何
+        Run 的 trace/report，因此不会影响验收结论。
+
+        ``extra_env`` 透传 ``HARMONY_AGENT_DEVICE_SN`` / ``HARMONY_AGENT_CASE_PARAMS``，
+        使用例库的执行真正带上设备选择与数据驱动参数。
         """
         script = Path(python_path).resolve()
         if not script.is_file():
@@ -53,9 +78,16 @@ class HypiumRunner:
             purpose="diagnostic",
             replay_eligible=False,
         )
-        return self._execute(generated, attempt, enforce_eligibility=False)
+        return self._execute(generated, attempt, enforce_eligibility=False, extra_env=extra_env)
 
-    def _execute(self, generated: GeneratedArtifact, attempt: int, *, enforce_eligibility: bool) -> ReplayResult:
+    def _execute(
+        self,
+        generated: GeneratedArtifact,
+        attempt: int,
+        *,
+        enforce_eligibility: bool,
+        extra_env: dict[str, str] | None = None,
+    ) -> ReplayResult:
         """执行一次回放；``enforce_eligibility`` 决定是否拦截不合格产物。"""
         run_dir = generated.python_path.parent.parent.resolve()
         hypium_dir = (run_dir / "hypium").resolve()
@@ -74,7 +106,7 @@ class HypiumRunner:
                 message="generated artifact is not eligible for replay",
                 details={"purpose": generated.purpose, "incomplete_reasons": generated.incomplete_reasons},
             )
-            self._write_evidence(attempt_dir, command, self.environment(attempt_dir))
+            self._write_evidence(attempt_dir, command, self.environment(attempt_dir, extra_env=extra_env))
             return self._result(
                 attempt=attempt,
                 command=command,
@@ -84,7 +116,7 @@ class HypiumRunner:
                 error=error,
             )
 
-        environment = self.environment(attempt_dir)
+        environment = self.environment(attempt_dir, extra_env=extra_env)
         started = time.monotonic()
         try:
             process = subprocess.run(
@@ -141,16 +173,41 @@ class HypiumRunner:
             status = "passed"
             error = None
 
-        return self._result(
-            attempt=attempt,
-            command=command,
-            run_dir=run_dir,
-            attempt_dir=attempt_dir,
-            status=status,
-            error=error,
-            generated_result=generated_result,
-            generated_result_path=result_path if result_path.exists() else None,
+        return self._attach_analysis(
+            self._result(
+                attempt=attempt,
+                command=command,
+                run_dir=run_dir,
+                attempt_dir=attempt_dir,
+                status=status,
+                error=error,
+                generated_result=generated_result,
+                generated_result_path=result_path if result_path.exists() else None,
+            ),
+            attempt_dir,
         )
+
+    def _attach_analysis(self, result: ReplayResult, attempt_dir: Path) -> ReplayResult:
+        """调用可选分析挂钩并挂载结果；挂钩异常只记日志，绝不改变回放结论。
+
+        ``analysis_hook`` 为 ``None`` 时原样返回 ``result``，即今天的行为。
+        """
+        hook = self.analysis_hook
+        if hook is None:
+            return result
+        try:
+            analysis = hook(result, attempt_dir)
+        except Exception as exc:  # 分析是 advisory：任何失败都不得影响回放结果
+            logger.warning(
+                "analysis hook failed for attempt %s: %s: %s",
+                result.attempt,
+                type(exc).__name__,
+                exc,
+            )
+            return result
+        if analysis is None:
+            return result
+        return result.model_copy(update={"analysis": analysis})
 
     def execute_repeated(self, generated: GeneratedArtifact, attempts: int = 3) -> list[ReplayResult]:
         """按独立尝试目录重复执行回放，并按执行顺序返回全部结果。"""
