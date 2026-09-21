@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import os
 import sys
 import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from ..config import Settings
 from ..devices import DeviceAdapter, DeviceError, HarmonyDeviceAdapter
@@ -28,6 +31,7 @@ from ..models import (
     LocatorCandidate,
     LocatorKind,
     PlannedStep,
+    PlanResult,
     ProfileProvenance,
     ProfileStatus,
     ResolvedTarget,
@@ -35,6 +39,7 @@ from ..models import (
     RunRequest,
     RunState,
     RunTrace,
+    ScenarioKind,
     ScreenSnapshot,
     StableLocator,
     TargetAppProfile,
@@ -51,6 +56,8 @@ from ..runtime import LaunchSpec, RunEventEmitter, SafetyError, SafetyPolicy, To
 from ..storage import ArtifactStore, RunRepository
 from ..targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
 from .providers import AgentProvider, PlanningContext, create_provider
+
+logger = logging.getLogger(__name__)
 
 DeviceFactory = Callable[[str], DeviceAdapter]
 
@@ -69,6 +76,8 @@ class AgentOrchestrator:
         event_callback: Callable[[RunEvent], None] | None = None,
         settle_seconds: float = 0.8,
         launch_settle_seconds: float = 3.0,
+        case_library: Any | None = None,
+        analyzer: Any | None = None,
     ):
         self.settings = settings
         self.provider = provider or create_provider(settings)
@@ -78,12 +87,37 @@ class AgentOrchestrator:
         self.event_callback = event_callback
         self.settle_seconds = settle_seconds
         self.launch_settle_seconds = launch_settle_seconds
+        # 用例库与执行分析均为可选注入：不注入时行为与今天完全一致，
+        # 单测因此不会把产物写进仓库 artifacts/。
+        self.case_library = case_library
+        self.analyzer = analyzer
         self._stop_requested: set[str] = set()
         self._target_selections: dict[str, str] = {}
         self._target_selection_events: dict[str, asyncio.Event] = {}
 
     def _default_device_factory(self, device_id: str) -> DeviceAdapter:
         return HarmonyDeviceAdapter(device_id, self.settings.hdc_path, self.settings.agent_action_timeout)
+
+    async def _plan_for_request(
+        self,
+        request: RunRequest,
+        context: PlanningContext,
+        step_limit: int,
+    ) -> PlanResult:
+        """选择规划路径：缺陷复现走专用 planner，其余走既有 planner。
+
+        ``BUG_REPRODUCTION`` 是唯一改变 Live 执行路径的场景（计划 C1）：
+        ``EXPLORATORY`` / ``SMOKE`` / ``CORE_FLOW`` 只作为标签透传给用例 IR。
+        """
+        if request.scenario == ScenarioKind.BUG_REPRODUCTION and request.bug_report is not None:
+            planner = getattr(self.provider, "plan_bug_repro", None)
+            if planner is not None:
+                result = planner(request.bug_report, context, step_limit)
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is not None:
+                    return _plan_from_bug_repro(result, request)
+        return await self.provider.plan(request.task, context, step_limit)
 
     def request_stop(self, run_id: str) -> None:
         """记录停止请求；编排循环会在下一个安全检查点结束指定任务。"""
@@ -120,6 +154,7 @@ class AgentOrchestrator:
             exploration_policy=request.exploration_policy,
             task=request.task,
             mode=request.mode,
+            scenario=request.scenario or _scenario_for(request),
             device_id=device_id,
             model_used=self.provider.name,
             model_mock=self.provider.mock,
@@ -186,7 +221,7 @@ class AgentOrchestrator:
                     PlanningContext.from_profile(profile) if profile else PlanningContext.from_resolved(resolved)
                 )
                 plan = await asyncio.wait_for(
-                    self.provider.plan(request.task, planning_context, step_limit),
+                    self._plan_for_request(request, planning_context, step_limit),
                     timeout=self.settings.agent_model_timeout,
                 )
             except Exception as exc:
@@ -308,6 +343,8 @@ class AgentOrchestrator:
                     {"replays": [item.model_dump(mode="json") for item in trace.replays]},
                 )
 
+            self._attach_analysis(trace, emitter)
+            self._save_case_from_trace(trace, emitter)
             trace.state = RunState.COMPLETED
             trace.agent_outcome = "completed"
             trace.agent_error = None
@@ -1420,3 +1457,110 @@ class AgentOrchestrator:
         trace.ended_at = utc_now()
         event_type = EventType.ASSERTION_FAILED if state == RunState.FAILED_ASSERTION else EventType.RUN_FAILED
         emitter.emit(event_type, message, {"state": state})
+
+    # ------------------------------------------------------------------
+    # 用例沉淀与执行结果分析（均为可选注入，失败绝不影响运行结论）
+    # ------------------------------------------------------------------
+
+    def _save_case_from_trace(self, trace: RunTrace, emitter: Any) -> None:
+        """把合格的运行自动沉淀为可复用用例；未注入用例库时什么都不做。"""
+        if self.case_library is None:
+            return
+        try:
+            record = self.case_library.build_from_run(trace)
+        except Exception as exc:  # noqa: BLE001 - 用例沉淀失败不得影响运行结果
+            logger.warning("case library save failed for %s: %s", trace.run_id, exc)
+            return
+        if record is None:
+            return
+        emitter.emit(
+            EventType.CASE_SAVED,
+            f"运行已沉淀为用例 {record.case_id}",
+            {"case_id": record.case_id, "version": record.version, "scenario": str(record.scenario)},
+        )
+
+    def _attach_analysis(self, trace: RunTrace, emitter: Any) -> None:
+        """对本次运行做执行结果分析；分析永不翻转 passed，异常一律降级。"""
+        if self.analyzer is None:
+            return
+        try:
+            analysis = self.analyzer.analyze_run(trace, self.artifacts.run_dir(trace.run_id))
+        except Exception as exc:  # noqa: BLE001 - 分析是附加信息，失败只记日志
+            logger.warning("execution analysis failed for %s: %s", trace.run_id, exc)
+            return
+        trace.analysis = analysis
+        emitter.emit(
+            EventType.RESULT_ANALYSIS_FINISHED,
+            "执行结果分析完成" if analysis.healthy else f"执行结果分析发现 {len(analysis.findings)} 项异常",
+            analysis.model_dump(mode="json"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 场景标签与缺陷复现规划（模块级：纯函数，便于单测）
+# ---------------------------------------------------------------------------
+
+
+def _scenario_for(request: RunRequest) -> ScenarioKind:
+    """没有显式 ``scenario`` 时按运行形态推导场景标签（不复活 RunMode 业务分支）。"""
+    if request.bug_report is not None:
+        return ScenarioKind.BUG_REPRODUCTION
+    if request.bootstrap_only:
+        return ScenarioKind.SMOKE
+    return ScenarioKind.CORE_FLOW
+
+
+def _plan_from_bug_repro(plan: Any, request: RunRequest) -> PlanResult:
+    """把 ``BugReproPlan`` 转成现有执行器可跑的 ``PlanResult``。
+
+    检查点草案里能在运行时校验的部分转成追加的 ``ASSERT_*`` 步骤；纯 IR 语义
+    （toast / current_app / page_signature / screenshot）留作用例生成时的检查点。
+    """
+    steps: list[PlannedStep] = list(plan.steps)
+    drafts = list(plan.checkpoints)
+    if plan.symptom_checkpoint is not None:
+        drafts.append(plan.symptom_checkpoint)
+    for index, draft in enumerate(drafts, start=1):
+        step = _assert_step_from_draft(draft, f"repro-assert-{index:02d}")
+        if step is not None:
+            steps.append(step)
+    goal = plan.title_zh
+    if not goal and request.bug_report is not None:
+        goal = request.bug_report.title
+    return PlanResult(
+        goal=goal or request.task,
+        steps=steps,
+        model_used=getattr(plan, "model_used", "mock"),
+        mock=bool(getattr(plan, "mock", True)),
+    )
+
+
+def _assert_step_from_draft(draft: Any, step_id: str) -> PlannedStep | None:
+    """把检查点草案映射为可在真实运行时求值的断言步骤；不可表达时返回 ``None``。"""
+    kind = str(getattr(draft, "kind", ""))
+    target = str(getattr(draft, "target", "") or "")
+    expected = getattr(draft, "expected", None)
+    if kind == "element_exists" and target:
+        return PlannedStep(
+            step_id=step_id,
+            instruction=f"断言「{target}」可见",
+            tool=ToolName.ASSERT_VISIBLE,
+            target=target,
+        )
+    if kind == "element_absent" and target:
+        return PlannedStep(
+            step_id=step_id,
+            instruction=f"断言「{target}」不可见",
+            tool=ToolName.ASSERT_NOT_VISIBLE,
+            target=target,
+        )
+    if kind in {"text_equals", "text_contains"}:
+        text = str(expected or target)
+        if text:
+            return PlannedStep(
+                step_id=step_id,
+                instruction=f"断言文本「{text}」",
+                tool=ToolName.ASSERT_TEXT,
+                target=text,
+            )
+    return None

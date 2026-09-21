@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from ..cases.bug_repro import BUG_REPRO_PROMPT, BugReproPlan, BugReproRequest, mock_bug_repro_plan
 from ..config import Settings
 from ..discovery.advisor import ADVISOR_PROMPT, AdvisorTurnResult, AdvisorVerdict
 from ..models import (
@@ -178,6 +179,20 @@ def align_plan_with_task(task: str, steps: list[PlannedStep], max_steps: int) ->
     return [*body[: max(0, max_steps - 1)], finish]
 
 
+def render_bug_repro_task(request: BugReproRequest) -> str:
+    """把缺陷报告渲染成一段任务描述，供 :func:`align_plan_with_task` 判定「用户真正要什么」。"""
+    lines = [
+        f"缺陷标题：{request.title}",
+        f"症状（{request.symptom_kind}）：{request.symptom}",
+        f"期望行为：{request.expected}",
+        f"实际行为：{request.actual}",
+    ]
+    if request.preconditions:
+        lines.append("前置条件：" + "；".join(request.preconditions))
+    lines.append("复现步骤：" + "；".join(request.repro_steps_nl))
+    return "\n".join(lines)
+
+
 class AgentProvider(ABC):
     """规划、视觉分析与动作决策所遵循的异步提供方协议。"""
 
@@ -211,6 +226,15 @@ class AgentProvider(ABC):
         payload: str,
     ) -> AdvisorTurnResult | None:
         """探索顾问单轮对话：把当前页追加进连续会话并返回结构化建议；默认不支持。"""
+        return None
+
+    async def plan_bug_repro(
+        self,
+        request: BugReproRequest,
+        context: PlanningContext,
+        max_steps: int,
+    ) -> BugReproPlan | None:
+        """把自然语言缺陷报告规划为可执行的复现计划；默认不支持（照 ``advise_turn`` 的模式）。"""
         return None
 
     async def chat(self, request: Any) -> Any | None:
@@ -316,6 +340,21 @@ class MockAgentProvider(AgentProvider):
             output_text="Mock DC response: task acknowledged (no real model configured).",
             history=list(getattr(request, "history", []) or []),
             tool_call_count=0,
+        )
+
+    async def plan_bug_repro(
+        self,
+        request: BugReproRequest,
+        context: PlanningContext,
+        max_steps: int,
+    ) -> BugReproPlan:
+        """确定性、完全离线的缺陷复现计划：关键词翻译 + 期望行为断言 + 症状哨兵。"""
+        return mock_bug_repro_plan(
+            request,
+            bundle_name=context.bundle_name,
+            stable_locator_names=context.stable_locator_names,
+            max_steps=max_steps,
+            model_used=self.name,
         )
 
 
@@ -461,6 +500,50 @@ class OpenAICompatibleProvider(AgentProvider):
         plan.model_used = self.name
         plan.mock = False
         plan.steps = align_plan_with_task(task, plan.steps, max_steps)
+        return plan
+
+    async def plan_bug_repro(
+        self,
+        request: BugReproRequest,
+        context: PlanningContext,
+        max_steps: int,
+    ) -> BugReproPlan | None:
+        """用结构化输出规划缺陷复现；模型不可用时返回 ``None``（照 ``advise_turn`` 的降级模式）。
+
+        与 :meth:`plan` 同构：``PLANNING_PROMPT + "\\n" + BUG_REPRO_PROMPT`` 作 system prompt，
+        user prompt 嵌入 Planning context 与序列化后的缺陷报告；结构化输出**必须**走
+        :meth:`_structured_output`（``PromptedOutput``），thinking 模型拒绝 tool-mode。
+        产出再过 :func:`align_plan_with_task`：去掉臆造的搜索提交步骤并以 finish 收尾。
+        """
+        from pydantic_ai import Agent
+
+        if not self.settings.model_configured:
+            return None
+        try:
+            model = self._model()
+        except Exception:  # noqa: BLE001 - 模型不可用时降级为 None（端点据此返回 503）
+            return None
+        agent = Agent(
+            model,
+            output_type=self._structured_output(
+                BugReproPlan,
+                "The defect reproduction plan as a JSON object with title_zh, steps, checkpoints, "
+                "symptom_checkpoint, notes, model_used and mock.",
+            ),
+            system_prompt=PLANNING_PROMPT + "\n" + BUG_REPRO_PROMPT,
+            retries=2,
+        )
+        prompt = (
+            f"Planning context: {context.model_dump_json()}\n"
+            f"Maximum steps: {max_steps}\n"
+            f"Defect report: {request.model_dump_json()}\n"
+            "Set model_used to the configured model name and mock to false."
+        )
+        result = await agent.run(prompt, model_settings=self._model_settings())
+        plan = result.output
+        plan.model_used = self.name
+        plan.mock = False
+        plan.steps = align_plan_with_task(render_bug_repro_task(request), plan.steps, max_steps)
         return plan
 
     async def analyze(self, snapshot: ScreenSnapshot) -> VisionObservation | None:

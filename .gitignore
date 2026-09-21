@@ -54,3 +54,7 @@ screenshots/
 *.swp
 Thumbs.db
 .DS_Store
+
+# pytest 临时目录：Windows 下必须用 --basetemp 绕开系统 temp 权限问题；
+# 这些目录里会带上被复制进来的生成脚本，既不能进版本库也不能参与 lint。
+.pytest-*/

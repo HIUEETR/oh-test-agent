@@ -1,34 +1,30 @@
-"""把已执行的任务轨迹转换为可审计的 Hypium Driver 回放产物。"""
+"""把已执行的任务轨迹转换为可审计的 Hypium Driver 回放产物。
+
+2026-09 用例 IR 重构：本模块不再自己拼脚本行，而是
+
+``RunTrace`` ──► ``CaseBuilder.from_trace`` ──► ``TestCaseSpec`` ──► ``StandaloneEmitter``
+
+产物路径、``generated/test_*.json`` 的 schema、``generation_metadata.json`` 的 key 与
+``generated_result.json`` 的契约**全部保持原样**（``runner/hypium.py`` 与 Profile
+晋级门禁依赖它们），新增内容只有 ``generated/case_spec.json`` 与若干追加字段。
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from ..models import ActionResult, GeneratedArtifact, LocatorKind, RunState, RunTrace, TargetAppProfile, ToolName
+from ..cases.builder import CaseBuilder, CaseBuildResult
+from ..cases.spec import LocatorSpec
+from ..models import GeneratedArtifact, LocatorCandidate, RunTrace, TargetAppProfile
 from ..storage import ArtifactStore
+from .selectors import render_selector
 
-# Hypium Driver 的 swipe 只接受大写方向枚举（RIGHT/LEFT/UP/DOWN），小写会在设备端抛参数错误。
-_SWIPE_DIRECTIONS = frozenset({"UP", "DOWN", "LEFT", "RIGHT"})
-
-
-@dataclass
-class GenerationCoverage:
-    """累积生成动作、断言和被省略动作的数量与原因。"""
-
-    lines: list[str] = field(default_factory=list)
-    omitted_actions: list[dict[str, str]] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    generated_actions: int = 0
-    generated_assertions: int = 0
-    explicit_assertions: int = 0
-    coordinate_fallbacks: int = 0
-
-    def omit(self, action: ActionResult, reason: str) -> None:
-        self.omitted_actions.append({"step_id": action.step_id, "tool": str(action.tool), "reason": reason})
+#: 生成 ``generated/case_spec.json`` 时使用的 IR schema 版本。
+CASE_SPEC_FILENAME = "case_spec.json"
 
 
 class HypiumGenerator:
@@ -40,6 +36,14 @@ class HypiumGenerator:
         # settings.profile_verification_rounds 注入（默认 1 轮），此处默认 3 保持向后兼容。
         self.min_observed_rounds = max(int(min_observed_rounds), 1)
 
+    # ------------------------------------------------------------------
+    # IR 构建（供 Live 生成、用例库与 API 复用）
+    # ------------------------------------------------------------------
+
+    def build(self, trace: RunTrace, profile: TargetAppProfile) -> CaseBuildResult:
+        """把轨迹构建为用例 IR（不做任何落盘）。"""
+        return CaseBuilder(min_observed_rounds=self.min_observed_rounds).from_trace(trace, profile)
+
     def generate(self, trace: RunTrace, profile: TargetAppProfile | None = None) -> GeneratedArtifact:
         """从冻结 Profile 生成脚本；旧 Trace 只允许显式提供一次兼容快照。"""
         frozen = trace.profile_snapshot
@@ -50,26 +54,29 @@ class HypiumGenerator:
             raise ValueError("RunTrace does not contain a frozen profile_snapshot")
         profile = frozen
         output_dir = self.artifacts.run_dir(trace.run_id) / "generated"
-        safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", trace.run_id)
+        safe_id = _safe_id(trace.run_id)
         python_path = output_dir / f"test_{safe_id}.py"
         config_path = output_dir / f"test_{safe_id}.json"
         metadata_path = output_dir / "generation_metadata.json"
-        coverage = self._render_actions(trace, profile)
-        outcome = self._agent_outcome(trace)
-        incomplete_reasons = self._incomplete_reasons(trace, outcome, coverage)
-        replay_eligible = not incomplete_reasons
-        purpose = "acceptance" if replay_eligible else "diagnostic"
-        counts = {
-            "source_actions": len(trace.actions),
-            "source_assertions": len(trace.assertions),
-            "generated_actions": coverage.generated_actions,
-            "generated_assertions": coverage.generated_assertions,
-            "omitted_actions": len(coverage.omitted_actions),
-            "failed_actions": sum(not action.success for action in trace.actions),
-            "coordinate_fallbacks": coverage.coordinate_fallbacks,
-        }
-        python_path.write_text(self._render_script(trace, profile, coverage.lines), encoding="utf-8")
-        config = {
+        case_spec_path = output_dir / CASE_SPEC_FILENAME
+
+        built = self.build(trace, profile)
+        # 延迟 import：Phase 2 的官方 xdevice 产物与 IR 产物同源，但保持本模块可独立加载。
+        from .standalone import StandaloneEmitter
+
+        rendered = StandaloneEmitter().render(built.spec, run_id=trace.run_id, device_id=trace.device_id)
+        outcome = built.source_agent_outcome
+        purpose = built.purpose
+        counts = built.counts
+        incomplete_reasons = built.incomplete_reasons
+        replay_eligible = built.replay_eligible
+        warnings = built.warnings
+        omitted_actions = built.omitted_actions
+        explicit_assertions = built.explicit_assertions
+
+        python_path.write_text(rendered.python_text, encoding="utf-8")
+        config: dict[str, Any] = {
+            # 历史 schema：键与取值必须逐字保持不变（storage/script_catalog.py 读取 case_id）。
             "schema_version": 2,
             "runner_mode": "driver",
             "case_id": safe_id,
@@ -83,11 +90,15 @@ class HypiumGenerator:
             "generated_from_run_id": trace.run_id,
             "purpose": purpose,
             "replay_eligible": replay_eligible,
-            "warnings": coverage.warnings,
-            "application_assertion_count": coverage.explicit_assertions,
+            "warnings": warnings,
+            "application_assertion_count": explicit_assertions,
             "validated_resolutions": profile.device_compatibility.validated_resolutions,
         }
+        # 追加：用例 IR 侧字段（ir_case_id 避免覆盖历史的脚本 case_id）。
+        config.update(rendered.config)
+        config["ir_case_id"] = built.spec.case_id
         config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
         metadata = {
             "schema_version": 2,
             "run_id": trace.run_id,
@@ -97,16 +108,23 @@ class HypiumGenerator:
             "replay_eligible": replay_eligible,
             "source_agent_outcome": outcome,
             "source_action_count": len(trace.actions),
-            "included_action_count": coverage.generated_actions + coverage.generated_assertions,
-            "omitted_action_count": len(coverage.omitted_actions),
+            "included_action_count": counts["generated_actions"] + counts["generated_assertions"],
+            "omitted_action_count": len(omitted_actions),
             "counts": counts,
-            "omitted_actions": coverage.omitted_actions,
+            "omitted_actions": omitted_actions,
             "incomplete_reasons": incomplete_reasons,
-            "warnings": coverage.warnings,
-            "application_assertion_count": coverage.explicit_assertions,
+            "warnings": warnings,
+            "application_assertion_count": explicit_assertions,
             "coordinate_constraints": profile.device_compatibility.model_dump(mode="json"),
+            "case_id": built.spec.case_id,
+            "case_spec_path": CASE_SPEC_FILENAME,
+            "scenario": str(built.spec.scenario),
+            "hard_checkpoint_count": config["hard_checkpoint_count"],
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        case_spec_path.write_text(
+            json.dumps(built.spec.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         return GeneratedArtifact(
             python_path=python_path.resolve(),
             config_path=config_path.resolve(),
@@ -115,294 +133,54 @@ class HypiumGenerator:
             replay_eligible=replay_eligible,
             source_agent_outcome=outcome,
             source_action_count=len(trace.actions),
-            included_action_count=coverage.generated_actions + coverage.generated_assertions,
-            omitted_action_count=len(coverage.omitted_actions),
+            included_action_count=counts["generated_actions"] + counts["generated_assertions"],
+            omitted_action_count=len(omitted_actions),
             counts=counts,
             incomplete_reasons=incomplete_reasons,
-            warnings=coverage.warnings,
+            warnings=warnings,
+            case_spec_path=case_spec_path.resolve(),
+            case_id=built.spec.case_id,
         )
 
-    def _render_actions(self, trace: RunTrace, profile: TargetAppProfile) -> GenerationCoverage:
-        coverage = GenerationCoverage()
-        for action in trace.actions:
-            if not action.success:
-                coverage.omit(action, action.error or "source action failed")
-                continue
-            tool = action.tool
-            if tool == ToolName.OPEN_APP:
-                coverage.omit(action, "OPEN_APP is replaced by deterministic stop/start/wait setup")
-            elif tool in {ToolName.INSPECT_SCREEN, ToolName.FINISH}:
-                coverage.omit(action, f"{tool} is an agent-control action")
-            elif tool == ToolName.CLICK_ELEMENT and self._is_nondeterministic_system_click(trace, action):
-                coverage.omit(action, "desktop AppIcon launch click is replaced by deterministic app setup")
-            elif tool == ToolName.CLICK_ELEMENT:
-                coordinate = self._runtime_element_coordinate(trace, action)
-                if action.locator and action.locator.kind in {LocatorKind.SPATIAL, LocatorKind.VLM_BBOX} and coordinate:
-                    target = action.params.get("target")
-                    coverage.lines.append(f"        driver.touch({coordinate!r})  # coordinate fallback for {target!r}")
-                    coverage.warnings.append(
-                        f"{action.step_id}: runtime element {target!r} uses coordinate {coordinate}"
-                    )
-                    coverage.coordinate_fallbacks += 1
-                else:
-                    selector = self._selector(
-                        action.locator,
-                        action.params.get("target"),
-                        coverage.warnings,
-                        profile,
-                        self.min_observed_rounds,
-                    )
-                    coverage.lines.append(f"        driver.touch({selector})")
-                coverage.generated_actions += 1
-            elif tool == ToolName.CLICK_COORDINATE:
-                coordinate = action.params.get("coordinate")
-                point = tuple(coordinate) if coordinate else (0, 0)
-                coverage.lines.append(f"        driver.touch({point})  # coordinate fallback")
-                coverage.warnings.append(f"{action.step_id}: click uses a coordinate fallback")
-                coverage.coordinate_fallbacks += 1
-                coverage.generated_actions += 1
-            elif tool == ToolName.INPUT_TEXT:
-                selector = self._selector(
-                    action.locator,
-                    action.params.get("target") or "输入框",
-                    coverage.warnings,
-                    profile,
-                    self.min_observed_rounds,
-                )
-                coverage.lines.append(f"        driver.input_text({selector}, {action.params.get('text', '')!r})")
-                coverage.generated_actions += 1
-            elif tool == ToolName.SWIPE:
-                direction = str(action.params.get("direction") or "up").upper()
-                if direction not in _SWIPE_DIRECTIONS:
-                    coverage.warnings.append(
-                        f"{action.step_id}: unknown swipe direction {action.params.get('direction')!r}, fallback to UP"
-                    )
-                    direction = "UP"
-                coverage.lines.append(f"        driver.swipe({direction!r})")
-                coverage.generated_actions += 1
-            elif tool == ToolName.BACK:
-                coverage.lines.append("        driver.go_back()")
-                coverage.generated_actions += 1
-            elif tool == ToolName.WAIT:
-                coverage.lines.append(f"        driver.wait({float(action.params.get('wait_seconds') or 1)!r})")
-                coverage.generated_actions += 1
-            elif tool in {ToolName.ASSERT_VISIBLE, ToolName.ASSERT_TEXT}:
-                target = action.params.get("target") or action.params.get("text")
-                coverage.lines.append(
-                    "        driver.check_component_exist("
-                    f"{self._selector(action.locator, target, coverage.warnings, profile, self.min_observed_rounds)},"
-                    " expect_exist=True)"
-                )
-                coverage.generated_assertions += 1
-                coverage.explicit_assertions += 1
-            elif tool == ToolName.ASSERT_NOT_VISIBLE:
-                selector = self._selector(
-                    action.locator,
-                    action.params.get("target"),
-                    coverage.warnings,
-                    profile,
-                    self.min_observed_rounds,
-                )
-                coverage.lines.append(f"        driver.check_component_exist({selector}, expect_exist=False)")
-                coverage.generated_assertions += 1
-                coverage.explicit_assertions += 1
-            else:
-                coverage.omit(action, f"unsupported replay tool: {tool}")
-        if coverage.explicit_assertions == 0:
-            coverage.warnings.append("source trace has no successful explicit assertion")
-            stable = self._first_stable_locator(trace)
-            if stable:
-                coverage.lines.append(f"        driver.check_component_exist({stable}, expect_exist=True)")
-                coverage.warnings.append("generated a fallback assertion from an observed stable locator")
-                coverage.generated_assertions += 1
-            else:
-                coverage.warnings.append("no stable UI assertion was available")
-        return coverage
-
-    @staticmethod
-    def _agent_outcome(trace: RunTrace) -> str:
-        if trace.agent_outcome != "unknown":
-            return trace.agent_outcome
-        if trace.state == RunState.COMPLETED:
-            return "completed"
-        if trace.state == RunState.STOPPED_BY_USER:
-            return "stopped"
-        if trace.error or any(not action.success for action in trace.actions):
-            return "failed"
-        if trace.actions and trace.actions[-1].tool == ToolName.FINISH and trace.actions[-1].success:
-            return "completed"
-        return "unknown"
-
-    @staticmethod
-    def _incomplete_reasons(trace: RunTrace, outcome: str, coverage: GenerationCoverage) -> list[str]:
-        reasons: list[str] = []
-        if trace.provisional:
-            reasons.append("provisional trace cannot qualify for acceptance replay")
-        if outcome != "completed":
-            reasons.append(f"source agent outcome is {outcome}")
-        if trace.agent_error:
-            reasons.append(f"source agent error: {trace.agent_error}")
-        if any(not action.success for action in trace.actions):
-            reasons.append("source trace contains failed actions")
-        if not trace.actions or trace.actions[-1].tool != ToolName.FINISH or not trace.actions[-1].success:
-            reasons.append("source trace does not end with a successful FINISH action")
-        if coverage.explicit_assertions == 0:
-            reasons.append("source trace has no successful explicit assertion")
-        unsupported = [
-            item for item in coverage.omitted_actions if item["reason"].startswith("unsupported replay tool")
-        ]
-        if unsupported:
-            reasons.append("source trace contains unsupported replay actions")
-        if any(item.startswith("unvalidated dynamic ") for item in coverage.warnings):
-            reasons.append("source trace contains a dynamic locator without stable unique-prefix evidence")
-        return list(dict.fromkeys(reasons))
-
-    @staticmethod
-    def _is_nondeterministic_system_click(trace: RunTrace, action: ActionResult) -> bool:
-        target = str(action.params.get("target") or "")
-        if "appicon" in target.lower():
-            return True
-        if not action.before_snapshot_id:
-            return False
-        snapshot = next((item for item in trace.snapshots if item.snapshot_id == action.before_snapshot_id), None)
-        if snapshot is None:
-            return False
-        element = next((item for item in snapshot.elements if item.element_id == target), None)
-        if element is None:
-            return False
-        launch_markers = " ".join(
-            value or "" for value in (element.type, element.source, element.key, element.id, element.content)
-        ).lower()
-        return (
-            "appicon" in launch_markers
-            or "keyhidekbd" in launch_markers
-            or (
-                "launcher" in snapshot.page_path.lower()
-                and trace.target_app_id.replace("-", "") in launch_markers.replace("-", "")
-            )
-        )
-
-    @staticmethod
-    def _runtime_element_coordinate(trace: RunTrace, action: ActionResult) -> tuple[int, int] | None:
-        target = action.params.get("target")
-        if not target or not action.before_snapshot_id:
-            return None
-        snapshot = next((item for item in trace.snapshots if item.snapshot_id == action.before_snapshot_id), None)
-        if snapshot is None:
-            return None
-        element = next((item for item in snapshot.elements if item.element_id == target), None)
-        return element.bbox.center if element and element.bbox else None
-
-    @staticmethod
-    def _selector(
-        locator,
-        target: str | None,
-        warnings: list[str],
-        profile: TargetAppProfile,
-        min_observed_rounds: int = 3,
-    ) -> str:
-        if locator:
-            if locator.kind in {LocatorKind.KEY, LocatorKind.ID}:
-                method = "key" if locator.kind == LocatorKind.KEY else "id"
-                dynamic = re.fullmatch(r"(.+_)\d{8,}", locator.value)
-                if dynamic:
-                    prefix = dynamic.group(1)
-                    threshold = max(int(min_observed_rounds), 1)
-                    validated = next(
-                        (
-                            item
-                            for item in profile.stable_locator_inventory
-                            if getattr(item, method) == locator.value
-                            and item.dynamic_pattern == prefix
-                            and item.observed_rounds >= threshold
-                            and item.unique_match_rounds >= threshold
-                        ),
-                        None,
-                    )
-                    if validated is not None:
-                        warnings.append(
-                            f"validated dynamic {method} {locator.value!r} generalized to unique prefix {prefix!r}"
-                        )
-                        return f"BY.{method}({prefix!r}, MatchPattern.STARTS_WITH)"
-                    warnings.append(
-                        f"unvalidated dynamic {method} {locator.value!r} retained as an exact diagnostic selector"
-                    )
-                return f"BY.{method}({locator.value!r})"
-            if locator.kind == LocatorKind.TEXT:
-                return f"BY.text({locator.value!r})"
-            if locator.kind == LocatorKind.TYPE_TEXT:
-                type_name, _, text = locator.value.partition("|")
-                return f"BY.type({type_name!r}).text({text!r})"
-        warnings.append(f"semantic target {target!r} fell back to exact text")
-        return f"BY.text({target or ''!r})"
-
-    @staticmethod
-    def _first_stable_locator(trace: RunTrace) -> str | None:
-        for snapshot in reversed(trace.snapshots):
-            for element in snapshot.elements:
-                if element.key and element.enabled and not re.search(r"_\d{8,}$", element.key):
-                    return f"BY.key({element.key!r})"
-                if element.content and element.enabled:
-                    return f"BY.text({element.content!r})"
-        return None
+    # ------------------------------------------------------------------
+    # 兼容薄壳：既有调用方仍可拿到同一套模板与选择器
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _render_script(trace: RunTrace, profile: TargetAppProfile, body: list[str]) -> str:
-        startup_wait = float(profile.launch_strategy.get("wait_seconds", 2))
-        actions = "\n".join(body) or "        pass"
-        return f"""from __future__ import annotations
+        """以预渲染脚本体复用统一的脚本文档模板。
 
-import json
-import os
-import traceback
-from pathlib import Path
+        DC 生成器已切到 ``CaseBuilder`` + ``StandaloneEmitter`` 的 IR 路径；本方法保留
+        给仍持有「已渲染行」的外部调用方，避免两套脚本模板漂移。
+        """
+        from .standalone import StandaloneEmitter
 
-from hypium import BY, MatchPattern, UiDriver
+        spec = StandaloneEmitter.shell_spec(
+            bundle_name=profile.bundle_name,
+            main_ability=profile.main_ability,
+            startup_wait_seconds=float(profile.launch_strategy.get("wait_seconds", 2)),
+            device_sn=trace.device_id,
+            title_zh=trace.task or "未命名用例",
+        )
+        return StandaloneEmitter().render_document(spec, body, run_id=trace.run_id, device_id=trace.device_id)
 
-DEVICE_ID = {trace.device_id!r}
-BUNDLE_NAME = {profile.bundle_name!r}
-MAIN_ABILITY = {profile.main_ability!r}
-STARTUP_WAIT_SECONDS = {startup_wait!r}
-DEFAULT_REPORT_DIR = Path(__file__).resolve().parent.parent / "reports"
-REPORT_DIR = Path(os.environ.get("HARMONY_AGENT_REPORT_DIR", DEFAULT_REPORT_DIR))
-RESULT_PATH = REPORT_DIR / "generated_result.json"
-
-
-def main() -> int:
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    result = {{"run_id": {trace.run_id!r}, "passed": False, "error": None}}
-    driver = None
-    try:
-        driver = UiDriver.connect(device_sn=DEVICE_ID, report_path=str(REPORT_DIR), log_level="info")
-        driver.stop_app(BUNDLE_NAME)
-        driver.start_app(BUNDLE_NAME, MAIN_ABILITY)
-        driver.wait(STARTUP_WAIT_SECONDS)
-{actions}
-        driver.capture_screen(str(REPORT_DIR / "final.jpeg"))
-        result["passed"] = True
-        return 0
-    except Exception as exc:
-        result["error"] = {{"type": type(exc).__name__, "message": str(exc)}}
-        result["traceback"] = traceback.format_exc()
-        if driver is not None:
-            try:
-                driver.capture_screen(str(REPORT_DIR / "failure.jpeg"))
-            except Exception:
-                pass
-        return 1
-    finally:
-        RESULT_PATH.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        if driver is not None:
-            try:
-                driver.close()
-            except Exception:
-                pass
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-"""
+    @staticmethod
+    def _selector(
+        locator: LocatorCandidate | None,
+        target: str | None,
+        warnings: list[str],
+        profile: TargetAppProfile | None,
+        min_observed_rounds: int = 3,
+    ) -> str:
+        """把运行时候选定位器渲染为 hypium 选择器源码文本（薄壳，走 IR 定位器策略）。"""
+        builder = CaseBuilder(min_observed_rounds=min_observed_rounds)
+        spec: LocatorSpec = builder.locator_from_candidate(locator, target, profile, warnings)
+        return render_selector(spec)
 
     @staticmethod
     def _sha256(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _safe_id(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_]", "_", value)

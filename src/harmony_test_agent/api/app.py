@@ -42,7 +42,7 @@ from ..profiles import (
     ProfileTransitionError,
 )
 from ..reporting import ReportBuilder
-from ..runner import HypiumRunner
+from ..runner import HypiumRunner, XDeviceRunner
 from ..storage import ArtifactStore, RunRepository, ScriptCatalog
 from ..targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
 
@@ -79,6 +79,19 @@ class RunManager:
             min_evidence_rounds=settings.profile_verification_rounds,
         )
         self.target_resolver = None
+        # 可复用用例库：与 RunRepository 共用同一个 agent.db，产物落 artifacts/cases/。
+        from ..cases.library import CaseLibrary
+        from ..storage.case_repository import CaseRepository
+
+        self.case_repository = CaseRepository(settings.resolved_database_path)
+        self.case_library = CaseLibrary(
+            self.case_repository,
+            settings.resolved_cases_dir,
+            min_observed_rounds=settings.profile_verification_rounds,
+            runner_factory=lambda root, timeout: HypiumRunner(root, timeout),
+            xdevice_runner_factory=lambda root, timeout: XDeviceRunner(root, timeout),
+            analyzer=_execution_analyzer(settings),
+        )
 
     def start(self, request: RunRequest) -> str:
         """创建运行标识并在当前事件循环中启动后台测试任务。"""
@@ -87,6 +100,8 @@ class RunManager:
             self.settings,
             repository=self.repository,
             artifacts=self.artifacts,
+            case_library=self.case_library,
+            analyzer=_execution_analyzer(self.settings),
         )
         self.orchestrators[run_id] = orchestrator
         task = asyncio.create_task(orchestrator.run(request, run_id=run_id), name=run_id)
@@ -247,6 +262,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.manager = manager
     app.state.dc_manager = dc_manager
     app.include_router(create_dc_router(settings, dc_manager))
+    from .cases import create_cases_router
+
+    app.include_router(
+        create_cases_router(
+            settings=settings,
+            library=manager.case_library,
+            repository=manager.case_repository,
+            run_repository=manager.repository,
+            registry=manager.profile_registry,
+            dc_manager=dc_manager,
+        )
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.harmony_cors_origins,
@@ -794,6 +821,22 @@ def _build_run_request(payload: dict[str, Any]) -> RunRequest:
         data["temporary_test"] = bool(policy.pop("temporary_test", data.get("temporary_test", False)))
         data["exploration_policy"] = policy
     return RunRequest.model_validate(data)
+
+
+def _execution_analyzer(settings: Settings) -> Any | None:
+    """构造执行结果分析器；关闭开关或依赖缺失时返回 ``None``（功能降级，不阻塞）。"""
+    if not settings.case_analysis_enabled:
+        return None
+    try:
+        from ..analysis.service import ExecutionAnalyzer
+
+        return ExecutionAnalyzer(
+            device_factory=lambda device_id: HarmonyDeviceAdapter(
+                device_id, settings.hdc_path, settings.agent_action_timeout
+            )
+        )
+    except Exception:  # noqa: BLE001 - 分析能力缺失只降级为「不分析」
+        return None
 
 
 def _profile_dir(settings: Settings) -> Path:

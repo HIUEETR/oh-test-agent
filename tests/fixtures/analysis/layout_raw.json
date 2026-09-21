@@ -1,0 +1,84 @@
+{
+  "attributes": {
+    "pagePath": "pages/Index",
+    "type": "Root",
+    "visible": "true",
+    "bounds": "[0,0][1320,2232]"
+  },
+  "children": [
+    {
+      "attributes": {
+        "key": "p2_off_left_title",
+        "type": "Text",
+        "text": "越界标题节点",
+        "visible": "true",
+        "bounds": "[-40,300][900,900]"
+      }
+    },
+    {
+      "attributes": {
+        "key": "overlap_group",
+        "type": "Column",
+        "visible": "true",
+        "bounds": "[100,1200][720,1720]"
+      },
+      "children": [
+        {
+          "attributes": {
+            "key": "overlap_a",
+            "type": "Text",
+            "text": "重叠文本 A",
+            "visible": "true",
+            "bounds": "[100,1200][700,1700]"
+          }
+        },
+        {
+          "attributes": {
+            "key": "overlap_b",
+            "type": "Text",
+            "text": "重叠文本 B",
+            "visible": "true",
+            "bounds": "[120,1220][720,1720]"
+          }
+        }
+      ]
+    },
+    {
+      "attributes": {
+        "key": "clip_group",
+        "type": "Column",
+        "visible": "true",
+        "bounds": "[200,1900][1000,2100]"
+      },
+      "children": [
+        {
+          "attributes": {
+            "key": "clip_child_text",
+            "type": "Text",
+            "text": "被裁剪的子节点文本",
+            "visible": "true",
+            "bounds": "[100,1850][600,2000]"
+          }
+        }
+      ]
+    },
+    {
+      "attributes": {
+        "key": "p2_zero_size_label",
+        "type": "Text",
+        "text": "退化节点",
+        "visible": "true",
+        "bounds": "[500,2200][500,2300]"
+      }
+    },
+    {
+      "attributes": {
+        "key": "p2_hidden_offscreen",
+        "type": "Text",
+        "text": "不可见越界节点",
+        "visible": "false",
+        "bounds": "[-200,100][400,600]"
+      }
+    }
+  ]
+}

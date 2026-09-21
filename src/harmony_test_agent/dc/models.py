@@ -400,6 +400,7 @@ class DcEventType(StrEnum):
     MESSAGE_DELTA = "message_delta"
     TOKEN_USAGE_UPDATED = "token_usage_updated"  # 会话 token 用量/缓存命中率更新
     SCRIPT_GENERATED = "script_generated"
+    CASE_CREATED = "case_created"  # 会话录制已沉淀为可复用用例
     PROFILE_DISTILL_STARTED = "profile_distill_started"
     PROFILE_DISTILL_FINISHED = "profile_distill_finished"
     PROFILE_DISTILL_FAILED = "profile_distill_failed"
@@ -461,6 +462,12 @@ class DcScriptArtifact(BaseModel):
     """
     explicit_assertions: int = 0
     """成功执行的 assert_* 工具调用数（replay_eligible 的判定依据之一）。"""
+    case_id: str | None = None
+    """用例 IR 的 ``case_id``（``cases/spec.py``）；旧产物为 ``None``。"""
+    case_spec_path: str | None = None
+    """落盘的 ``case_spec.json`` 绝对路径；旧产物为 ``None``。"""
+    xdevice_project_path: str | None = None
+    """官方 devicetest 工程目录绝对路径；旧产物/未生成时为 ``None``。"""
 
 
 class DcDistillResult(BaseModel):

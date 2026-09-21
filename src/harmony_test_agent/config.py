@@ -94,6 +94,21 @@ class Settings(BaseSettings):
     # 关闭即回退整块输出（每个 part 仍发全量 THINKING/AGENT_TEXT，行为与旧版一致）。
     dc_token_streaming: bool = True
 
+    # ------------------------------------------------------------------
+    # 用例库 / 官方 xdevice harness / 执行结果分析配置
+    # ------------------------------------------------------------------
+    cases_dir: Path = Field(default=Path("artifacts/cases"))
+    """用例库落盘根目录（用例 IR、双引擎产物、执行证据）。"""
+
+    xdevice_timeout_seconds: float = Field(default=900, gt=0, le=7200)
+    """官方 xdevice 用例执行的子进程超时上限。"""
+
+    case_analysis_enabled: bool = True
+    """执行结果分析总开关；分析仅作附加信息，永不翻转用例 passed。"""
+
+    stress_max_iterations: int = Field(default=2000, ge=1, le=5000)
+    """压力测试用例允许的最大循环轮数（IR 静态安全门禁的硬上限）。"""
+
     @field_validator("harmony_cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: object) -> object:
@@ -131,6 +146,12 @@ class Settings(BaseSettings):
     def resolved_runtime_home(self) -> Path:
         """返回 Hypium 运行用户目录的绝对路径。"""
         return self._resolve(self.runtime_home)
+
+    @computed_field
+    @property
+    def resolved_cases_dir(self) -> Path:
+        """返回用例库落盘根目录的绝对路径。"""
+        return self._resolve(self.cases_dir)
 
     @property
     def model_configured(self) -> bool:
