@@ -121,6 +121,21 @@ export function closeDcSession(sessionId: string): Promise<{ session_id: string;
   return apiJson(`/api/dc/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
+/** ``needs_attention`` 的四个处置动作（与后端 ``ResolveAttentionRequest`` 一致）。 */
+export type ResolveAction = "reobserve" | "confirm_effect" | "retry" | "terminate";
+
+/** 处置未确认的设备副作用。
+ *
+ *  历史缺口：``POST /api/dc/sessions/{id}/resolve`` 后端早已实现，前端却从未调用它，
+ *  导致 ``needs_attention`` 触发后四个选项只是**纯文本**，用户无法解除阻塞、只能手调 API。
+ */
+export function resolveSession(sessionId: string, action: ResolveAction): Promise<DcSessionView> {
+  return apiJson<DcSessionView>(`/api/dc/sessions/${encodeURIComponent(sessionId)}/resolve`, {
+    method: "POST",
+    body: { action },
+  });
+}
+
 /** 构造 DC 产物下载 URL */
 export function dcArtifactUrl(sessionId: string, path: string): string {
   return apiUrl(`/api/dc/sessions/${encodeURIComponent(sessionId)}/artifacts/${path}`);

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from collections.abc import Callable
@@ -25,7 +26,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, Field
 
 from ..devices import DeviceAdapter, DeviceError
-from ..models import CommandResult, ExplorationPolicy, ScreenSnapshot, UIElement
+from ..models import AnomalyFinding, CommandResult, ExplorationPolicy, ScreenSnapshot, UIElement
 from ..perception.normalizer import normalize_layout, page_path
 from ..runtime.safety import SafetyPolicy
 from ..targets import ForegroundApp, ResolvedTarget
@@ -33,6 +34,8 @@ from .advisor import AdvisorTurnRecord
 
 if TYPE_CHECKING:
     from .advisor import AdvisorVerdict, ExplorationAdvisor
+
+_LOG = logging.getLogger(__name__)
 
 # 显式导出：只有这些符号是 orchestration / dc 蒸馏依赖的公开能力，
 # 其余模块级辅助函数与私有方法视为实现细节（2026-09-17 重构 §8.7）。
@@ -134,6 +137,12 @@ class DiscoveryResult(BaseModel):
     started_at_monotonic: float = Field(exclude=True, default=0)
     duration_seconds: float = 0
     stop_reason: str = "queue_exhausted"
+    anomalies: list[AnomalyFinding] = Field(default_factory=list)
+    """探索期发现的异常（additive，Phase 2）：跨 bundle 恢复前的崩溃探测结果。
+
+    落进 ``discovery/summary.json``：应用崩溃弹回桌面与「点了跳到别的应用的链接」在现象上
+    完全相同，历史上被统一记成 ``cross-bundle navigation blocked`` 并静默恢复，一次真崩溃
+    因此被当成无事发生。"""
 
     @property
     def interaction_types(self) -> set[str]:
@@ -290,6 +299,8 @@ class BoundedExplorer:
         # 结构身份 -> (建议, 来源, 建议时的候选摘要)；候选摘要用于把编号建议映射回可读控件。
         self._advisor_verdicts: dict[str, tuple[AdvisorVerdict, str, list[dict[str, object]]]] = {}
         self._advisor_summaries: list[str] = []
+        # 探索期异常（Phase 2）：崩回桌面不再静默，收进 DiscoveryResult.anomalies。
+        self._anomalies: list[AnomalyFinding] = []
 
     def explore(self) -> DiscoveryResult:
         result = DiscoveryResult(target=self.target, policy=self.policy, started_at_monotonic=time.monotonic())
@@ -463,6 +474,7 @@ class BoundedExplorer:
                 break
 
         result.duration_seconds = round(time.monotonic() - result.started_at_monotonic, 3)
+        result.anomalies = list(self._anomalies)
         result.advisor_turns = self.advisor.turn_count if self.advisor else 0
         result.advisor_verdicts = [
             {"identity": identity, "source": source, "candidates": digest, **verdict.model_dump()}
@@ -775,6 +787,12 @@ class BoundedExplorer:
             transition.success = False
             actual = after_foreground.bundle_name if after_foreground else "unknown"
             transition.blocked_reason = f"cross-bundle navigation blocked: {actual}"
+            # 崩回桌面与「点了个跳到别的应用的链接」在现象上相同，必须靠日志区分。
+            # 历史上这里直接静默恢复，一次真崩溃被记成「跨应用导航被拦截」当无事发生。
+            crash_findings = self._probe_crash_after_foreground_loss(sequence)
+            if crash_findings:
+                transition.blocked_reason = f"app crash suspected: {transition.blocked_reason}"
+                self._record_anomalies(crash_findings)
             backed = self.device.back()
             restored = self.device.current_foreground_app() if backed.ok else None
             if not restored or restored.bundle_name != self.target.bundle_name:
@@ -876,6 +894,34 @@ class BoundedExplorer:
     @classmethod
     def _stability_fingerprint(cls, page: str, elements: list[UIElement]) -> tuple[str, int, tuple[str, ...]]:
         return (page, len(elements), tuple(sorted(cls._stable_texts(elements))))
+
+    def _probe_crash_after_foreground_loss(self, sequence: int) -> list[AnomalyFinding]:
+        """跨 bundle 恢复前的崩溃探测：读回 ``transition-NNN.hilog.txt`` + faultlog 索引。
+
+        历史上这些 ``transition-NNN.hilog.txt`` **从来没有任何代码读回**，应用崩溃弹回桌面
+        因此被静默恢复。这里按 sequence 复用同一次 transition 的 hilog 文件（若已存在则复用，
+        否则新采一次），把崩溃痕迹变成可追溯的 finding。
+        """
+        try:
+            from ..analysis.in_run import probe_crash_after_foreground_loss
+
+            log_path = self.output_dir / f"transition-{sequence + 1:03d}.hilog.txt"
+            return probe_crash_after_foreground_loss(self.device, self.target.bundle_name, log_path)
+        except Exception as exc:  # noqa: BLE001 - 探测失败不得影响探索恢复
+            _LOG.warning("exploration crash probe failed: %s: %s", type(exc).__name__, exc)
+            return []
+
+    def _record_anomalies(self, findings: list[AnomalyFinding]) -> None:
+        """把探索期 finding 收进探索结果（additive，落 ``discovery/summary.json``）。"""
+        for finding in findings:
+            finding.phase = "exploration"
+            if finding.detected_at is None:
+                from ..models import utc_now
+
+                finding.detected_at = utc_now()
+            if finding.screenshot == "" and finding.evidence.get("screenshot"):
+                finding.screenshot = str(finding.evidence["screenshot"])
+            self._anomalies.append(finding)
 
     @staticmethod
     def _stable_texts(elements: list[UIElement]) -> set[str]:

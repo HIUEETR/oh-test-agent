@@ -18,18 +18,25 @@ describe("deep-links", () => {
     expect(runId).toBe("");
   });
 
-  it("顶层 Tab 收敛为 5 个（2026-09-17 重构）", () => {
-    expect([...TAB_KEYS]).toEqual(["session", "graph", "script", "profiles", "runs"]);
+  it("顶层 Tab 为 6 个（2026-09-17 收敛为 5 个 + Phase 5 新增「缺陷」）", () => {
+    expect([...TAB_KEYS]).toEqual(["session", "graph", "script", "profiles", "runs", "defects"]);
   });
 
-  it("全部旧版 tab 值映射到新的 5 Tab（深链不失效）", () => {
+  it("全部旧版 tab 值映射到当前 Tab 集合（深链不失效）", () => {
     for (const [legacy, expected] of Object.entries(LEGACY_TAB_ALIASES)) {
       window.history.replaceState(null, "", `/?tab=${legacy}`);
       expect(readDeepLink().tab).toBe(expected);
     }
-    for (const current of ["session", "graph", "script", "profiles", "runs"] as const) {
+    for (const current of TAB_KEYS) {
       window.history.replaceState(null, "", `/?tab=${current}`);
       expect(readDeepLink().tab).toBe(current);
+    }
+  });
+
+  it("缺陷相关的历史别名收敛到 defects", () => {
+    for (const legacy of ["defect", "anomaly"]) {
+      window.history.replaceState(null, "", `/?tab=${legacy}`);
+      expect(readDeepLink().tab).toBe("defects");
     }
   });
 

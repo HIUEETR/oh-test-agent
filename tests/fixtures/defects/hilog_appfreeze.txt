@@ -1,0 +1,7 @@
+02-10 10:05:00.101  4321  4321 I C01310/com.zhihu.hmos/ArkUI: [Engine Log] pageIndex 3 pagePath pages/Feed
+02-10 10:05:03.500  4321  4321 W C01310/com.zhihu.hmos/AppFreeze: appfreeze detected in com.zhihu.hmos, foreground=1
+02-10 10:05:03.620  4321  4321 E C01310/com.zhihu.hmos/AppFreeze: THREAD_BLOCK_6S main thread blocked over 6s
+02-10 10:05:09.900  4321  4321 E C01310/com.zhihu.hmos/AppFreeze: THREAD_BLOCK_10S main thread still blocked
+02-10 10:05:12.100  4321  4321 E C01310/com.zhihu.hmos/Lifecycle: LIFECYCLE_TIMEOUT timeout happens on ability foreground
+02-10 10:05:15.400  4321  4321 E C01310/com.zhihu.hmos/Input: APP_INPUT_BLOCK input dispatch blocked 5s
+02-10 10:05:16.900  4321  4321 I C01310/com.zhihu.hmos/AppFreeze: main thread recovered

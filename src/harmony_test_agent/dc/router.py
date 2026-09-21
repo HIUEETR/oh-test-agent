@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from ..config import Settings
 from ..devices.base import DeviceError
 from ..profiles import ProfileTransitionError
-from ..runner import HypiumRunner
+from ..runner import make_hypium_runner
 from .distill import resolve_distill_identity
 from .models import (
     SIDE_EFFECT_TOOLS,
@@ -459,7 +459,19 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
         lock = script_locks.setdefault(key, asyncio.Lock())
         if lock.locked():
             raise HTTPException(status_code=409, detail="script is already running")
-        runner = HypiumRunner(settings.resolved_runtime_home)
+        # 缺口 1 的修复点：DC 脚本执行历史上零分析。身份从会话快照 / 会话内记录的前台应用读。
+        session_id = relative.parts[0]
+        bundle_name, device_id = _dc_script_identity(settings, manager, session_id)
+        if not getattr(settings, "analysis_dc_scripts", True):
+            runner = make_hypium_runner(settings, analyze=False)
+        else:
+            runner = make_hypium_runner(
+                settings,
+                subject="dc_script",
+                bundle_name=bundle_name,
+                device_id=device_id,
+                session_id=session_id,
+            )
         results = []
         async with lock:
             for attempt in range(1, body.attempts + 1):
@@ -468,10 +480,49 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
         return {
             "script_id": body.script_id,
             "session_id": relative.parts[0],
+            "bundle_name": bundle_name,
             "results": [result.model_dump(mode="json") for result in results],
         }
 
     return router
+
+
+def _dc_script_identity(settings: Settings, manager: DcSessionManager, session_id: str) -> tuple[str, str]:
+    """解析 DC 脚本执行所需的应用身份与设备序列号。
+
+    顺序：内存会话（前台应用 / 上一次确认目标）→ 会话快照 ``dc_session.json`` 的
+    ``continuation.last_foreground_app`` → 空串（此时分析仍会跑，但没有归属信号，
+    finding 会按 hilog 的降级规则处理）。
+    """
+    device_id = settings.harmony_device
+    bundle_name = ""
+    session = None
+    try:
+        session = manager.get(session_id)
+    except Exception:  # noqa: BLE001 - 历史会话不在内存里属正常情况
+        session = None
+    if session is not None:
+        device_id = getattr(session, "device_id", None) or device_id
+        bundle_name = str(getattr(session, "last_foreground_app", "") or "")
+        if not bundle_name:
+            bundle_name = _continuation_bundle(getattr(session, "continuation", None))
+        if not bundle_name:
+            suggested = getattr(session, "suggested_identity", None)
+            if suggested:
+                bundle_name = str(suggested[0] or "")
+    else:
+        snapshot = manager.store.load(session_id)
+        if snapshot is not None:
+            device_id = str(getattr(snapshot, "device_id", None) or device_id)
+            bundle_name = _continuation_bundle(getattr(snapshot, "continuation", None))
+    return bundle_name, device_id
+
+
+def _continuation_bundle(continuation: Any) -> str:
+    """从会话连续性摘要里取最后前台应用；缺失返回空串。"""
+    if continuation is None:
+        return ""
+    return str(getattr(continuation, "last_foreground_app", "") or "")
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,6 @@
+total 8
+cppcrash-com.zhihu.hmos-20260210-101530
+jscrash-com.zhihu.hmos-20260101-090000
+cppcrash-com.other.app-20260210-101530
+appfreeze-com.zhihu.hmos-20260210-101545
+-rw-r--r-- 1 root root 4096 cppcrash-com.zhihu.hmos-20260210-102000

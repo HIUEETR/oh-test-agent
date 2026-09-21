@@ -23,7 +23,16 @@ from pydantic_ai import RunContext, Tool
 
 from ..devices.base import DeviceError
 from ..devices.harmony import HarmonyDeviceAdapter
-from ..models import CommandResult, ScreenSnapshot, StableLocator, ToolName, UIElement, utc_now
+from ..models import (
+    AnomalyFinding,
+    AnomalyKind,
+    CommandResult,
+    ScreenSnapshot,
+    StableLocator,
+    ToolName,
+    UIElement,
+    utc_now,
+)
 from ..perception.normalizer import normalize_layout, page_path
 from ..runtime.tools import evaluate_assertion
 from ..storage.artifacts import ArtifactStore
@@ -113,6 +122,59 @@ class DcToolContext:
     progress_interval: float = 1.0
     stable_locators: list[StableLocator] = field(default_factory=list[StableLocator])
     """当前会话关联 Profile 的稳定定位器证据；无 Profile 时为空列表（断言退化为模糊文本匹配）。"""
+
+    bundle_name: str = ""
+    """被测应用 bundle（会话身份）；用于运行中异常 finding 的归属判定。"""
+
+    defects: list[AnomalyFinding] = field(default_factory=list[AnomalyFinding])
+    """运行中即时发现的异常（``phase="in_run"``）；由会话收尾落进 ``dc_session.json``。"""
+
+
+def _last_pending_effect_invocation(recorder: DcActionRecorder) -> DcToolInvocation | None:
+    """最后一条「副作用工具且尚未回填 after_snapshot_id」的调用。
+
+    DC 的动作后不自动截图，因此 after 帧只在模型下一次 ``screenshot`` 时才能确认；
+    这里从最新往回找一条待回填的记录（不含本次 screenshot 自己）。
+    """
+    for invocation in reversed(recorder.invocations):
+        if invocation.tool in SIDE_EFFECT_TOOLS and invocation.after_snapshot_id is None:
+            if invocation.status == DcToolStatus.RUNNING:
+                continue
+            return invocation
+    return None
+
+
+def _flag_stalled_effect(deps: DcToolContext, invocation: DcToolInvocation, snapshot: ScreenSnapshot) -> None:
+    """上一条件副作用工具执行后画面完全没变 ⇒ 记一条 ``PAGE_UNRESPONSIVE``（warning）。
+
+    设计红线：单次无视觉变化是「信号」不是「判决」，因此固定 ``warning``、``phase="in_run"``，
+    并且只写进会话 defects + 发 ``ANOMALY_DETECTED`` 事件，绝不改变任何工具状态。
+    """
+    finding = AnomalyFinding(
+        kind=AnomalyKind.PAGE_UNRESPONSIVE,
+        severity="warning",
+        summary_zh=f"工具 {invocation.tool.value} 执行后屏幕与操作前完全相同，疑似未生效",
+        detail=(f"{invocation.invocation_id}（{invocation.tool.value}，args={invocation.args}）之后画面 SHA256 未变化"),
+        source="screenshot",
+        action_id=invocation.invocation_id,
+        page_path=snapshot.page_path,
+        screenshot=relative_artifact_path(deps.snapshot_holder.latest_path, deps.session_dir) or "",
+        detected_at=utc_now(),
+        phase="in_run",
+        evidence={
+            "tool": invocation.tool.value,
+            "args": invocation.args,
+            "before_snapshot_id": invocation.before_snapshot_id,
+            "after_snapshot_id": invocation.after_snapshot_id,
+            "detected_by": "dc_screenshot_changed_flag",
+        },
+    )
+    deps.defects.append(finding)
+    deps.recorder._emit_event(
+        DcEventType.ANOMALY_DETECTED,
+        finding.summary_zh,
+        finding.model_dump(mode="json"),
+    )
 
 
 def relative_artifact_path(abs_path: Path | None, base_dir: Path | None) -> str | None:
@@ -344,6 +406,8 @@ class DcActionRecorder:
             cancellable=cancellable,
             page_path=(latest_snapshot.page_path if latest_snapshot is not None else "") or "",
             resolved_element=resolved_element,
+            # 缺口 5：``before_snapshot_id`` 早已声明却从未被赋值（``distill.py`` 读它永远拿到 None）。
+            before_snapshot_id=(latest_snapshot.snapshot_id if latest_snapshot is not None else None),
         )
         self.invocations.append(invocation)
         self._active = invocation
@@ -565,6 +629,9 @@ async def tool_screenshot(ctx: RunContext[DcToolContext]) -> str:
             on_phase=deps.recorder.note_phase,
         )
         changed = deps.snapshot_holder.update_jpeg(jpeg_path, jpeg_bytes, width, height)
+        # 回填上一条副作用工具调用的 after_snapshot_id：DC 的动作后不会自动截图，
+        # 只有模型下一次 ``screenshot`` 才能确认动作之后的界面（缺口 5）。
+        previous_effect = _last_pending_effect_invocation(deps.recorder)
         # 元素表复用同一帧：只补采 UI 层级，不再走一次完整截图（计划 5.3，实测省掉单次一半耗时）。
         # 不支持该能力的设备替身回退到完整 screenshot，保持既有行为。
         deps.recorder.note_phase("collect_hierarchy")
@@ -575,6 +642,8 @@ async def tool_screenshot(ctx: RunContext[DcToolContext]) -> str:
         else:  # pragma: no cover - 仅旧适配器/替身走这里
             snapshot = deps.device.screenshot(screens_dir, deps.session_id, label)
         deps.snapshot_holder.record(snapshot)
+        if previous_effect is not None:
+            previous_effect.after_snapshot_id = snapshot.snapshot_id
         # 发射截图事件（snapshot_path 为会话相对 POSIX 路径，供前端拼 artifact URL）
         deps.recorder._emit_event(
             DcEventType.SCREENSHOT_CAPTURED,
@@ -605,6 +674,15 @@ async def tool_screenshot(ctx: RunContext[DcToolContext]) -> str:
                 ]
             )
             summary_lines.append(f"  {el.element_id}: {el.type} {bbox} {flags} key={el.key!r} text={el.content!r}")
+        # 消费 ``update_jpeg`` 的 ``changed`` 标志（缺口 5）：这一帧与上一次操作前完全相同，
+        # 说明上一条副作用工具很可能没有生效。发事件 + 让**模型自己也看到**这句提示，
+        # 弥补 DC_SYSTEM_PROMPT 历史不提缺陷的问题。
+        if previous_effect is not None and changed is False:
+            _flag_stalled_effect(deps, previous_effect, snapshot)
+            summary_lines.append(
+                "NOTE: 屏幕与上次操作前完全相同，该操作可能未生效（疑似被测应用未响应，"
+                "可用 foreground_app 与 collect_logs 取证）。"
+            )
         return "\n".join(summary_lines)
 
     return await deps.recorder.run(ctx, DcToolName.SCREENSHOT, {}, _capture)
@@ -660,9 +738,42 @@ async def tool_collect_logs(ctx: RunContext[DcToolContext]) -> str:
         log_path = deps.artifacts.run_dir(deps.session_id) / "commands" / f"dc_logs_{int(time.time())}.txt"
         result = deps.device.collect_logs(log_path)
         line_count = len(result.stdout.splitlines()) if result.stdout else 0
-        return f"ok: {line_count} log lines saved to {log_path.name}"
+        base = f"ok: {line_count} log lines saved to {log_path.name}"
+        # DC 没有读宿主文件的工具：日志正文模型永远看不到。这里把刚采集到的内容解析一遍，
+        # 命中崩溃模式时附摘要 —— 这是让 DC agent 真正具备崩溃发现能力的最小改动。
+        # 无命中时返回字符串与历史实现逐字一致（保证既有测试与模型行为不变）。
+        summary = _crash_summary(deps, log_path)
+        return f"{base}\n{summary}" if summary else base
 
     return await deps.recorder.run(ctx, DcToolName.COLLECT_LOGS, {}, _collect)
+
+
+#: 附给模型的崩溃摘要上限（避免挤占上下文）。
+MAX_CRASH_LINES = 3
+CRASH_LINE_CHARS = 200
+
+
+def _crash_summary(deps: DcToolContext, log_path: Path) -> str:
+    """解析刚采集的 hilog 文件，命中崩溃模式时返回可读摘要；无命中返回空串。"""
+    try:
+        if not log_path.is_file():
+            return ""
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    try:
+        from ..analysis.hilog import parse_hilog
+
+        findings = parse_hilog(text, bundle_name=deps.bundle_name or "")
+    except Exception:  # noqa: BLE001 - 解析失败不得影响工具返回值
+        return ""
+    lines: list[str] = []
+    for finding in findings:
+        matched = str(finding.evidence.get("matched_line") or finding.detail or "").strip()
+        lines.append(f"SUSPECTED CRASH: {finding.kind.value} [{finding.severity}] — {matched[:CRASH_LINE_CHARS]}")
+        if len(lines) >= MAX_CRASH_LINES:
+            break
+    return "\n".join(lines)
 
 
 async def tool_foreground_app(ctx: RunContext[DcToolContext]) -> str:

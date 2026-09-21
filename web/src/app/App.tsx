@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  Activity, Bot, Braces, BrainCircuit, FileCode2, GitBranch, History, RotateCcw, ShieldCheck, Zap,
+  Activity, AlertTriangle, Bot, Braces, BrainCircuit, FileCode2, GitBranch, History, RotateCcw, ShieldCheck, Zap,
 } from "lucide-react";
 import clsx from "clsx";
 import { apiDisplay } from "../api/client";
@@ -25,6 +25,7 @@ import { ReportPanel } from "../features/report/ReportPanel";
 import { RunsView } from "../features/runs/RunsView";
 import { DcPanel } from "../features/dc/DcPanel";
 import { DcOperationLog } from "../features/dc/DcOperationLog";
+import { DefectPanel } from "../features/defects/DefectPanel";
 import { useDcRuntime } from "../features/dc/use-dc-runtime";
 import type { TabKey } from "./deep-links";
 
@@ -36,6 +37,8 @@ const TABS: Array<{ key: TabKey; label: string; icon: ReactNode }> = [
   { key: "script", label: "脚本与回放", icon: <FileCode2 size={15} /> },
   { key: "profiles", label: "Profile 资产", icon: <ShieldCheck size={15} /> },
   { key: "runs", label: "历史运行", icon: <History size={15} /> },
+  // Phase 5：缺陷一等产物面板（运行中 / 事后发现的异常 + 一键转复现用例）。
+  { key: "defects", label: "缺陷", icon: <AlertTriangle size={15} /> },
 ];
 
 export default function App() {
@@ -52,6 +55,8 @@ export default function App() {
   const setTab = useConsole((state) => state.setTab);
   const loadHealth = useConsole((state) => state.loadHealth);
   const candidates = useConsole((state) => state.candidates);
+  // 「缺陷」Tab 默认只展示当前运行发现的缺陷（无当前运行时展示全部）。
+  const currentRunId = useConsole((state) => state.runId);
   const selectedCandidate = useConsole((state) => state.selectedCandidate);
   const patchForm = useConsole((state) => state.patchForm);
   const submitCandidate = useConsole((state) => state.submitCandidate);
@@ -154,6 +159,8 @@ export default function App() {
           {tab === "profiles" && <ProfilesPanel />}
 
           {tab === "runs" && <RunsView />}
+
+          {tab === "defects" && <DefectPanel runId={currentRunId || undefined} />}
         </section>
       </main>
     </div>

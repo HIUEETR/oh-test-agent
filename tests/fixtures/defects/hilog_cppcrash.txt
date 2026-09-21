@@ -1,0 +1,9 @@
+02-10 10:00:00.101  4321  4321 I C01310/com.zhihu.hmos/ArkUI: [Engine Log] pageIndex 0 pagePath pages/Index
+02-10 10:00:00.640  4321  4321 I C01310/com.zhihu.hmos/ArkUI: [Engine Log] onPageShow pages/Index
+02-10 10:00:01.200  4321  4321 E C01310/com.zhihu.hmos/Crash: cppcrash happened, process name com.zhihu.hmos
+02-10 10:00:01.240  4321  4321 E C01310/com.zhihu.hmos/Crash: Reason: Signal:SIGSEGV(SEGV_MAPERR)@0x0000000000000000
+02-10 10:00:01.300  4321  4321 E C01310/com.zhihu.hmos/Crash: Fault thread info:
+02-10 10:00:01.320  4321  4321 E C01310/com.zhihu.hmos/Crash: #00 pc 0000000000123456 /system/lib64/libark.so
+02-10 10:00:01.340  4321  4321 E C01310/com.zhihu.hmos/Crash: #01 pc 0000000000654321 /system/lib64/libace.so
+02-10 10:00:01.900  4321  4321 I C01310/com.zhihu.hmos/AppKit: process exit code -1
+02-10 10:00:02.100  9001  9001 E C01310/com.huawei.hmos.settings/Crash: cppcrash happened, process name com.huawei.hmos.settings

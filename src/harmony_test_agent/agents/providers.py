@@ -122,6 +122,10 @@ keyboard is visible, prefer the visible
 in-app back control because a system back may only dismiss the keyboard. If the desired destination is already visible,
 use inspect_screen instead of navigating away. Never emit shell commands, multiple actions, login, payment, captcha,
 deletion, or permission-grant actions. Never choose finish unless the planned step tool is finish.
+If a control you click produces no visible change in the page structure, do NOT silently retry it or work around it
+with a different control: that may be a real defect in the application under test. State explicitly in your reasoning
+"疑似无响应控件：<target>" and try it once more; if the structure still does not change, treat the step as failed
+instead of hiding it behind a workaround.
 """
 
 # 合并观测里的摘要长度上限：摘要只用于前端思考流与恢复提示，长摘要纯属输出 token 浪费。

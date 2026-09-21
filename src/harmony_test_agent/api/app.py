@@ -30,6 +30,7 @@ from ..models import (
     ReplayResult,
     RunRequest,
     RunState,
+    ScenarioKind,
     TargetAppProfile,
     TargetQuery,
     utc_now,
@@ -42,8 +43,8 @@ from ..profiles import (
     ProfileTransitionError,
 )
 from ..reporting import ReportBuilder
-from ..runner import HypiumRunner, XDeviceRunner
-from ..storage import ArtifactStore, RunRepository, ScriptCatalog
+from ..runner import XDeviceRunner, make_hypium_runner
+from ..storage import ArtifactStore, DefectRepository, RunRepository, ScriptCatalog
 from ..targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
 
 _SMOKE_TASK = "启动应用，探索可达页面，验证返回和重启恢复。"
@@ -84,13 +85,23 @@ class RunManager:
         from ..storage.case_repository import CaseRepository
 
         self.case_repository = CaseRepository(settings.resolved_database_path)
+        # 缺陷仓库：与 RunRepository / CaseRepository 共用同一个 agent.db（计划设计 3）。
+        from ..analysis.defects import DefectRecorder
+
+        self.defect_repository = DefectRepository(settings.resolved_database_path)
+        self.defect_recorder = DefectRecorder(self.defect_repository)
         self.case_library = CaseLibrary(
             self.case_repository,
             settings.resolved_cases_dir,
             min_observed_rounds=settings.profile_verification_rounds,
-            runner_factory=lambda root, timeout: HypiumRunner(root, timeout),
+            # 这里刻意不传 analysis_hook：用例库（cases/library.py）在回放结束后自己调用
+            # analyzer.analyze_replay，两处都挂 hook 会让同一 attempt 被分析两次。
+            runner_factory=lambda root, timeout: make_hypium_runner(
+                settings, analyzer=None, timeout=timeout, analyze=False
+            ),
             xdevice_runner_factory=lambda root, timeout: XDeviceRunner(root, timeout),
             analyzer=_execution_analyzer(settings),
+            defect_repository=self.defect_repository,
         )
 
     def start(self, request: RunRequest) -> str:
@@ -102,6 +113,7 @@ class RunManager:
             artifacts=self.artifacts,
             case_library=self.case_library,
             analyzer=_execution_analyzer(self.settings),
+            defect_recorder=self.defect_recorder,
         )
         self.orchestrators[run_id] = orchestrator
         task = asyncio.create_task(orchestrator.run(request, run_id=run_id), name=run_id)
@@ -205,7 +217,14 @@ class RunManager:
         trace = self.repository.get_trace(run_id)
         if trace is None or trace.generated is None:
             return
-        runner = HypiumRunner(self.settings.resolved_runtime_home)
+        runner = make_hypium_runner(
+            self.settings,
+            analyzer=(_execution_analyzer(self.settings) if self.settings.analysis_on_replay_endpoints else None),
+            analyze=bool(self.settings.analysis_on_replay_endpoints),
+            bundle_resolver=lambda: _trace_bundle_name(trace),
+            device_id=trace.device_id,
+            symptom_kind=("functional" if trace.scenario == ScenarioKind.BUG_REPRODUCTION else None),
+        )
         lock = self.replay_locks.setdefault(run_id, asyncio.Lock())
         try:
             await lock.acquire()
@@ -263,17 +282,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.dc_manager = dc_manager
     app.include_router(create_dc_router(settings, dc_manager))
     from .cases import create_cases_router
+    from .defects import create_defects_router
 
+    cases_router, case_hooks = create_cases_router(
+        settings=settings,
+        library=manager.case_library,
+        repository=manager.case_repository,
+        run_repository=manager.repository,
+        registry=manager.profile_registry,
+        dc_manager=dc_manager,
+    )
+    app.include_router(cases_router)
+
+    # 缺陷一等产物（Phase 3）：查询 / 处置 / 证据 / 转复现用例。
     app.include_router(
-        create_cases_router(
+        create_defects_router(
             settings=settings,
-            library=manager.case_library,
-            repository=manager.case_repository,
+            repository=manager.defect_repository,
             run_repository=manager.repository,
-            registry=manager.profile_registry,
-            dc_manager=dc_manager,
+            artifacts=manager.artifacts,
+            bug_repro_factory=case_hooks.get("bug_repro_factory"),
+            execution_callback=case_hooks.get("bug_repro_execution_callback"),
         )
     )
+
+    @app.get("/api/runs/{run_id}/defects")
+    async def run_defects(run_id: str, limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+        """某次运行发现的缺陷（缺口 5：报告之外还能按运行查询）。"""
+        summaries = manager.defect_repository.list_for_run(run_id, limit=limit)
+        return {
+            "run_id": run_id,
+            "total": len(summaries),
+            "defects": [item.model_dump(mode="json") for item in summaries],
+        }
+
+    @app.get("/api/profiles/{profile_id}/defects")
+    async def profile_defects(profile_id: str, limit: int = Query(default=200, ge=1, le=500)) -> dict[str, Any]:
+        """某应用（Profile）的全部缺陷。"""
+        bundle_name = _profile_bundle_name(manager, profile_id)
+        if not bundle_name:
+            raise HTTPException(status_code=404, detail=f"profile {profile_id} not found")
+        summaries = manager.defect_repository.list_for_bundle(bundle_name, limit=limit)
+        return {
+            "profile_id": profile_id,
+            "bundle_name": bundle_name,
+            "total": len(summaries),
+            "defects": [item.model_dump(mode="json") for item in summaries],
+        }
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.harmony_cors_origins,
@@ -477,7 +533,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if lock.locked():
             raise HTTPException(status_code=409, detail="replay is already running for this Profile")
 
-        runner = HypiumRunner(manager.settings.resolved_runtime_home)
+        runner = make_hypium_runner(
+            manager.settings,
+            analyzer=(_execution_analyzer(manager.settings) if manager.settings.analysis_on_replay_endpoints else None),
+            analyze=bool(manager.settings.analysis_on_replay_endpoints),
+            bundle_name=profile.bundle_name,
+            device_id=str(profile.device_selector.get("serial") or manager.settings.harmony_device),
+        )
         generated = GeneratedArtifact(
             python_path=Path(script_path),
             config_path=Path(script_path).with_suffix(".json"),
@@ -519,6 +581,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "evidence_paths": list(replay.evidence_paths),
                         "profile_status": updated.status.value,
                         "total_replays": len(updated.provenance.hypium_replay_run_ids),
+                        # 执行结果分析（advisory）：Profile 晋级门禁只读 passed，不读该字段。
+                        "analysis": replay.analysis.model_dump(mode="json") if replay.analysis else None,
                     }
                 )
                 if not replay.passed:
@@ -825,18 +889,42 @@ def _build_run_request(payload: dict[str, Any]) -> RunRequest:
 
 def _execution_analyzer(settings: Settings) -> Any | None:
     """构造执行结果分析器；关闭开关或依赖缺失时返回 ``None``（功能降级，不阻塞）。"""
-    if not settings.case_analysis_enabled:
-        return None
-    try:
-        from ..analysis.service import ExecutionAnalyzer
+    from ..runner import build_execution_analyzer
 
-        return ExecutionAnalyzer(
-            device_factory=lambda device_id: HarmonyDeviceAdapter(
-                device_id, settings.hdc_path, settings.agent_action_timeout
-            )
-        )
-    except Exception:  # noqa: BLE001 - 分析能力缺失只降级为「不分析」
-        return None
+    return build_execution_analyzer(settings)
+
+
+def _profile_bundle_name(manager: Any, profile_id: str) -> str:
+    """把 Profile 标识解析成 bundle 名；解析不到返回空串。"""
+    registry = getattr(manager, "profile_registry", None)
+    if registry is None:
+        return ""
+    try:
+        profile = registry.get_any(target_app_id=profile_id)
+    except ProfileNotFoundError, KeyError, FileNotFoundError, ValueError:
+        try:
+            profile = registry.get_any(bundle_name=profile_id)
+        except Exception:  # noqa: BLE001 - 解析失败按「未找到」处理
+            return ""
+    bundle = getattr(profile, "bundle_name", "") if profile is not None else ""
+    return str(bundle or "")
+
+
+def _trace_bundle_name(trace: Any) -> str:
+    """从冻结 Profile / 解析目标里取被测 bundle（分析 hook 的归属判定需要它）。
+
+    与 ``analysis/service.py::ExecutionAnalyzer._trace_bundle`` 同语义，但这里不 import
+    分析栈，避免 API 层与分析层的构造顺序耦合。
+    """
+    profile = getattr(trace, "profile_snapshot", None)
+    if profile is None:
+        resolved = getattr(trace, "resolved_target", None)
+        profile = getattr(resolved, "profile_snapshot", None)
+    bundle = getattr(profile, "bundle_name", "") if profile is not None else ""
+    if bundle:
+        return str(bundle)
+    resolved = getattr(trace, "resolved_target", None)
+    return str(getattr(resolved, "bundle_name", "") or "")
 
 
 def _profile_dir(settings: Settings) -> Path:

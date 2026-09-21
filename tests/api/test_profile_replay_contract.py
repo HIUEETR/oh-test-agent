@@ -101,7 +101,9 @@ def _install_replay(monkeypatch, *, passed: bool):
             evidence_paths=[f"hypium/attempt-{attempt:02d}/stdout.log"],
         )
 
-    monkeypatch.setattr("harmony_test_agent.api.app.HypiumRunner.execute", fake_execute)
+    # 统一构造点迁移到 runner/factory.py（Phase 1）：HypiumRunner 不再是 api.app 的属性，
+    # 直接 patch 类方法本体，对所有构造点生效。
+    monkeypatch.setattr("harmony_test_agent.runner.hypium.HypiumRunner.execute", fake_execute)
 
 
 @pytest.fixture

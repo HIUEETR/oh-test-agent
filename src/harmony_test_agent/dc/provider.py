@@ -70,6 +70,10 @@ com.ohos.sceneboard）或 ability=unknown，先启动/切到目标应用，然�
 但只有 start_app 成功的记录才算数）；禁止猜测占位值（com.example.app / EntryAbility）；\
 (c) 若用户消息已给出应用名/bundle，直接用它；整个会话至少要有一条**成功**的身份记录：\
 bundle 非桌面、ability 非 unknown 的 foreground_app，或带显式 bundle_name/ability_name 且成功的 start_app。
+10. **留意应用异常（这是测试的核心产出）**：出现以下任一现象时，先用 foreground_app 与 collect_logs 取证，\
+然后在回复中明确报告「疑似缺陷」并描述现象，**不要静默绕过**：点击后页面毫无反应、页面空白/全白、\
+应用突然退回桌面、界面元素重叠或越界、长时间无响应。collect_logs 的返回值里若出现 `SUSPECTED CRASH`，\
+说明刚刚采集的日志里命中了崩溃/冻屏模式，必须把它写进你的结论。这类发现比"任务是否跑通"更重要。
 
 ## 回复格式
 - 调用工具时：简要说明你要做什么，然后调用工具。

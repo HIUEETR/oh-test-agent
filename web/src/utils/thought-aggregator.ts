@@ -10,6 +10,18 @@ import type {
   ToolDecisionView,
 } from "../api/types";
 
+/** 异常类别 → 中文标签（与 ``api/defects.ts::ANOMALY_KIND_LABELS`` 同源口径）。 */
+const ANOMALY_KIND_LABELS: Record<string, string> = {
+  cppcrash: "C++ 崩溃",
+  jscrash: "JS 崩溃",
+  appfreeze: "应用冻屏",
+  anr: "无响应 (ANR)",
+  white_screen: "白屏 / 黑屏",
+  page_unresponsive: "页面无响应",
+  layout_anomaly: "布局异常",
+  memory_growth: "内存增长",
+};
+
 export type ThoughtPhase = "think" | "act" | "gate" | "fail";
 
 export type ThoughtBlock =
@@ -31,6 +43,10 @@ export type ThoughtBlock =
   | {
       kind: "page"; id: string; at: string; phase: ThoughtPhase; title: string;
       pagePath: string; imagePath: string; elementCount: number; order: number;
+    }
+  | {
+      kind: "anomaly"; id: string; at: string; phase: ThoughtPhase; title: string;
+      kindLabel: string; severity: string; detail: string;
     }
   | { kind: "notice"; id: string; at: string; phase: ThoughtPhase; title: string; detail: string };
 
@@ -228,6 +244,24 @@ export function aggregateThoughts(events: RunEvent[]): ThoughtBlock[] {
           imagePath: typeof payload.image_path === "string" ? payload.image_path : "",
           elementCount: Number(payload.element_count ?? 0),
           order: Number(payload.discovered_order ?? 0),
+        });
+        break;
+      }
+      case "anomaly_detected":
+      case "defect_recorded": {
+        // Phase 2/3：运行中发现的异常与已入库的缺陷都必须**醒目**地进入思考流，
+        // 而不是被折叠成普通通知。critical 用 fail 相位（红色），其余用 gate（黄色）。
+        const kind = String(payload.kind ?? "");
+        const severity = String(payload.severity ?? "warning");
+        blocks.push({
+          kind: "anomaly", id, at: event.timestamp,
+          phase: severity === "critical" ? "fail" : "gate",
+          title: event.message,
+          kindLabel: ANOMALY_KIND_LABELS[kind] ?? kind ?? event.type,
+          severity,
+          detail: [payload.page_path, payload.action_id]
+            .filter((value) => typeof value === "string" && value)
+            .join(" · "),
         });
         break;
       }

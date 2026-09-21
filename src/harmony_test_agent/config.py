@@ -167,6 +167,39 @@ class Settings(BaseSettings):
     case_analysis_enabled: bool = True
     """执行结果分析总开关；分析仅作附加信息，永不翻转用例 passed。"""
 
+    analysis_on_replay_endpoints: bool = True
+    """``POST /api/runs/{id}/execute``、``POST /api/profiles/{id}/replay`` 与 CLI ``execute``
+    是否在回放结束时附加执行结果分析（阶段 1.5）。"""
+
+    analysis_dc_scripts: bool = True
+    """``POST /api/dc/scripts/run`` 与 DC 蒸馏准入回放是否分析；关闭即回到 DC 零分析。"""
+
+    analysis_collect_logs_on_success: bool = False
+    """干净通过时是否也采 hilog。
+
+    默认关：``analyze_replay`` / ``analyze_run`` 只在失败 / 超时才采 ``hilog -x``，避免把
+    常态路径的 wall clock 拖长。打开后 ``need_logs`` 恒为 True（连同 faultlog 索引）。"""
+
+    # ------------------------------------------------------------------
+    # 运行中即时检测（Phase 2，缺口 2/3）
+    # ------------------------------------------------------------------
+    analysis_in_run_detection: bool = True
+    """运行中即时异常检测总开关；关闭即完全回到「只有事后分析」。"""
+
+    analysis_in_run_probe: bool = True
+    """命中可疑（像素/结构相同）时是否做昂贵取证（前台应用 + hilog + faultlog）。
+
+    关闭后只做纯本地的廉价判定与白屏/布局扫描，不再有任何额外设备调用。"""
+
+    analysis_in_run_screen_scan: bool = True
+    """每步对 after 帧做白屏 / 布局本地扫描（纯本地计算，零设备调用）。"""
+
+    unresponsive_escalate_count: int = Field(default=2, ge=1, le=10)
+    """同一 run 内累计 N 个**不同动作**命中结构停滞后，``PAGE_UNRESPONSIVE`` 升为 critical。
+
+    默认 2：单次无视觉变化是「信号」不是「判决」（例如切换 checkbox 的 selected 而文本不变），
+    因此首次只记 warning 且不中止、不失败。"""
+
     stress_max_iterations: int = Field(default=2000, ge=1, le=5000)
     """压力测试用例允许的最大循环轮数（IR 静态安全门禁的硬上限）。"""
 

@@ -4,8 +4,10 @@
 // （session / graph / script / profiles / runs）。旧深链值
 // （live / advisor / dc → session，report → script）继续兼容，
 // 避免用户收藏或历史记录里的链接失效。
+//
+// Phase 5：新增「缺陷」Tab（defects）。旧深链继续兼容。
 
-export const TAB_KEYS = ["session", "graph", "script", "profiles", "runs"] as const;
+export const TAB_KEYS = ["session", "graph", "script", "profiles", "runs", "defects"] as const;
 export type TabKey = (typeof TAB_KEYS)[number];
 
 /** 旧 tab 值 → 新 tab 值的兼容映射（只在读取深链时生效，不写回地址栏）。 */
@@ -14,6 +16,9 @@ export const LEGACY_TAB_ALIASES: Record<string, TabKey> = {
   advisor: "session",
   dc: "session",
   report: "script",
+  // 缺陷相关的历史别名统一收敛到 defects。
+  defect: "defects",
+  anomaly: "defects",
 };
 
 /** 默认 Tab（无法识别或缺失时使用）。 */
