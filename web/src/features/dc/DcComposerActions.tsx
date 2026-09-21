@@ -52,6 +52,10 @@ export function DcComposerActions() {
     Boolean(activeSessionId) && session?.status !== "closed" && invocationCount > 0 && !busy;
   const disabled = !taskDone;
   const disabledTitle = "任务完成且有录制记录后可点击";
+  // 计划 7：轮次结束（case_suggested）后后端已把推断身份写回会话，
+  // 点击生成/蒸馏直接复用它，不再要求用户手填 bundle/ability。
+  const suggestedBundle = session?.suggested_bundle_name ?? undefined;
+  const suggestedAbility = session?.suggested_main_ability ?? undefined;
 
   const hasPlaceholderIdentity = (artifact: { warnings?: string[] } | null): boolean =>
     Boolean(artifact?.warnings?.some((warning) => warning.includes(PLACEHOLDER_WARNING)));
@@ -130,7 +134,7 @@ export function DcComposerActions() {
         <button
           type="button"
           className={`dc-pill${generating ? " busy" : ""}`}
-          onClick={() => void handleScript()}
+          onClick={() => void handleScript(suggestedBundle, suggestedAbility)}
           disabled={disabled || generating || distilling}
           title={disabled ? disabledTitle : script ? "查看已生成的脚本" : "从本会话录制生成 Hypium 脚本"}
           aria-label="Hypium 脚本"
@@ -142,7 +146,7 @@ export function DcComposerActions() {
         <button
           type="button"
           className={`dc-pill${distilling ? " busy" : ""}`}
-          onClick={() => void handleDistill()}
+          onClick={() => void handleDistill(suggestedBundle, suggestedAbility)}
           disabled={disabled || generating || distilling}
           title={disabled ? disabledTitle : "从本会话录制蒸馏 Profile 资产（后端自动推断应用身份）"}
           aria-label="蒸馏为 Profile"

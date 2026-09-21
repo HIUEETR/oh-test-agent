@@ -230,6 +230,19 @@ def _dynamic_identifier(value: str) -> bool:
     )
 
 
+def is_dynamic_identifier(value: str) -> bool:
+    """公开别名：任务期证据回收需要与验证期完全一致的动态标识判定（计划 3.3）。"""
+    return _dynamic_identifier(value)
+
+
+def dynamic_identifier_pattern(value: str) -> str:
+    """把动态标识折叠为可复用前缀模式（``add_agenda_title-1789951623657`` → ``add_agenda_title-#``）。"""
+    return re.sub(r"\d{6,}", "#", value)
+
+
+__all__.extend(["dynamic_identifier_pattern", "is_dynamic_identifier"])
+
+
 def _dynamic_text(value: str) -> bool:
     text = value.split("|", 1)[-1]
     return bool(

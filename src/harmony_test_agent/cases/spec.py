@@ -211,6 +211,10 @@ class TestStepSpec(BaseModel):
     param_ref: str | None = None
     coordinate: tuple[int, int] | None = None
     direction: Literal["up", "down", "left", "right"] | None = None
+    # 精确滑动（计划 5.5）：同时给出 start/end 时脚本渲染 driver.slide，比方向滑动更可控。
+    start: tuple[int, int] | None = None
+    end: tuple[int, int] | None = None
+    slide_time: float | None = None
     wait_seconds: float | None = None
     key: str | None = None
     checked: bool | None = None

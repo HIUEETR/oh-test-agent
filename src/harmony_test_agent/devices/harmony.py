@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -146,7 +146,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         snapshot_id = f"snap-{uuid.uuid4().hex[:12]}"
         remote_path = f"/data/local/tmp/{run_id}_{snapshot_id}.jpeg"
         local_path = output_dir / f"{label}_{snapshot_id}.png"
-        width, height = self._capture_png(remote_path, local_path)
+        width, height, model_image_path = self._capture_png(remote_path, local_path)
         hierarchy = self.collect_ui_hierarchy()
         hierarchy_path = output_dir.parent / "layouts" / f"{label}_{snapshot_id}.json"
         hierarchy_path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +155,7 @@ class HarmonyDeviceAdapter(DeviceAdapter):
             snapshot_id=snapshot_id,
             run_id=run_id,
             image_path=local_path.resolve(),
+            model_image_path=model_image_path,
             image_sha256=hashlib.sha256(local_path.read_bytes()).hexdigest(),
             width=width,
             height=height,
@@ -163,7 +164,97 @@ class HarmonyDeviceAdapter(DeviceAdapter):
             elements=normalize_layout(hierarchy, width, height),
         )
 
-    def _capture_png(self, remote_path: str, local_path: Path) -> tuple[int, int]:
+    def snapshot_from_capture(
+        self,
+        image_path: Path,
+        run_id: str,
+        *,
+        width: int,
+        height: int,
+        label: str = "screen",
+    ) -> ScreenSnapshot:
+        """JPEG 快速路径配套：图片已就绪，只补采 UI 层级（计划 5.3）。
+
+        ``dc/tools.py`` 原先在 JPEG 快速路径之后又调用一次完整 ``screenshot`` 只为拿元素表，
+        单次 11.5-19.7s 中有一半消耗在这里（实测 9 次截图吃掉 153.5s）。
+        """
+        snapshot_id = f"snap-{uuid.uuid4().hex[:12]}"
+        hierarchy = self.collect_ui_hierarchy()
+        hierarchy_path = image_path.parent.parent / "layouts" / f"{label}_{snapshot_id}.json"
+        hierarchy_path.parent.mkdir(parents=True, exist_ok=True)
+        hierarchy_path.write_text(json.dumps(hierarchy, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        resolved = image_path.resolve()
+        return ScreenSnapshot(
+            snapshot_id=snapshot_id,
+            run_id=run_id,
+            image_path=resolved,
+            model_image_path=resolved,
+            image_sha256=hashlib.sha256(resolved.read_bytes()).hexdigest(),
+            width=width,
+            height=height,
+            page_path=page_path(hierarchy),
+            hierarchy_path=hierarchy_path.resolve(),
+            elements=normalize_layout(hierarchy, width, height),
+        )
+
+    def screenshot_jpeg(
+        self,
+        output_dir: Path,
+        label: str = "screen",
+        on_phase: Callable[[str], None] | None = None,
+    ) -> tuple[Path, bytes, int, int]:
+        """采集设备截图并直接返回 JPEG 字节，不经过 PNG 转换（计划 5.3）。
+
+        逻辑与 ``dc/hdc.py::screenshot_jpeg`` 同源，下沉到设备层以便 DC 与 Live 共用：
+        3 次子进程（snapshot_display → file recv → rm）与 3-8× 更小的上传体积。
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_id = f"snap-{uuid.uuid4().hex[:12]}"
+        remote_path = f"/data/local/tmp/{snapshot_id}.jpeg"
+        local_path = output_dir / f"{label}_{snapshot_id}.jpeg"
+
+        def phase(name: str) -> None:
+            if on_phase is not None:
+                on_phase(name)
+
+        errors: list[str] = []
+        for attempt in range(3):
+            local_path.unlink(missing_ok=True)
+            phase("snapshot_display")
+            capture = self._run("shell", "snapshot_display", "-i", "0", "-f", remote_path)
+            if not capture.ok or "success:" not in capture.stdout.casefold():
+                errors.append(f"capture[{attempt + 1}]: {capture.stderr or capture.stdout}")
+                phase("retry_wait")
+                time.sleep(0.5)
+                continue
+            phase("file_recv")
+            received = self._run("file", "recv", remote_path, str(local_path))
+            if not received.ok or not local_path.exists() or local_path.stat().st_size == 0:
+                errors.append(f"recv[{attempt + 1}]: {received.stderr or received.stdout}")
+                phase("retry_wait")
+                time.sleep(0.5)
+                continue
+            try:
+                phase("decode")
+                with Image.open(local_path) as image:
+                    image.load()
+                    if image.width <= 0 or image.height <= 0:
+                        raise ValueError(f"invalid image size: {image.size}")
+                    width, height = image.size
+                jpeg_bytes = local_path.read_bytes()
+                phase("remote_cleanup")
+                self._run("shell", "rm", "-f", remote_path)
+                return local_path, jpeg_bytes, width, height
+            except Exception as exc:
+                errors.append(f"decode[{attempt + 1}]: {exc}")
+                phase("retry_wait")
+                time.sleep(0.5)
+
+        local_path.unlink(missing_ok=True)
+        detail = "; ".join(errors)[-3000:]
+        raise DeviceError(f"failed to capture JPEG screenshot after 3 attempts: {detail}")
+
+    def _capture_png(self, remote_path: str, local_path: Path) -> tuple[int, int, Path]:
         errors: list[str] = []
         received_path = local_path.with_suffix(".device.jpeg")
         for attempt in range(3):
@@ -188,9 +279,9 @@ class HarmonyDeviceAdapter(DeviceAdapter):
                     image.convert("RGB").save(local_path, format="PNG")
                 with Image.open(local_path) as png:
                     png.verify()
-                received_path.unlink(missing_ok=True)
                 self._run("shell", "rm", "-f", remote_path)
-                return size
+                # 保留设备返回的 JPEG 供模型上传（计划 5.3）：PNG 仅用于报告与证据。
+                return size[0], size[1], received_path.resolve()
             except Exception as exc:
                 errors.append(f"decode[{attempt + 1}]: {exc}")
                 time.sleep(0.5)

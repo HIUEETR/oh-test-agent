@@ -522,7 +522,11 @@ def test_build_from_run_persists_mapped_scenario(tmp_path: Path, cases_root: Pat
         assert record is not None
         return record.spec.scenario
 
-    assert scenario_of(make_eligible_trace(run_id="run-live-mode", live_mode=True)) == ScenarioKind.EXPLORATORY
+    # live-mode / provisional 轨迹是诊断态（计划 R2：purpose=diagnostic、不可回放），
+    # 因此**不会**通过 build_from_run 的合格门槛；场景映射只对强制入库路径生效
+    # （POST /api/cases/from-run/{id}?force=true），这里直接断言映射函数本身。
+    assert scenario_for_trace(make_eligible_trace(run_id="run-live-mode", live_mode=True)) == ScenarioKind.EXPLORATORY
+    assert library.build_from_run(make_eligible_trace(run_id="run-live-mode-2", live_mode=True)) is None
     assert scenario_of(make_eligible_trace(run_id="run-bootstrap", phase="bootstrap")) == ScenarioKind.SMOKE
     assert scenario_of(make_eligible_trace(run_id="run-task")) == ScenarioKind.CORE_FLOW
 

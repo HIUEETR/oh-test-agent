@@ -44,6 +44,8 @@ __all__ = [
     "DiscoveryResult",
     "DiscoveryTransition",
     "ExplorationAction",
+    "is_volatile_evidence_key",
+    "is_volatile_structural_key",
 ]
 
 
@@ -83,6 +85,12 @@ class DiscoveryPage(BaseModel):
     # 旧探索结果缺省为空，验证器据此回退严格全等校验。
     identity_keys: list[str] = Field(default_factory=list)
     identity_interactive: list[str] = Field(default_factory=list)
+    # 因时间/日期/内容实例/列表实例等易变特征被剔除、未进入结构身份的原始 key。
+    # 报告用：解释「为什么这些 key 没进身份」（计划 2.2，additive）。
+    volatile_keys: list[str] = Field(default_factory=list)
+    # 单页应用状态分类：page（真正的独立页面）/ tab_state（同页不同 Tab 选中态）/ dialog（弹窗态）。
+    # 只作报告与诊断元数据，不参与身份哈希或门禁判定（计划 2.3，additive）。
+    state_kind: Literal["page", "tab_state", "dialog"] = "page"
     page_path: str
     bundle_name: str
     ability_name: str | None = None
@@ -209,6 +217,48 @@ _IDENTITY_KEY_ID_PATTERN = re.compile(r"\d+")
 _CONTENT_LIKE_KEY_ID_PATTERN = re.compile(r"\d{4,}")
 _CONTENT_STREAM_KEY_PATTERN = re.compile(r"feed|card|banner|recommend|article|answer|video", re.IGNORECASE)
 _CONTENT_LIKE_TEXT_LIMIT = 40
+# 时间/日期/节假日型 key：日历类应用的日期格与状态栏时钟每次启动都不同，
+# 进入结构身份会让跨启动比对必然失败（实测 com.huawei.hmos.calendar）。
+_VOLATILE_TIME_KEY_PATTERN = re.compile(
+    r"(?i)(^|_)(time|clock|date|day|today|tomorrow|yesterday|lunar|jieqi|holiday|festival)(_|$)"
+    r"|^\d{1,2}_"  # 22___十二_ / 23_秋分_秋分_十三_ 这类日期格
+    r"|timeText$"
+)
+# 列表项实例 key：normal_agenda_list_item193 这类带实例序号的内容项。
+# 序号是必需的：``add_custom_reminder_row`` 这类结构行的尾部词形相同，但它是稳定骨架。
+_LIST_INSTANCE_KEY_PATTERN = re.compile(r"(?i)_(item|card|cell|row|entry)_?\d+$")
+# 弹窗/遮罩容器与 Tab 容器 key：单页应用状态分类使用（计划 2.3，仅作报告元数据）。
+# 刻意不含 menu/toast：菜单按钮与提示条是普通页面元素，会造成大量误判。
+_DIALOG_KEY_PATTERN = re.compile(r"(?i)(dialog|popup|overlay|mask|sheet|alert)")
+_TAB_KEY_PATTERN = re.compile(r"(?i)(^|_)(tab|tabs|tabbar|tabcontent|tab_item)(_|$)")
+
+
+def is_volatile_structural_key(value: str) -> bool:
+    """该 KEY/ID 是否因时间/内容实例特征而不应进入结构身份或长期证据库。
+
+    与 :meth:`BoundedExplorer._identity_key_set` 共用同一组 pattern：页面身份判定与
+    任务期证据回收（orchestrator）必须对「什么算易变」给出一致答案（计划 2.2/3.3）。
+    """
+    if not value:
+        return True
+    return bool(
+        _CONTENT_LIKE_KEY_ID_PATTERN.search(value)
+        or _CONTENT_STREAM_KEY_PATTERN.search(value)
+        or _VOLATILE_TIME_KEY_PATTERN.search(value)
+        or _LIST_INSTANCE_KEY_PATTERN.search(value)
+    )
+
+
+def is_volatile_evidence_key(value: str) -> bool:
+    """任务期证据回收专用的易变判定（计划 3.3）：只含时间/日期型与列表实例型 key。
+
+    比 :func:`is_volatile_structural_key` 更窄：带长数字实例 ID 的内容 key
+    （``add_agenda_title-1789951623657``）在证据回收里会被折叠成 ``add_agenda_title-#``
+    继续复用，而时钟、日期格与列表实例序号每次启动都会变，必须丢弃。
+    """
+    if not value:
+        return True
+    return bool(_VOLATILE_TIME_KEY_PATTERN.search(value) or _LIST_INSTANCE_KEY_PATTERN.search(value))
 
 
 class BoundedExplorer:
@@ -573,24 +623,31 @@ class BoundedExplorer:
     ) -> tuple[ScreenSnapshot, ForegroundApp]:
         """Cheaply return to the source page between candidates; cold restore is the last resort.
 
-        队列出队的冷启动回放承担路径验证；候选动作之间先看落地页身份、再试一次 back，
-        都失败才走冷启动重放。input 动作因软键盘污染状态必须冷恢复，优先于身份检查。
+        队列出队的冷启动回放承担路径验证；候选动作之间按代价递增三级恢复：
+
+        1. 落地页身份与源页一致 → 直接复用当前帧（零设备动作）；
+        2. 连续 ``back``（至多 ``restore_retries + 1`` 次）逐次校验身份；
+        3. 仍不匹配才走 ``stop_app`` + ``start_app`` + 全路径重放。
+
+        计划 4.3：``input`` 动作原先**无条件**冷恢复，是单动作最大开销；软键盘通常只需一次
+        ``back`` 即可消除，落地页身份未变时更不该重启应用。因此改为与其它动作同一路径。
         """
-        if action.kind == "input":
-            return self._restore_path(path, expected, expected_foreground, sequence)
         if after is not None and transition.foreground_after:
             if self._structural_identity(after, transition.foreground_after) == source_identity:
                 return after, transition.foreground_after
-        backed = self.device.back()
-        if backed.ok:
+        cheap_limit = max(1, self.policy.restore_retries + 1)
+        for attempt in range(1, cheap_limit + 1):
+            backed = self.device.back()
+            if not backed.ok:
+                break
             self.device.wait(0.5)
             try:
                 recovered_foreground = self._assert_target_foreground()
-                recovered = self._capture_settled(f"recover-{sequence:03d}")
-                if self._structural_identity(recovered, recovered_foreground) == source_identity:
-                    return recovered, recovered_foreground
+                recovered = self._capture_settled(f"recover-{sequence:03d}-{attempt:02d}")
             except DeviceError:
-                pass
+                break
+            if self._structural_identity(recovered, recovered_foreground) == source_identity:
+                return recovered, recovered_foreground
         return self._restore_path(path, expected, expected_foreground, sequence)
 
     def _action(
@@ -852,19 +909,60 @@ class BoundedExplorer:
         return expected_interactive.issubset(actual_interactive)
 
     @staticmethod
+    def _identity_key_set(elements: list[UIElement]) -> tuple[set[str], list[str]]:
+        """折叠后的结构骨架 key 集合，以及被判定为易变而剔除的原始 key。
+
+        唯一实现（计划 2.1/2.2）：``_structural_features`` 与 ``_structural_identity``
+        必须用同一套折叠与过滤规则。此前 ``_structural_features`` 只折叠 ``\\d{4,}``，
+        而 ``_structural_identity`` 折叠 ``\\d+``，于是 1-2 位日期数字在身份哈希里被折叠、
+        在 ``_identity_subset`` 子集判定里被保留，同一份证据两套判定必然打架（R7）。
+
+        被剔除的 key 分三类：长数字/哈希型内容实例 ID、信息流容器（feed/card/...）、
+        时间与日期型 key、列表项实例 key（``_item193``）。
+
+        选中态（``selected``）以 ``#selected`` 后缀参与骨架：同页不同 Tab 选中态因此
+        拥有不同身份，仍可被计为「不同的页面状态」；仅切换 Tab 不会改变物理 page_path。
+        """
+        keys: set[str] = set()
+        volatile: list[str] = []
+        for item in elements:
+            raw = item.key or item.id
+            if not raw:
+                continue
+            if is_volatile_structural_key(raw):
+                volatile.append(raw)
+                continue
+            folded = _IDENTITY_KEY_ID_PATTERN.sub("#", raw)
+            keys.add(f"{folded}#selected" if item.selected else folded)
+        return keys, volatile
+
+    @staticmethod
     def _structural_features(snapshot: ScreenSnapshot) -> tuple[set[str], set[tuple[str, bool, bool, bool]]]:
-        """卡片 key 常携带内容实例 ID（如知乎流卡片），长数字串折叠后才能跨启动比较同类结构。"""
-        keys = {
-            _STRUCTURAL_KEY_ID_PATTERN.sub("#", item.key or item.id)
-            for item in snapshot.elements
-            if item.key or item.id
-        }
+        """结构骨架 key（统一折叠规则 + 易变 key 过滤）与可交互结构。"""
+        keys, _ = BoundedExplorer._identity_key_set(snapshot.elements)
         interactive = {
             (item.type, item.clickable, item.editable, item.scrollable)
             for item in snapshot.elements
             if item.clickable or item.editable or item.scrollable
         }
         return keys, interactive
+
+    @staticmethod
+    def _state_kind(elements: list[UIElement]) -> Literal["page", "tab_state", "dialog"]:
+        """单页应用状态分类（计划 2.3，additive 元数据，不参与任何门禁）。
+
+        优先级：出现遮罩/弹窗容器 key → ``dialog``；出现带选中态的 Tab 容器 key →
+        ``tab_state``（同一 ``page_path`` 的不同 Tab 状态）；其余 → ``page``。
+        """
+        for item in elements:
+            raw = item.key or item.id
+            if raw and _DIALOG_KEY_PATTERN.search(raw):
+                return "dialog"
+        for item in elements:
+            raw = item.key or item.id
+            if raw and item.selected and _TAB_KEY_PATTERN.search(raw):
+                return "tab_state"
+        return "page"
 
     @classmethod
     def _structural_identity(cls, snapshot: ScreenSnapshot, foreground: ForegroundApp) -> str:
@@ -875,14 +973,9 @@ class BoundedExplorer:
         feed/card 等内容容器会随推荐内容在"存在/不存在"之间翻转（知乎首页实测存在
         feed_list 与 feed_card_article 两个互不为子集的变体），只保留结构骨架才能
         让"同一页面、不同内容实例"收敛为同一逻辑页。
+        时间/日期型 key 同样剔除：日历类应用的状态栏时钟与日期格每次启动都不同（R7）。
         """
-        keys = {
-            _IDENTITY_KEY_ID_PATTERN.sub("#", item.key or item.id)
-            for item in snapshot.elements
-            if (item.key or item.id)
-            and not _CONTENT_LIKE_KEY_ID_PATTERN.search(item.key or item.id)
-            and not _CONTENT_STREAM_KEY_PATTERN.search(item.key or item.id)
-        }
+        keys, _ = cls._identity_key_set(snapshot.elements)
         _, interactive = cls._structural_features(snapshot)
         raw = json.dumps(
             [
@@ -966,11 +1059,14 @@ class BoundedExplorer:
     ) -> DiscoveryPage:
         signature = BoundedExplorer._snapshot_signature(snapshot, foreground)
         identity_keys, identity_interactive = BoundedExplorer._structural_features(snapshot)
+        _, volatile_keys = BoundedExplorer._identity_key_set(snapshot.elements)
         return DiscoveryPage(
             page_id=f"page-{signature[:12]}",
             signature=signature,
             structural_identity=structural_identity or BoundedExplorer._structural_identity(snapshot, foreground),
             identity_keys=sorted(identity_keys),
+            volatile_keys=sorted(set(volatile_keys)),
+            state_kind=BoundedExplorer._state_kind(snapshot.elements),
             identity_interactive=sorted(
                 f"{kind}/{clickable}/{editable}/{scrollable}"
                 for kind, clickable, editable, scrollable in identity_interactive

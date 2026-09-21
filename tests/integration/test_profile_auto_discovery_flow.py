@@ -292,6 +292,7 @@ def _settings(
     *,
     rounds: int | None = None,
     attempts: int | None = None,
+    bootstrap: bool = True,
 ) -> Settings:
     overrides: dict[str, int] = {}
     if rounds is not None:
@@ -306,6 +307,10 @@ def _settings(
         runtime_home=tmp_path / "runtime-home",
         agent_provider="mock",
         unchanged_screen_limit=2,
+        # 本文件验证的是「同一次运行先探索晋级再执行任务」的显式流水线：计划 4.2 之后
+        # 任务型运行默认不再前置完整探索（BOOTSTRAP_ENABLED_ON_TASK_RUN=false），
+        # 因此这里显式打开；新默认由 test_bootstrap_disabled_by_default_on_task_run 覆盖。
+        bootstrap_enabled_on_task_run=bootstrap,
         **overrides,
     )
 
@@ -628,6 +633,7 @@ async def test_provisional_profile_blocks_formal_hypium_generation_and_execution
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """临时测试（provisional）不得执行正式 Hypium，但产物仍以 diagnostic 形式保留（计划 R2/R3）。"""
     device = FlowDevice(tmp_path)
     orchestrator = _orchestrator(tmp_path, device)
     _patch_discovery(monkeypatch, verification_passed=False)
@@ -650,16 +656,23 @@ async def test_provisional_profile_blocks_formal_hypium_generation_and_execution
         run_id="run-provisional",
     )
 
-    draft = ProfileRegistry(orchestrator.settings.resolved_profiles_dir).read(
-        TARGET_A,
-        ProfileStatus.INVALID,
-    )
+    registry = ProfileRegistry(orchestrator.settings.resolved_profiles_dir)
+    draft = registry.get_any(bundle_name=BUNDLE_A)
     assert trace.state == RunState.COMPLETED, trace.error
     assert trace.provisional is True
-    assert draft.status == ProfileStatus.INVALID
-    assert trace.generated is None
+    # 失败草稿按新语义落盘：有定位器（含任务期回收）→ DRAFT，完全为空 → INVALID。
+    assert draft is not None
+    if draft.stable_locator_inventory:
+        assert draft.status == ProfileStatus.DRAFT
+    else:
+        assert draft.status == ProfileStatus.INVALID
     assert trace.replays == []
     assert replay_called is False
+    # 自动回放被关闭 ≠ 放弃脚本生成：provisional 产物必须是不可回放的诊断脚本。
+    assert trace.generated is not None
+    assert trace.generated.purpose == "diagnostic"
+    assert trace.generated.replay_eligible is False
+    assert trace.generated.python_path.exists()
 
 
 def test_trace_only_generation_uses_frozen_profile_after_external_profile_change(tmp_path: Path) -> None:
@@ -901,7 +914,7 @@ def test_profile_api_lifecycle_errors_and_explicit_history_rollback(tmp_path: Pa
 
 
 async def test_live_mode_runs_original_task_without_profile(tmp_path: Path) -> None:
-    """无 verified Profile 且探索关闭时进入实时模式：任务照常执行，不生成脚本。"""
+    """无 verified Profile 且探索关闭时进入实时模式：任务照常执行，产物以诊断脚本保留。"""
     device = FlowDevice(tmp_path)
     orchestrator = _orchestrator(tmp_path, device)
 
@@ -918,8 +931,13 @@ async def test_live_mode_runs_original_task_without_profile(tmp_path: Path) -> N
 
     assert trace.state == RunState.COMPLETED, trace.error
     assert trace.live_mode is True
-    assert trace.profile_snapshot is None
-    assert trace.generated is None
+    # 磁盘无任何 Profile：运行期为生成产物合成一份最小快照（计划 R2/G1），
+    # 它不写盘、不构成晋级证据，脚本因此必然是 diagnostic / 不可回放。
+    assert trace.profile_snapshot is not None
+    assert trace.profile_snapshot.provenance.evidence["live_mode"] is True
+    assert trace.generated is not None
+    assert trace.generated.purpose == "diagnostic"
+    assert trace.generated.replay_eligible is False
     assert trace.replays == []
     assert any(event.type == EventType.PROFILE_LIVE_MODE for event in trace.events)
     assert any(event.type == EventType.ORIGINAL_TASK_STARTED for event in trace.events)
@@ -942,10 +960,12 @@ async def test_failed_profile_verification_downgrades_to_live_mode(tmp_path: Pat
 
     assert trace.state == RunState.COMPLETED, trace.error
     assert trace.live_mode is True
-    # 失败草稿保留为 INVALID 证据，实时模式不使用它生成脚本
+    # 失败草稿保留为证据（无定位器 ⇒ INVALID，有回收定位器 ⇒ DRAFT），实时模式仍从它生成诊断脚本。
     assert trace.profile_snapshot is not None
-    assert trace.profile_snapshot.status == ProfileStatus.INVALID
-    assert trace.generated is None
+    expected_status = ProfileStatus.DRAFT if trace.profile_snapshot.stable_locator_inventory else ProfileStatus.INVALID
+    assert trace.profile_snapshot.status == expected_status
+    assert trace.generated is not None
+    assert trace.generated.purpose == "diagnostic"
     live_events = [event for event in trace.events if event.type == EventType.PROFILE_LIVE_MODE]
     assert live_events
     registry = ProfileRegistry(orchestrator.settings.resolved_profiles_dir)

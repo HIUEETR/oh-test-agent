@@ -15,6 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from ..cases.builder import NON_REPLAYABLE_DC_TOOLS
 from ..config import Settings
 from ..devices.harmony import HarmonyDeviceAdapter
 from ..discovery import ProfileVerifier
@@ -246,6 +247,8 @@ class DcSession:
         self.active_turn_id: str | None = None
         self.last_page_path: str | None = None
         self.last_foreground_app: str | None = None
+        # 轮次结束时自动推断出的可复用身份（计划 7）：供生成脚本/蒸馏直接复用，不必手填。
+        self.suggested_identity: tuple[str, str] | None = None
         # 会话自己观测到的「目标应用身份」(bundle, ability)：
         # 每次上下文采集都会 dump 一次 UI 层级，里面就带 focused 窗口的 bundleName/abilityName。
         # 只认第一个「非系统界面」的观测结果（后续可能切到桌面/输入法等，不应劫持会话身份）。
@@ -673,7 +676,40 @@ class DcSession:
             },
         )
         self._schedule_checkpoint(force=True)
+        self._suggest_reusable_case(turn)
         self.save_state()
+
+    def _suggest_reusable_case(self, turn: DcTurnRecord) -> None:
+        """轮次成功且有可回放录制时自动推断身份并发 ``CASE_SUGGESTED``（计划 7/R16）。
+
+        本次 DC 会话跑通了任务却 ``bundle_name: None``、``generated/`` 为空：任务完成却没留下
+        任何可复用产物，用户点「生成脚本」还要手填 bundle。这里只做「推断 + 提示」，
+        **不**自动写盘生成脚本（避免产物膨胀），身份同时写回会话供生成/蒸馏直接使用。
+        """
+        if not self.settings.dc_auto_resolve_identity:
+            return
+        if turn.status != DcTurnStatus.COMPLETED:
+            return
+        invocations = self.recorder.turn_invocations(turn.turn_id)
+        replayable = [inv for inv in invocations if inv.tool not in NON_REPLAYABLE_DC_TOOLS and inv.success]
+        if not replayable:
+            return
+        identity = infer_session_identity(self)
+        if identity is None:
+            return
+        bundle_name, main_ability = identity
+        self.suggested_identity = identity
+        self._emit(
+            DcEventType.CASE_SUGGESTED,
+            f"本轮可沉淀为用例：{bundle_name}/{main_ability}（{len(replayable)} 步）",
+            {
+                "session_id": self.session_id,
+                "turn_id": turn.turn_id,
+                "bundle_name": bundle_name,
+                "main_ability": main_ability,
+                "replayable_steps": len(replayable),
+            },
+        )
 
     def _flag_unresolved_effects(self, turn_id: str) -> None:
         """兜底扫描：本轮仍存在运行中或副作用未知的调用时必须人工对账。
@@ -926,7 +962,8 @@ class DcSession:
         但只作为诊断脚本（占位警告保留，行为与改动前一致）。
         """
         explicit = (bundle_name, main_ability) if (bundle_name and main_ability) else None
-        identity = explicit or infer_session_identity(self)
+        # 计划 7：优先用轮次结束自动推断出的身份，其次现场推断，最后才是占位身份。
+        identity = explicit or self.suggested_identity or infer_session_identity(self)
         resolved_bundle, resolved_ability = identity or ("com.example.app", "EntryAbility")
         generator = DcHypiumGenerator(self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds)
         snapshots = [self.snapshot_holder.latest] if self.snapshot_holder.latest else []
@@ -1021,6 +1058,17 @@ class DcSession:
             active_turn_id=self.active_turn_id,
             continuation=self.continuation,
             token_usage=self.token_usage,
+            suggested_bundle_name=self.suggested_identity[0] if self.suggested_identity else None,
+            suggested_main_ability=self.suggested_identity[1] if self.suggested_identity else None,
+            suggested_step_count=self._suggested_step_count() if self.suggested_identity else 0,
+        )
+
+    def _suggested_step_count(self) -> int:
+        """当前录制里可回放的步骤数（与生成脚本时的口径一致）。"""
+        return sum(
+            1
+            for invocation in self.recorder.invocations
+            if invocation.tool not in NON_REPLAYABLE_DC_TOOLS and invocation.success
         )
 
     # ------------------------------------------------------------------

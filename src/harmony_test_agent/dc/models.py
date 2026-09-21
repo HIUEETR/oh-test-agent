@@ -401,6 +401,7 @@ class DcEventType(StrEnum):
     TOKEN_USAGE_UPDATED = "token_usage_updated"  # 会话 token 用量/缓存命中率更新
     SCRIPT_GENERATED = "script_generated"
     CASE_CREATED = "case_created"  # 会话录制已沉淀为可复用用例
+    CASE_SUGGESTED = "case_suggested"  # 轮次结束自动推断出可复用身份（计划 7）
     PROFILE_DISTILL_STARTED = "profile_distill_started"
     PROFILE_DISTILL_FINISHED = "profile_distill_finished"
     PROFILE_DISTILL_FAILED = "profile_distill_failed"
@@ -569,6 +570,11 @@ class DcSessionView(BaseModel):
     continuation: DcContinuationContext | None = None
     # 会话内累计 token 用量与缓存命中率（来自 provider 真实响应）
     token_usage: DcTokenUsage | None = None
+    # 轮次结束自动推断出的可复用身份（计划 7）：前端据此直接启用「生成脚本/保存用例」，
+    # 不再要求用户手填 bundle/ability（本次实测 session 上 bundle_name 为 None）。
+    suggested_bundle_name: str | None = None
+    suggested_main_ability: str | None = None
+    suggested_step_count: int = 0
 
 
 class DcSessionSummary(BaseModel):

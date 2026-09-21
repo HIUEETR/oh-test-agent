@@ -110,6 +110,20 @@ def new_case_id() -> str:
     return f"case-{utc_now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
 
 
+def _swipe_points_from_params(params: dict[str, Any]) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+    """从动作参数里读出显式滑动起止坐标（计划 5.5），非法输入一律忽略。"""
+
+    def point(value: Any) -> tuple[int, int] | None:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            try:
+                return (int(value[0]), int(value[1]))
+            except TypeError, ValueError:
+                return None
+        return None
+
+    return point(params.get("start")), point(params.get("end"))
+
+
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
 
@@ -248,10 +262,13 @@ class CaseBuilder:
                         f"{action.step_id}: unknown swipe direction {action.params.get('direction')!r}, fallback to UP"
                     )
                     direction = "UP"
+                start_point, end_point = _swipe_points_from_params(action.params)
                 add_step(
                     StepAction.SWIPE,
                     step_id=action.step_id,
                     direction=direction.lower(),  # type: ignore[arg-type]
+                    start=start_point,
+                    end=end_point,
                 )
                 generated_actions += 1
             elif tool == ToolName.BACK:
@@ -882,6 +899,10 @@ class CaseBuilder:
         reasons: list[str] = []
         if trace.provisional:
             reasons.append("provisional trace cannot qualify for acceptance replay")
+        if trace.live_mode:
+            # 实时模式降级运行的定位器/断言都未经设备验证：产物保留为诊断脚本，
+            # 只有 purpose="diagnostic" 才如实表达它不能作为验收证据（计划 R2/G1）。
+            reasons.append("live-mode trace cannot qualify for acceptance replay")
         if outcome != "completed":
             reasons.append(f"source agent outcome is {outcome}")
         if trace.agent_error:

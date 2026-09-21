@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import logging
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
@@ -15,15 +17,19 @@ from ..models import (
     PlannedStep,
     PlanResult,
     ScreenSnapshot,
+    StepHistoryEntry,
     TargetAppProfile,
     ToolDecision,
     ToolName,
+    VisionElement,
     VisionObservation,
 )
 from ..targets import ResolvedTarget
 
 if TYPE_CHECKING:
     from openai.types import chat
+
+logger = logging.getLogger(__name__)
 
 
 class PlanningContext(BaseModel):
@@ -65,7 +71,9 @@ Follow the requested behavior exactly: entering text does not imply submitting a
 submission or search-result assertion unless the user explicitly asks for it. When navigating away after text input,
 account for the soft keyboard: one back may dismiss the keyboard before another back changes the app page. Never plan
 login, payment, captcha, deletion, permission grant, or arbitrary shell commands. Include explicit assertions and end
-with finish.
+with finish. The expected text of assert_text must be copied verbatim from text you actually observed on screen in the
+most recent observation; never invent a display format from the task wording (a task that says "1pm" may render as
+"01:00 PM"). If you cannot be sure of the exact text, use assert_visible with a locator instead.
 """
 
 VISION_PROMPT = """Analyze this OpenHarmony screenshot. Return a concise page title and summary plus actionable
@@ -80,7 +88,10 @@ current screenshot proves it inappropriate. For click_element and input_text, us
 elements as target; do not return a descriptive label when an exact element_id exists. If a visible control is absent
 from Current elements but is unambiguous in the screenshot, use click_coordinate with pixel coordinates relative to
 the supplied image. For wheel pickers (hour/minute/AM-PM columns), set swipe target to the column's element_id to
-swipe inside that column instead of at the screen center. When recovery feedback is provided, the previous attempt at
+swipe inside that column instead of at the screen center. When operating a wheel or time picker: first read the y
+coordinates of two adjacent visible rows to derive the row pitch, then compute how many rows you must move, choose the
+shorter direction, and express it with steps (or explicit start/end coordinates); never click a wheel row with blind
+coordinates. When recovery feedback is provided, the previous attempt at
 this step failed: you may first take corrective actions (for example an anchored swipe inside a wheel column or
 clicking another control) and re-attempt the planned goal, including re-issuing its assertion once the state matches.
 Do not guess that a hierarchy element represents a visual
@@ -90,6 +101,30 @@ in-app back control because a system back may only dismiss the keyboard. If the 
 use inspect_screen instead of navigating away. Never emit shell commands, multiple actions, login, payment, captcha,
 deletion, or permission-grant actions. Never choose finish unless the planned step tool is finish.
 """
+
+OBSERVE_AND_DECIDE_PROMPT = (
+    VISION_PROMPT
+    + "\n"
+    + DECISION_PROMPT
+    + """
+Return one JSON object containing BOTH the page observation (page_title, summary, elements) and the single tool
+decision (decision). The observation must describe the screenshot you are looking at; the decision must be valid for
+the planned step against that same screenshot.
+"""
+)
+
+
+class ObservationAndDecision(BaseModel):
+    """一次视觉请求同时返回页面观测与工具决策（计划 5.1，把每步两次调用压成一次）。"""
+
+    page_title: str = ""
+    summary: str = ""
+    elements: list[VisionElement] = Field(default_factory=list)
+    decision: ToolDecision
+
+    def observation(self) -> VisionObservation:
+        """把组合模型里的观测部分还原为 ``VisionObservation``。"""
+        return VisionObservation(page_title=self.page_title, summary=self.summary, elements=list(self.elements))
 
 
 _SEARCH_SUBMISSION_REQUESTS = (
@@ -113,6 +148,30 @@ _SEARCH_FLOW_MARKERS = (
     "search results",
 )
 _HOME_RETURN_MARKERS = ("返回首页", "回到首页", "return home")
+
+
+def render_decision_history(history: list[StepHistoryEntry] | None) -> str:
+    """把跨步历史渲染为紧凑提示（计划 5.4，格式借鉴 DC 的 ``DcContinuationContext.to_prompt``）。"""
+    if not history:
+        return ""
+    lines = ["Previously executed steps on this run (oldest first):"]
+    for item in history:
+        outcome = "ok" if item.ok else "failed"
+        detail = f" target={item.target!r}" if item.target else ""
+        page = f" page={item.page_path}" if item.page_path else ""
+        note = f" note={item.note}" if item.note else ""
+        lines.append(f"- #{item.index} {item.tool}{detail} -> {outcome}{page}{note}")
+    return "\n".join(lines)
+
+
+def _with_history(feedback: str | None, history: list[StepHistoryEntry] | None) -> str | None:
+    """把历史与恢复反馈合并为单一 feedback 文本（历史在前，失败反馈在后）。"""
+    rendered = render_decision_history(history)
+    if not rendered:
+        return feedback
+    if not feedback:
+        return rendered
+    return f"{rendered}\nRecovery feedback: {feedback}"
 
 
 def _step_text(step: PlannedStep) -> str:
@@ -218,6 +277,32 @@ class AgentProvider(ABC):
     ) -> ToolDecision:
         """结合计划步骤和当前快照选择一个受支持的工具动作；feedback 为恢复尝试的失败反馈。"""
         ...
+
+    async def observe_and_decide(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        *,
+        feedback: str | None = None,
+        history: list[StepHistoryEntry] | None = None,
+    ) -> tuple[VisionObservation | None, ToolDecision]:
+        """一次拿到当前帧的观测与工具决策（计划 5.1）。
+
+        基类默认实现是顺序调用 ``analyze`` + ``decide``，保持向后兼容；支持组合结构化输出的
+        provider 覆写为**单次**模型请求，把 Live 每步两次视觉往返压成一次。
+        """
+        observation = await self.analyze(snapshot) if snapshot is not None else None
+        decision = await self.decide(step, snapshot, feedback=_with_history(feedback, history))
+        return observation, decision
+
+    def supports_combined_observation(self) -> bool:
+        """编排器是否应把每步路由到 :meth:`observe_and_decide`（计划 5.1）。
+
+        默认 ``False``：只有真正实现了单次组合请求的 provider 才返回 True。这样自定义
+        provider（以及未开启合并的配置）继续走既有的「观测 → 决策」两次调用路径，
+        连带保留其各自的失败语义（例如视觉分析失败 = ``vision analysis failed``）。
+        """
+        return False
 
     async def advise_turn(
         self,
@@ -478,6 +563,46 @@ class OpenAICompatibleProvider(AgentProvider):
         )
         return usage_aware_chat_model_class()(model_name, provider=provider)
 
+    def _image_payload(self, snapshot: ScreenSnapshot) -> tuple[bytes, str]:
+        """按配置选择上传格式；JPEG 显著降低上传字节数与端到端延迟（计划 5.2/5.3）。"""
+        source = snapshot.image_path
+        if self.settings.model_image_format == "jpeg":
+            if snapshot.model_image_path is not None and snapshot.model_image_path.exists():
+                # 设备已返回 JPEG：直接上传，省掉一次 PNG 解码 + JPEG 编码。
+                source = snapshot.model_image_path
+            if source.suffix.lower() in {".jpeg", ".jpg"}:
+                return source.read_bytes(), "image/jpeg"
+            try:
+                from PIL import Image
+
+                with Image.open(source) as image:
+                    buffer = io.BytesIO()
+                    image.convert("RGB").save(buffer, format="JPEG", quality=80)
+                return buffer.getvalue(), "image/jpeg"
+            except Exception as exc:  # noqa: BLE001 - 解码失败回退 PNG，绝不因此中断运行
+                logger.warning("JPEG conversion failed (%s); falling back to PNG bytes", exc)
+        return snapshot.image_path.read_bytes(), "image/png"
+
+    def _element_payload(self, snapshot: ScreenSnapshot, *, with_identity: bool) -> list[dict[str, Any]]:
+        """按得分排序取前 N 个元素：整页全量列表是单次延迟的另一主因（计划 5.2）。"""
+        limit = max(int(self.settings.model_element_limit), 1)
+        ranked = sorted(snapshot.elements, key=lambda item: (-item.score, item.element_id))[:limit]
+        payload: list[dict[str, Any]] = []
+        for item in ranked:
+            entry: dict[str, Any] = {
+                "element_id": item.element_id,
+                "content": item.content,
+                "type": item.type,
+                "bbox": item.bbox.model_dump() if item.bbox else None,
+                "clickable": item.clickable,
+                "editable": item.editable,
+            }
+            if with_identity:
+                entry["key"] = item.key
+                entry["id"] = item.id
+            payload.append(entry)
+        return payload
+
     async def plan(self, task: str, context: PlanningContext, max_steps: int) -> PlanResult:
         """将用户任务规划为不超过上限的原子步骤。"""
         from pydantic_ai import Agent
@@ -559,23 +684,11 @@ class OpenAICompatibleProvider(AgentProvider):
             system_prompt=VISION_PROMPT,
             retries=2,
         )
-        hierarchy = [
-            {
-                "element_id": item.element_id,
-                "content": item.content,
-                "type": item.type,
-                "bbox": item.bbox.model_dump() if item.bbox else None,
-                "clickable": item.clickable,
-                "editable": item.editable,
-            }
-            for item in snapshot.elements[:120]
-        ]
+        hierarchy = self._element_payload(snapshot, with_identity=False)
         prompt = f"Image size: {snapshot.width}x{snapshot.height}. Existing UI hierarchy: {hierarchy}"
+        data, media_type = self._image_payload(snapshot)
         result = await agent.run(
-            [
-                prompt,
-                BinaryContent(data=snapshot.image_path.read_bytes(), media_type="image/png"),
-            ],
+            [prompt, BinaryContent(data=data, media_type=media_type)],
             model_settings=self._model_settings(),
         )
         return result.output
@@ -601,29 +714,75 @@ class OpenAICompatibleProvider(AgentProvider):
         if snapshot is None:
             result = await agent.run(f"Planned step: {step.model_dump_json()}", model_settings=self._model_settings())
             return result.output
-        elements = [
-            {
-                "element_id": item.element_id,
-                "content": item.content,
-                "key": item.key,
-                "id": item.id,
-                "bbox": item.bbox.model_dump() if item.bbox else None,
-                "clickable": item.clickable,
-                "editable": item.editable,
-            }
-            for item in snapshot.elements[:120]
-        ]
+        elements = self._element_payload(snapshot, with_identity=True)
         prompt = f"Planned step: {step.model_dump_json()}\nCurrent elements: {elements}"
         if feedback:
             prompt += f"\nRecovery feedback: {feedback}"
+        data, media_type = self._image_payload(snapshot)
         result = await agent.run(
-            [
-                prompt,
-                BinaryContent(data=snapshot.image_path.read_bytes(), media_type="image/png"),
-            ],
+            [prompt, BinaryContent(data=data, media_type=media_type)],
             model_settings=self._model_settings(),
         )
         return result.output
+
+    def supports_combined_observation(self) -> bool:
+        """开启 ``MERGE_OBSERVE_AND_DECIDE`` 时把每步压成一次视觉请求（计划 5.1）。"""
+        return bool(self.settings.merge_observe_and_decide)
+
+    async def observe_and_decide(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        *,
+        feedback: str | None = None,
+        history: list[StepHistoryEntry] | None = None,
+    ) -> tuple[VisionObservation | None, ToolDecision]:
+        """单次请求同时得到观测与决策（计划 5.1）；组合输出失败时自动回退为两次调用。"""
+        if snapshot is None:
+            return None, await self.decide(step, None, _with_history(feedback, history))
+        try:
+            return await self._observe_and_decide_once(step, snapshot, feedback, history)
+        except Exception as exc:  # noqa: BLE001 - 组合模型不可靠时回退，保证决策质量与可用性
+            logger.warning("combined observe+decide failed (%s); falling back to two calls", exc)
+            return await super().observe_and_decide(step, snapshot, feedback=feedback, history=history)
+
+    async def _observe_and_decide_once(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot,
+        feedback: str | None,
+        history: list[StepHistoryEntry] | None,
+    ) -> tuple[VisionObservation | None, ToolDecision]:
+        from pydantic_ai import Agent, BinaryContent
+
+        agent = Agent(
+            self._model(vision=True),
+            output_type=self._structured_output(
+                ObservationAndDecision,
+                "The page observation and the single tool decision in one JSON object with page_title, summary, "
+                "elements and decision.",
+            ),
+            system_prompt=OBSERVE_AND_DECIDE_PROMPT,
+            retries=2,
+        )
+        elements = self._element_payload(snapshot, with_identity=True)
+        prompt = (
+            f"Image size: {snapshot.width}x{snapshot.height}.\n"
+            f"Planned step: {step.model_dump_json()}\n"
+            f"Current elements: {elements}"
+        )
+        rendered_history = render_decision_history(history)
+        if rendered_history:
+            prompt += f"\n{rendered_history}"
+        if feedback:
+            prompt += f"\nRecovery feedback: {feedback}"
+        data, media_type = self._image_payload(snapshot)
+        result = await agent.run(
+            [prompt, BinaryContent(data=data, media_type=media_type)],
+            model_settings=self._model_settings(),
+        )
+        combined: ObservationAndDecision = result.output
+        return combined.observation(), combined.decision
 
     async def advise_turn(
         self,

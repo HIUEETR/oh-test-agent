@@ -50,6 +50,21 @@ describe("aggregateThoughts", () => {
     }
   });
 
+  it("合并视觉请求：摘要随后的 elements_detected 回填，不产生重复感知块", () => {
+    // 后端在合并模式下先推送画面（summary 为空），观测完成后补发带摘要的 elements_detected。
+    const blocks = aggregateThoughts([
+      makeEvent("screen_captured", { snapshot_id: "s-2", image_path: "/y.png", summary: "" }),
+      makeEvent("elements_detected", { snapshot_id: "s-2", count: 8, summary: "日历月视图" }),
+    ]);
+    expect(blocks).toHaveLength(1);
+    if (blocks[0].kind === "perception") {
+      expect(blocks[0].elementCount).toBe(8);
+      expect(blocks[0].summary).toBe("日历月视图");
+    } else {
+      expect.unreachable("应为 perception 块");
+    }
+  });
+
   it("action_finished 的结果合并进对应步骤块并切换相位", () => {
     const blocks = aggregateThoughts([
       makeEvent("action_started", { step_id: "s1", decision: { tool: "click", target: "设置" } }, "打开设置"),

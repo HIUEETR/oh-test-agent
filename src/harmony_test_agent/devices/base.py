@@ -70,6 +70,22 @@ class DeviceAdapter(ABC):
         """返回当前前台应用；旧适配器可返回未知。"""
         return None
 
+    def snapshot_from_capture(
+        self,
+        image_path: Path,
+        run_id: str,
+        *,
+        width: int,
+        height: int,
+        label: str = "screen",
+    ) -> ScreenSnapshot:
+        """用已采集的图片构造快照，只补采 UI 层级（计划 5.3）。
+
+        默认回退到完整 ``screenshot``：支持 JPEG 快速路径的适配器覆写本方法，避免为同一帧
+        再走一次「截图 → recv → PNG 转码」的慢路径（DC 实测单次 11.5-19.7s）。
+        """
+        return self.screenshot(image_path.parent, run_id, label)
+
     def start_app(
         self,
         bundle_name: str,

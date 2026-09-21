@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import time
 from dataclasses import dataclass, field
 
@@ -20,6 +21,7 @@ from ..models import (
     utc_now,
 )
 from ..perception import find_element, target_variants
+from ..perception.normalizer import normalize_ui_text
 from .safety import SafetyPolicy
 
 
@@ -103,7 +105,7 @@ class ToolExecutor:
             anchor = self._swipe_anchor(snapshot, decision.target)
             if anchor is None and decision.target:
                 warnings.append(f"swipe target {decision.target!r} not found; swiping at screen center")
-            start, end = self._swipe_points(snapshot, decision.direction or "up", anchor)
+            start, end = self._swipe_points(snapshot, decision, anchor, warnings=warnings)
             command = self.device.swipe(start, end)
         elif decision.tool == ToolName.BACK:
             command = self.device.back()
@@ -186,6 +188,90 @@ class ToolExecutor:
 
     @staticmethod
     def _swipe_points(
+        snapshot: ScreenSnapshot,
+        decision: ToolDecision,
+        anchor: tuple[int, int, int, int] | None = None,
+        *,
+        warnings: list[str] | None = None,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        """按优先级解析滑动起止点（计划 5.5/R10）。
+
+        1. 显式 ``start``/``end`` 坐标：模型自己算出「每格多少像素、要移动几格」时最精确；
+        2. ``steps`` × 滚轮格距：格距由同一列相邻可见项的 y 差推导，推不出时回退并告警；
+        3. ``direction`` + 锚点元素 1/4 行程（历史行为）；
+        4. 全屏 30%（历史行为）。
+        """
+        direction = decision.direction or "up"
+        if decision.start is not None and decision.end is not None:
+            return decision.start, decision.end
+        if anchor is not None and (decision.steps or decision.distance):
+            left, top, right, bottom = anchor
+            cx, cy = (left + right) // 2, (top + bottom) // 2
+            travel = ToolExecutor._swipe_travel(snapshot, anchor, decision, warnings=warnings)
+            half = travel // 2
+            mapping = {
+                "up": ((cx, cy + half), (cx, cy - half)),
+                "down": ((cx, cy - half), (cx, cy + half)),
+                "left": ((cx + half, cy), (cx - half, cy)),
+                "right": ((cx - half, cy), (cx + half, cy)),
+            }
+            start, end = mapping[direction]
+            clamp = lambda point: (  # noqa: E731 - 就地裁剪，避免坐标越出屏幕
+                min(max(point[0], 0), snapshot.width - 1),
+                min(max(point[1], 0), snapshot.height - 1),
+            )
+            return clamp(start), clamp(end)
+        return ToolExecutor._default_swipe_points(snapshot, direction, anchor)
+
+    @staticmethod
+    def _swipe_travel(
+        snapshot: ScreenSnapshot,
+        anchor: tuple[int, int, int, int],
+        decision: ToolDecision,
+        *,
+        warnings: list[str] | None = None,
+    ) -> int:
+        """推导本次滑动行程：优先显式 distance，其次格数 × 格距，最后回退元素高度一半。"""
+        left, top, right, bottom = anchor
+        if decision.distance:
+            return max(int(decision.distance), 1)
+        steps = int(decision.steps or 0)
+        pitch = ToolExecutor._row_pitch(snapshot, anchor)
+        if pitch is None:
+            if warnings is not None:
+                warnings.append(
+                    f"cannot derive wheel row pitch for {decision.target!r}; falling back to half the anchor height"
+                )
+            return max((bottom - top) // 2, 1)
+        # 不按锚点高度裁剪：滚轮单行元素的 bbox 往往只有一格高，裁剪会把「移动 4 格」压成 1 格。
+        return min(max(pitch * max(steps, 1), pitch), max(snapshot.height, pitch))
+
+    @staticmethod
+    def _row_pitch(snapshot: ScreenSnapshot, anchor: tuple[int, int, int, int]) -> int | None:
+        """同一滚轮列内相邻可见行的 y 差中位数（格距）；不足两行时返回 None。
+
+        实测参考：日历时间选择器每格 108px（960−852），据此可算出 9→1 要往下 4 格而不是往上 8 格。
+        """
+        left, top, right, bottom = anchor
+        column_x = (left + right) // 2
+        centers = sorted(
+            {
+                (item.bbox.top + item.bbox.bottom) // 2
+                for item in snapshot.elements
+                if item.bbox is not None
+                and item.bbox.left <= column_x <= item.bbox.right
+                and item.bbox.top >= top - (bottom - top)
+                and item.bbox.bottom <= bottom + (bottom - top)
+            }
+        )
+        gaps = [later - earlier for earlier, later in zip(centers, centers[1:], strict=False) if later - earlier > 1]
+        if not gaps:
+            return None
+        gaps.sort()
+        return gaps[len(gaps) // 2]
+
+    @staticmethod
+    def _default_swipe_points(
         snapshot: ScreenSnapshot,
         direction: str,
         anchor: tuple[int, int, int, int] | None = None,
@@ -270,9 +356,13 @@ def evaluate_assertion(
             matched_candidate = candidate
             break
 
-    page_text = " ".join(filter(None, (snapshot.page_title, snapshot.summary))).casefold()
+    page_text = normalize_ui_text(" ".join(filter(None, (snapshot.page_title, snapshot.summary))))
     summary_candidate = next(
-        (candidate for candidate in candidates if candidate.casefold() in page_text),
+        (
+            candidate
+            for candidate in candidates
+            if normalize_ui_text(candidate) and normalize_ui_text(candidate) in page_text
+        ),
         None,
     )
     # 页面摘要仅能证明可见性；文本断言仍要求命中实际 UI 元素。
@@ -292,9 +382,44 @@ def evaluate_assertion(
         message = "assertion passed using visible screen content"
     else:
         message = f"target is not in current screen: {target.casefold()}"
+        # 计划 6.2：把「屏幕实际是什么」回给恢复循环，模型才能一次改对。
+        closest = closest_screen_texts(snapshot, target)
+        if closest:
+            message += f" (closest: {', '.join(closest)})"
     return AssertionResult(
         kind=kind,
         target=target,
         passed=passed,
         message=message,
     ), found[1] if found else None
+
+
+def closest_screen_texts(snapshot: ScreenSnapshot, target: str, *, limit: int = 5) -> list[str]:
+    """返回屏幕上与 ``target`` 最接近的若干原始文案（归一化后比较，展示原文）。
+
+    例：目标 ``下午1:00``、屏幕 ``9月22日 下午01:00`` 时返回后者，恢复反馈因此能直接指出格式差异。
+    """
+    needle = normalize_ui_text(target)
+    if not needle:
+        return []
+    candidates: list[tuple[float, str]] = []
+    for element in snapshot.elements:
+        for value in (element.content, element.description):
+            if not value:
+                continue
+            normalized = normalize_ui_text(value)
+            if not normalized:
+                continue
+            ratio = difflib.SequenceMatcher(None, needle, normalized).ratio()
+            if needle in normalized or normalized in needle:
+                ratio = max(ratio, 0.9)
+            candidates.append((ratio, value))
+    candidates.sort(key=lambda item: (-item[0], len(item[1])))
+    selected: list[str] = []
+    for _, value in candidates:
+        if value in selected:
+            continue
+        selected.append(value)
+        if len(selected) >= limit:
+            break
+    return selected

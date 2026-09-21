@@ -23,9 +23,11 @@ def _add_target_options(parser: argparse.ArgumentParser, *, task_required: bool)
     parser.add_argument("--no-discovery", action="store_true")
     for name in ALLOW_FLAGS:
         parser.add_argument(f"--allow-{name}", action="store_true")
-    parser.add_argument("--max-pages", type=int, default=20, choices=range(1, 21), metavar="1..20")
-    parser.add_argument("--max-actions-per-page", type=int, default=8, choices=range(1, 9), metavar="1..8")
-    parser.add_argument("--discovery-timeout", type=int, default=900, choices=range(1, 901), metavar="1..900")
+    # 探索预算默认交给 Settings（BOOTSTRAP_MAX_*）：只有用户显式给出参数才算「请求显式值」，
+    # 否则 CLI 的 argparse 默认值会把 Settings 里收紧过的 bootstrap 预算整体顶掉（计划 4.2）。
+    parser.add_argument("--max-pages", type=int, default=None, choices=range(1, 21), metavar="1..20")
+    parser.add_argument("--max-actions-per-page", type=int, default=None, choices=range(1, 9), metavar="1..8")
+    parser.add_argument("--discovery-timeout", type=int, default=None, choices=range(1, 901), metavar="1..900")
     parser.add_argument("--temporary-test", action="store_true")
 
 
@@ -84,9 +86,15 @@ def _request_payload(args: argparse.Namespace, *, discover_only: bool = False) -
     target = {key: value for key, value in {"app_name": args.app, "bundle_name": args.bundle_name}.items() if value}
     discovery = {
         "enabled": not args.no_discovery,
-        "max_pages": args.max_pages,
-        "max_actions_per_page": args.max_actions_per_page,
-        "max_duration_seconds": args.discovery_timeout,
+        **{
+            key: value
+            for key, value in (
+                ("max_pages", args.max_pages),
+                ("max_actions_per_page", args.max_actions_per_page),
+                ("max_duration_seconds", args.discovery_timeout),
+            )
+            if value is not None
+        },
         "temporary_test": args.temporary_test,
         **{f"allow_{name}": bool(getattr(args, f"allow_{name}")) for name in ALLOW_FLAGS},
     }
@@ -119,6 +127,39 @@ def _make_run_request(data: dict[str, Any]):
     if "temporary_test" not in fields:
         data.pop("temporary_test", None)
     return RunRequest.model_validate(data)
+
+
+def _execution_analyzer(settings: Any) -> Any | None:
+    """构造执行结果分析器（与 api/app.py 同一实现口径）；不可用时返回 None。"""
+    if not settings.case_analysis_enabled:
+        return None
+    try:
+        from .analysis.service import ExecutionAnalyzer
+        from .devices.harmony import HarmonyDeviceAdapter
+
+        return ExecutionAnalyzer(
+            device_factory=lambda device_id: HarmonyDeviceAdapter(
+                device_id, settings.hdc_path, settings.agent_action_timeout
+            )
+        )
+    except Exception:  # noqa: BLE001 - 分析能力缺失只降级为「不分析」
+        return None
+
+
+def _case_library(settings: Any) -> Any | None:
+    """构造用例库（可选注入）；依赖不可用时返回 None。"""
+    try:
+        from .cases.library import CaseLibrary
+        from .storage.case_repository import CaseRepository
+
+        cases_root = settings.resolved_cases_dir
+        return CaseLibrary(
+            CaseRepository(cases_root),
+            cases_root,
+            min_observed_rounds=settings.profile_verification_rounds,
+        )
+    except Exception:  # noqa: BLE001 - 用例沉淀是可选能力
+        return None
 
 
 def _call_service(service: Any, names: tuple[str, ...], **values: Any) -> Any:
@@ -178,7 +219,13 @@ def main(argv: list[str] | None = None) -> None:
         if args.provider:
             settings.agent_provider = args.provider
         request = _make_run_request(_request_payload(args, discover_only=False))
-        orchestrator = AgentOrchestrator(settings)
+        # 与 API 同一条流水线：注入可选用例库与执行结果分析器，
+        # 让 CLI 运行同样产出 analysis.json（计划 G1：reports/report.html + analysis.json）。
+        orchestrator = AgentOrchestrator(
+            settings,
+            case_library=_case_library(settings),
+            analyzer=_execution_analyzer(settings),
+        )
 
         async def execute_run():
             task = asyncio.create_task(orchestrator.run(request))

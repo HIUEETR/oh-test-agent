@@ -10,12 +10,22 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..config import Settings
 from ..devices import DeviceAdapter, DeviceError, HarmonyDeviceAdapter
-from ..discovery import BoundedExplorer, ExplorationAction, ProfileVerifier, StabilityLevel
+from ..discovery import (
+    BoundedExplorer,
+    ExplorationAction,
+    ProfileVerifier,
+    StabilityAnalyzer,
+    StabilityLevel,
+    dynamic_identifier_pattern,
+    is_dynamic_identifier,
+    is_volatile_evidence_key,
+)
 from ..discovery.advisor import ExplorationAdvisor
 from ..generation import HypiumGenerator
 from ..graph import PageGraphBuilder
@@ -27,6 +37,7 @@ from ..models import (
     ConfidenceLevel,
     DeviceCompatibility,
     EventType,
+    ExplorationPolicy,
     GeneratedArtifact,
     LocatorCandidate,
     LocatorKind,
@@ -42,24 +53,43 @@ from ..models import (
     ScenarioKind,
     ScreenSnapshot,
     StableLocator,
+    StepHistoryEntry,
     TargetAppProfile,
     ToolDecision,
     ToolName,
+    VisionObservation,
     utc_now,
 )
 from ..perception import PerceptionService
 from ..perception.normalizer import normalize_layout, page_path
 from ..profiles import ProfileRegistry
+from ..profiles.admission import (
+    AdmissionEvidence,
+    AdmissionThresholds,
+    describe_admission_failure,
+    evaluate_admission,
+    order_admission_failures,
+    pick_first_failure,
+)
 from ..reporting import ReportBuilder
 from ..runner import HypiumRunner
 from ..runtime import LaunchSpec, RunEventEmitter, SafetyError, SafetyPolicy, ToolExecutionError, ToolExecutor
 from ..storage import ArtifactStore, RunRepository
-from ..targets import TargetAmbiguousError, TargetNotFoundError, TargetResolver
+from ..targets import ForegroundApp, TargetAmbiguousError, TargetNotFoundError, TargetResolver
 from .providers import AgentProvider, PlanningContext, create_provider
 
 logger = logging.getLogger(__name__)
 
 DeviceFactory = Callable[[str], DeviceAdapter]
+
+
+@dataclass(frozen=True, slots=True)
+class HarvestedLocator:
+    """任务期回收的一条定位器证据：候选 + 其出现页面的结构身份 + 证据帧。"""
+
+    candidate: LocatorCandidate
+    page_signature: str
+    snapshot_id: str
 
 
 class AgentOrchestrator:
@@ -94,6 +124,10 @@ class AgentOrchestrator:
         self._stop_requested: set[str] = set()
         self._target_selections: dict[str, str] = {}
         self._target_selection_events: dict[str, asyncio.Event] = {}
+        # 计划 5.1/5.4：合并视觉请求的决策缓存、已观测帧与跨步历史所需的观测缓存。
+        self._pending_decisions: dict[tuple[str, str], ToolDecision] = {}
+        self._observed_snapshots: set[str] = set()
+        self._observation_cache: dict[str, VisionObservation] = {}
 
     def _default_device_factory(self, device_id: str) -> DeviceAdapter:
         return HarmonyDeviceAdapter(device_id, self.settings.hdc_path, self.settings.agent_action_timeout)
@@ -145,6 +179,10 @@ class AgentOrchestrator:
     async def run(self, request: RunRequest, run_id: str | None = None) -> RunTrace:
         """执行任务并返回最终轨迹；设备连接、模型调用和工具动作均受配置超时约束。"""
         run_id = run_id or f"run-{utc_now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+        # 请求显式给出的探索字段优先；未给出的按 Settings 的 bootstrap 预算收紧（计划 4.2）。
+        request = request.model_copy(
+            update={"exploration_policy": self._bootstrap_policy(request.exploration_policy)}, deep=True
+        )
         device_id = request.device_id or self.settings.harmony_device
         requested_id = request.target_app_id or request.target.bundle_name or request.target.app_name
         trace = RunTrace(
@@ -225,7 +263,7 @@ class AgentOrchestrator:
                     timeout=self.settings.agent_model_timeout,
                 )
             except Exception as exc:
-                await self._fail(trace, emitter, RunState.FAILED_MODEL, f"planning failed: {exc}")
+                await self._fail(trace, emitter, RunState.FAILED_MODEL, f"planning failed: {exc}", request)
                 return trace
             trace.plan = plan.steps
             trace.model_used = plan.model_used
@@ -249,7 +287,7 @@ class AgentOrchestrator:
 
                 if current_snapshot is None:
                     current_snapshot, current_node = await self._capture(
-                        trace, emitter, device, perception, graph, f"step_{index:02d}_before"
+                        trace, emitter, device, perception, graph, f"step_{index:02d}_before", step=step
                     )
                 decision, result, current_snapshot = await self._decide_and_execute(
                     trace, emitter, executor, perception, graph, device, step, current_snapshot
@@ -260,7 +298,13 @@ class AgentOrchestrator:
                 if decision.tool == ToolName.FINISH:
                     trace.state = RunState.VERIFYING
                     after, after_node = await self._capture(
-                        trace, emitter, device, perception, graph, f"step_{index:02d}_after"
+                        trace,
+                        emitter,
+                        device,
+                        perception,
+                        graph,
+                        f"step_{index:02d}_after",
+                        with_vision=not self._combined_vision_active(),
                     )
                     result.before_snapshot_id = before.snapshot_id if before else None
                     result.after_snapshot_id = after.snapshot_id
@@ -275,7 +319,13 @@ class AgentOrchestrator:
                     await asyncio.sleep(self.settle_seconds)
                 trace.state = RunState.VERIFYING
                 after, after_node = await self._capture(
-                    trace, emitter, device, perception, graph, f"step_{index:02d}_after"
+                    trace,
+                    emitter,
+                    device,
+                    perception,
+                    graph,
+                    f"step_{index:02d}_after",
+                    with_vision=not self._combined_vision_active(),
                 )
                 result.after_snapshot_id = after.snapshot_id
                 trace.actions.append(result)
@@ -313,38 +363,13 @@ class AgentOrchestrator:
             self.artifacts.write_json(self.artifacts.run_dir(trace.run_id) / "graph.json", trace.graph)
 
             if trace.provisional or trace.live_mode:
-                request.auto_generate = False
+                # 实时模式仍可生成脚本（计划 R2）：Profile 未 verified 时生成器自行判定
+                # purpose="diagnostic" / replay_eligible=False，产物依然可复用、可入库、
+                # 可人工执行；只有关乎 Profile 晋级证据的自动回放必须关闭，避免用未经验证
+                # 的实时轨迹污染晋级门禁。
                 request.auto_execute = False
-            if request.auto_generate:
-                trace.state = RunState.SCRIPT_GENERATING
-                trace.generated = HypiumGenerator(
-                    self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds
-                ).generate(trace)
-                emitter.emit(
-                    EventType.SCRIPT_GENERATED,
-                    "Hypium Python 和 JSON 已生成",
-                    trace.generated.model_dump(mode="json"),
-                )
-            if request.auto_execute:
-                if not trace.generated:
-                    raise ToolExecutionError("cannot execute before generating a script", RunState.FAILED_SCRIPT)
-                trace.state = RunState.SCRIPT_EXECUTING
-                emitter.emit(EventType.EXECUTION_STARTED, "开始执行生成的 Hypium 用例")
-                runner = HypiumRunner(self.settings.resolved_runtime_home)
-                trace.replays = await self._run_replays(
-                    runner, trace.generated, trace.run_id, self.settings.hypium_replay_attempts, emitter
-                )
-                self._update_replay_summary(trace)
-                if not all(item.passed for item in trace.replays):
-                    raise ToolExecutionError("one or more Hypium replay attempts failed", RunState.FAILED_SCRIPT)
-                emitter.emit(
-                    EventType.EXECUTION_FINISHED,
-                    f"Hypium 用例连续执行 {self.settings.hypium_replay_attempts} 次成功",
-                    {"replays": [item.model_dump(mode="json") for item in trace.replays]},
-                )
+            await self._finalize_artifacts(trace, emitter, request, allow_replay=True)
 
-            self._attach_analysis(trace, emitter)
-            self._save_case_from_trace(trace, emitter)
             trace.state = RunState.COMPLETED
             trace.agent_outcome = "completed"
             trace.agent_error = None
@@ -361,16 +386,18 @@ class AgentOrchestrator:
             emitter.emit(EventType.RUN_FINISHED, "任务已由用户停止")
             return trace
         except SafetyError as exc:
-            await self._fail(trace, emitter, RunState.FAILED_ACTION, str(exc))
+            await self._fail(trace, emitter, RunState.FAILED_ACTION, str(exc), request)
             return trace
         except DeviceError as exc:
-            await self._fail(trace, emitter, RunState.FAILED_DEVICE, str(exc))
+            await self._fail(trace, emitter, RunState.FAILED_DEVICE, str(exc), request)
             return trace
         except ToolExecutionError as exc:
-            await self._fail(trace, emitter, exc.state, str(exc))
+            await self._fail(trace, emitter, exc.state, str(exc), request)
             return trace
         except Exception as exc:
-            await self._fail(trace, emitter, RunState.FAILED_ACTION, f"unexpected error: {type(exc).__name__}: {exc}")
+            await self._fail(
+                trace, emitter, RunState.FAILED_ACTION, f"unexpected error: {type(exc).__name__}: {exc}", request
+            )
             return trace
         finally:
             self._target_selection_events.pop(run_id, None)
@@ -383,12 +410,7 @@ class AgentOrchestrator:
     async def _prepare_target(self, request, trace, emitter, device) -> TargetAppProfile | None:
         """Resolve、复验或探索晋级 Profile；实时模式降级时返回 None。"""
         explicit_path = self.settings.resolved_target_profile_path
-        registry = ProfileRegistry(
-            self.settings.resolved_profiles_dir,
-            min_interaction_kinds=request.exploration_policy.min_interaction_kinds,
-            promotion_replay_attempts=self.settings.hypium_replay_attempts,
-            min_evidence_rounds=self.settings.profile_verification_rounds,
-        )
+        registry = self._registry(request.exploration_policy.min_interaction_kinds)
         explicit_override = bool(self.settings.target_profile_path and "TARGET_PROFILE_PATH" in os.environ)
         if explicit_override:
             print("warning: TARGET_PROFILE_PATH is deprecated; use the Profile Registry", file=sys.stderr)
@@ -470,8 +492,8 @@ class AgentOrchestrator:
                 {"passed": False},
             )
 
-        existing = registry.get(bundle_name=resolved.bundle_name)
-        if existing is not None:
+        existing = registry.get_any(bundle_name=resolved.bundle_name)
+        if existing is not None and existing.status == ProfileStatus.VERIFIED:
             emitter.emit(
                 EventType.PROFILE_FOUND, "发现 verified Profile，开始快速复验", existing.model_dump(mode="json")
             )
@@ -512,6 +534,12 @@ class AgentOrchestrator:
                 deep=True,
             )
             registry.update_verified(existing)
+        elif (
+            existing is not None and existing.stable_locator_inventory and self._profile_compatible(resolved, existing)
+        ):
+            # 计划 3.1：candidate/draft 只要有定位器就直接复用，不再重新做完整 bootstrap 探索。
+            # 本次任务期采到的证据会在收尾时累加回这份 Profile（Phase 3.3）。
+            return self._enter_incremental_mode(trace, emitter, existing)
 
         if not request.exploration_policy.enabled:
             if request.bootstrap_only:
@@ -520,6 +548,15 @@ class AgentOrchestrator:
                 )
             return self._enter_live_mode(
                 trace, emitter, "未发现 verified Profile 且自动探索已关闭，进入实时模式执行任务"
+            )
+        if not request.bootstrap_only and not self.settings.bootstrap_enabled_on_task_run:
+            # 计划 4.2：任务型运行默认不前置完整探索——本次日历任务为此白烧 8.8 分钟（38% 墙钟）。
+            # Profile 由任务期证据回收（Phase 3.3）作为副产物建立；完整探索通过
+            # POST /api/profiles/{id}/verify（bootstrap_only=True）显式触发。
+            return self._enter_live_mode(
+                trace,
+                emitter,
+                "任务型运行默认不前置完整探索（BOOTSTRAP_ENABLED_ON_TASK_RUN=false），进入实时模式执行任务",
             )
         run_dir = self.artifacts.run_dir(trace.run_id)
         try:
@@ -539,11 +576,49 @@ class AgentOrchestrator:
 
     @staticmethod
     def _enter_live_mode(trace: RunTrace, emitter: RunEventEmitter, reason: str) -> None:
-        """记录实时模式并通知前端；实时模式不生成/回放脚本。"""
+        """记录实时模式并通知前端；实时模式不生成/回放脚本，但仍产出诊断产物。"""
         trace.live_mode = True
         trace.profile_status_at_start = ProfileStatus.ABSENT
         emitter.emit(EventType.PROFILE_LIVE_MODE, reason, {"live_mode": True})
         return None
+
+    @staticmethod
+    def _enter_incremental_mode(
+        trace: RunTrace,
+        emitter: RunEventEmitter,
+        profile: TargetAppProfile,
+    ) -> TargetAppProfile:
+        """复用未 verified 但已有定位器的 Profile：跳过完整 bootstrap，直接执行任务。
+
+        与 ``_enter_live_mode`` 的区别：这里把 draft/candidate 当成任务期提示源使用
+        （``executor.stable_locators`` 与 ``PlanningContext``），任务期证据在收尾时累加回它。
+        **绝不**把 ``resolved_target.source`` 改成 ``verified_profile``，也不调用
+        ``registry.update_verified``——draft/candidate 只是复用，不是复验通过（计划风险 §5.3）。
+        """
+        trace.live_mode = False
+        trace.profile_status_at_start = profile.status
+        emitter.emit(
+            EventType.PROFILE_INCREMENTAL,
+            f"复用 {profile.status} Profile（{len(profile.stable_locator_inventory)} 个定位器），进入增量模式",
+            {
+                "status": str(profile.status),
+                "locators": len(profile.stable_locator_inventory),
+                "assertions": len(profile.assertion_inventory),
+                "target_app_id": profile.target_app_id,
+            },
+        )
+        return profile
+
+    @staticmethod
+    def _profile_compatible(resolved: ResolvedTarget, profile: TargetAppProfile) -> bool:
+        """低成本身份校验：版本/Ability/签名不一致时不复用既有 Profile 证据。"""
+        if profile.app_version.version_code is not None and resolved.version_code != profile.app_version.version_code:
+            return False
+        if profile.main_ability != resolved.main_ability:
+            return False
+        if profile.app_version.signature_sha256 and resolved.signature_sha256 != profile.app_version.signature_sha256:
+            return False
+        return True
 
     async def _bootstrap_profile(
         self,
@@ -681,28 +756,51 @@ class AgentOrchestrator:
         )
         trace.verification_result = verification.model_dump(mode="json", exclude={"rounds": {"__all__": {"snapshots"}}})
         if not verification.passed:
-            failed_draft = draft.model_copy(update={"status": ProfileStatus.INVALID}, deep=True)
+            # 计划 R5：失败时持久化「填充过的」Profile——定位器/断言来自本次真实验证观测，
+            # 不是 :648 那个 0 定位器 / 0 断言的构造态草稿。有定位器即保持 DRAFT（可被下次
+            # 运行的增量模式复用并累加），完全为空才记为 INVALID（本次探索确实一无所获）。
+            failed_draft = self._build_profile(resolved, discovery, verification, trace.run_id)
+            has_locators = bool(failed_draft.stable_locator_inventory)
+            evidence = dict(failed_draft.provenance.evidence)
+            evidence.update(
+                {
+                    "verification_passed": False,
+                    "verification_failures": list(verification.failures),
+                    "verification_attempted_at": utc_now().isoformat(),
+                }
+            )
+            failed_draft = failed_draft.model_copy(
+                update={
+                    "status": ProfileStatus.DRAFT if has_locators else ProfileStatus.INVALID,
+                    "provenance": failed_draft.provenance.model_copy(update={"evidence": evidence}, deep=True),
+                },
+                deep=True,
+            )
             registry.save_draft(failed_draft)
             trace.profile_snapshot = failed_draft
+            self.artifacts.write_json(run_dir / "discovery" / "draft-profile.json", failed_draft)
+            emitter.emit(
+                EventType.PROFILE_DRAFT_SAVED,
+                f"验证未通过，已保留 {len(failed_draft.stable_locator_inventory)} 个定位器的失败草稿",
+                {"path": str(registry.draft_dir / f"{failed_draft.target_app_id}.json"), "status": failed_draft.status},
+            )
             if request.temporary_test:
                 trace.provisional = True
                 return failed_draft
             raise ToolExecutionError("; ".join(verification.failures), RunState.FAILED_PROFILE_VERIFICATION)
         candidate = self._build_profile(resolved, discovery, verification, trace.run_id)
-        candidate_pages = {item.page_signature for item in candidate.stable_locator_inventory}
-        if len(candidate.stable_locator_inventory) < 3:
+        thresholds = self._admission_thresholds()
+        candidate_evidence = AdmissionEvidence(
+            stable_locator_count=len(candidate.stable_locator_inventory),
+            distinct_page_state_count=len({item.page_signature for item in candidate.stable_locator_inventory}),
+            app_assertion_count=len(candidate.assertion_inventory),
+        )
+        thresholds = self._admission_thresholds()
+        for gate in order_admission_failures(
+            evaluate_admission(candidate_evidence, thresholds=thresholds), style="candidate"
+        ):
             raise ToolExecutionError(
-                "Profile candidate does not contain three stable locators",
-                RunState.FAILED_PROFILE_VERIFICATION,
-            )
-        if len(candidate_pages) < 3:
-            raise ToolExecutionError(
-                "Profile candidate does not contain stable locators on three pages",
-                RunState.FAILED_PROFILE_VERIFICATION,
-            )
-        if len(candidate.assertion_inventory) < 2:
-            raise ToolExecutionError(
-                "Profile candidate does not contain two application-level assertions",
+                describe_admission_failure(gate, style="candidate", thresholds=thresholds),
                 RunState.FAILED_PROFILE_VERIFICATION,
             )
         registry.save_candidate(candidate)
@@ -869,8 +967,18 @@ class AgentOrchestrator:
             for action in validation.actions
             if action.assertion and action.assertion.message.startswith("verified application page ")
         }
-        if len(covered_pages) < 3 or len(validation.assertions) < 2:
-            raise ValueError("Profile admission replay requires 3 page checks and 2 application assertions")
+        replay_gate = pick_first_failure(
+            evaluate_admission(
+                AdmissionEvidence(
+                    distinct_page_state_count=len(covered_pages),
+                    app_assertion_count=len(validation.assertions),
+                ),
+                thresholds=AgentOrchestrator._default_admission_thresholds(),
+            ),
+            style="admission_replay",
+        )
+        if replay_gate is not None:
+            raise ValueError(describe_admission_failure(replay_gate, style="admission_replay"))
         # 合成准入轨迹代表一次完整成功的准入运行；缺少完成结局与 FINISH 会被回放资格门控判为诊断脚本。
         validation.actions.append(ActionResult(step_id="profile-finish", tool=ToolName.FINISH, success=True))
         validation.snapshots = [
@@ -905,11 +1013,7 @@ class AgentOrchestrator:
         profile: TargetAppProfile,
         trace: RunTrace,
     ) -> bool:
-        if profile.app_version.version_code is not None and resolved.version_code != profile.app_version.version_code:
-            return False
-        if profile.main_ability != resolved.main_ability:
-            return False
-        if profile.app_version.signature_sha256 and resolved.signature_sha256 != profile.app_version.signature_sha256:
+        if not self._profile_compatible(resolved, profile):
             return False
         if type(device).stop_app is DeviceAdapter.stop_app or type(device).start_app is DeviceAdapter.start_app:
             started = device.open_app(profile, reset=True)
@@ -926,13 +1030,17 @@ class AgentOrchestrator:
             else self.artifacts.run_dir(trace.run_id) / "revalidation"
         )
         recovery_actions = profile.reset_strategy.get("recovery_actions") or []
-        pages = (profile.core_flows[0].get("pages", []) if profile.core_flows else [])[:3]
-        if len(pages) < 3 or not recovery_actions:
-            return self._legacy_entry_revalidate(device, resolved, profile, trace, output_dir)
+        pages = list(profile.core_flows[0].get("pages", []) if profile.core_flows else [])
+        # 计划 3.2/R9：门槛必须与 settings.profile_verification_rounds 一致。此处原先硬编码
+        # ``>= 3``，而 _build_profile 写入的 observed_rounds == 验证轮数（默认 1）⇒ 恒为空 ⇒
+        # 三页复验路径是死代码，任何默认配置晋级出来的 Profile 复用时都只做单页检查。
+        required_rounds = max(int(self.settings.profile_verification_rounds), 1)
         locator_inventory = [
             item
             for item in profile.stable_locator_inventory
-            if item.observed_rounds >= 3 and item.unique_match_rounds >= 3 and item.evidence_snapshot_ids
+            if item.observed_rounds >= required_rounds
+            and item.unique_match_rounds >= required_rounds
+            and item.evidence_snapshot_ids
         ]
         page_locators = {
             page: next(
@@ -941,9 +1049,9 @@ class AgentOrchestrator:
             )
             for page in pages
         }
-        if any(locator is None for locator in page_locators.values()):
-            # 旧版 Profile 的 core_flows.pages 是发现期整树签名，与验证期定位器的结构身份
-            # 不在同一哈希空间，映射可能整体失败；退回入口页强定位器检查而不是直接判失败。
+        if not pages or not recovery_actions or any(locator is None for locator in page_locators.values()):
+            # 页面数量不足（单页应用）或旧版 Profile 的 core_flows.pages 是发现期整树签名、
+            # 与验证期定位器的结构身份不在同一哈希空间时，退回入口页强定位器检查而不是直接判失败。
             return self._legacy_entry_revalidate(device, resolved, profile, trace, output_dir)
         for page_index, page_signature in enumerate(pages):
             foreground = device.current_foreground_app()
@@ -1254,10 +1362,7 @@ class AgentOrchestrator:
         feedback: str | None = None
         last_error: ToolExecutionError | None = None
         for attempt in range(self.settings.agent_step_recovery_limit + 1):
-            decision = await asyncio.wait_for(
-                self.provider.decide(step, snapshot, feedback=feedback),
-                timeout=self.settings.agent_model_timeout,
-            )
+            decision, snapshot = await self._resolve_decision(trace, emitter, perception, step, snapshot, feedback)
             decision = self._constrain_finish_decision(step, decision)
             emitter.emit(
                 EventType.ACTION_STARTED,
@@ -1302,6 +1407,74 @@ class AgentOrchestrator:
             f"step recovery exhausted without completing: {step.instruction}", RunState.FAILED_ASSERTION
         )
 
+    async def _resolve_decision(
+        self,
+        trace: RunTrace,
+        emitter: RunEventEmitter,
+        perception: PerceptionService,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        feedback: str | None,
+    ) -> tuple[ToolDecision, ScreenSnapshot | None]:
+        """取得本步骤的工具决策，必要时顺手完成该帧的观测（计划 5.1）。
+
+        优先级：``_capture`` 里合并请求缓存下来的决策 → 该帧尚未观测且启用合并时现场合并请求
+        → 既有的单独 ``decide`` 路径。返回的 snapshot 可能是刚被观测合并过的新对象。
+        """
+        if snapshot is not None:
+            cached = self._pending_decisions.pop((step.step_id, snapshot.snapshot_id), None)
+            if cached is not None:
+                return cached, snapshot
+        if (
+            snapshot is not None
+            and self._combined_vision_active()
+            and snapshot.snapshot_id not in self._observed_snapshots
+        ):
+            observation, decision = await self._observe_and_decide_with_timeout(
+                step, snapshot, feedback, self._decision_history(trace)
+            )
+            snapshot = self._publish_observation(trace, emitter, perception, snapshot, observation, emit_capture=False)
+            return decision, snapshot
+        return await self._decide_with_timeout(step, snapshot, feedback), snapshot
+
+    async def _decide_with_timeout(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        feedback: str | None,
+    ) -> ToolDecision:
+        """调用模型决策并捕获超时；第一次超时后用收敛提示重试，仍超时才失败。
+
+        原先此处直接 ``asyncio.wait_for`` 且无 try/except：一次慢到 90s 的 ``decide`` 会以
+        消息为空的 ``TimeoutError`` 冒泡到兜底 ``except Exception``，把整次运行标成
+        ``unexpected error: TimeoutError``（实测一次调用报废了 23 分钟的运行）。这里把超时
+        转成显式的 ``FAILED_MODEL`` 与可读错误，并先用一次「只输出工具决策」的收敛提示重试，
+        重试成本远低于重跑整个任务。
+        """
+        timeout = self.settings.agent_model_timeout
+        retries = max(int(self.settings.agent_model_retry_limit), 0)
+        attempt_feedback = feedback
+        for attempt in range(retries + 1):
+            try:
+                return await asyncio.wait_for(
+                    self.provider.decide(step, snapshot, feedback=attempt_feedback),
+                    timeout=timeout,
+                )
+            except TimeoutError as exc:
+                if attempt >= retries:
+                    raise ToolExecutionError(
+                        f"model decision timed out after {timeout:g} seconds",
+                        RunState.FAILED_MODEL,
+                    ) from exc
+                timeout_hint = (
+                    "the previous attempt timed out. Reply with ONLY the single tool decision JSON object "
+                    "and do not expand long reasoning."
+                )
+                attempt_feedback = timeout_hint + (f" Previous failure feedback: {feedback}" if feedback else "")
+        raise ToolExecutionError(  # pragma: no cover - 循环内必然 return 或 raise
+            f"model decision timed out after {timeout:g} seconds", RunState.FAILED_MODEL
+        )
+
     @staticmethod
     def _record_failed_action(
         trace: RunTrace,
@@ -1339,11 +1512,22 @@ class AgentOrchestrator:
             return decision.tool == step.tool and result.assertion is not None and result.assertion.passed
         return True
 
-    async def _capture(self, trace, emitter, device, perception, graph, label):
-        run_dir = self.artifacts.run_dir(trace.run_id)
-        snapshot = await asyncio.to_thread(self._capture_stable_frame, device, run_dir, trace, label)
+    def _combined_vision_active(self) -> bool:
+        """是否启用「单次请求同时拿到观测与决策」（计划 5.1）。
+
+        mock provider 的 analyze/decide 都是本地确定性实现、没有延迟可省：对 mock 保持原路径，
+        使全部既有 mock 测试的事件顺序与产物逐字不变。自定义 provider 默认不声明该能力，
+        因此继续走两次调用路径（连带保留其各自的失败语义）。
+        """
+        if self.provider.mock:
+            return False
+        support = getattr(self.provider, "supports_combined_observation", None)
+        return bool(support()) if callable(support) else False
+
+    async def _analyze(self, snapshot: ScreenSnapshot) -> VisionObservation | None:
+        """视觉分析（含超时与降级）；真实 provider 失败即按 FAILED_MODEL 终止。"""
         try:
-            observation = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self.provider.analyze(snapshot),
                 timeout=self.settings.agent_model_timeout,
             )
@@ -1351,10 +1535,11 @@ class AgentOrchestrator:
             if not self.provider.mock:
                 message = f"vision analysis failed: {type(exc).__name__}: {exc}"
                 raise ToolExecutionError(message, RunState.FAILED_MODEL) from exc
-            observation = None
             snapshot.summary = f"mock vision analysis unavailable: {type(exc).__name__}: {exc}"
-        snapshot = perception.merge(snapshot, observation)
-        trace.snapshots.append(snapshot)
+            return None
+
+    def _emit_frame(self, emitter: RunEventEmitter, snapshot: ScreenSnapshot) -> None:
+        """推送一帧的画面与元素规模（摘要可能稍后由合并观测回填）。"""
         emitter.emit(
             EventType.SCREEN_CAPTURED,
             "已采集本地截图",
@@ -1371,12 +1556,138 @@ class AgentOrchestrator:
         emitter.emit(
             EventType.ELEMENTS_DETECTED,
             f"识别到 {len(snapshot.elements)} 个元素",
-            {"snapshot_id": snapshot.snapshot_id, "count": len(snapshot.elements)},
+            {"snapshot_id": snapshot.snapshot_id, "count": len(snapshot.elements), "summary": snapshot.summary},
         )
+
+    async def _capture(
+        self,
+        trace,
+        emitter,
+        device,
+        perception,
+        graph,
+        label,
+        *,
+        step: PlannedStep | None = None,
+        feedback: str | None = None,
+        with_vision: bool = True,
+    ):
+        """采集一帧；可携带本步骤做一次合并的观测+决策请求（计划 5.1）。
+
+        ``with_vision=False``（合并模式下的动作后帧）：只推送画面与元素规模，观测留到下一步的
+        合并请求里一次完成——每步因此只花 1 次视觉往返，而非今天的 2 次。
+        """
+        run_dir = self.artifacts.run_dir(trace.run_id)
+        snapshot = await asyncio.to_thread(self._capture_stable_frame, device, run_dir, trace, label)
+        if not with_vision:
+            trace.snapshots.append(snapshot)
+            self._emit_frame(emitter, snapshot)
+            node, created = graph.add_snapshot(snapshot)
+            if created:
+                emitter.emit(EventType.PAGE_DISCOVERED, "发现新页面状态", node.model_dump(mode="json"))
+            return snapshot, node
+        if step is not None and self._combined_vision_active():
+            observation, decision = await self._observe_and_decide_with_timeout(
+                step, snapshot, feedback, self._decision_history(trace)
+            )
+            self._pending_decisions[(step.step_id, snapshot.snapshot_id)] = decision
+        else:
+            observation = await self._analyze(snapshot)
+        snapshot = self._publish_observation(trace, emitter, perception, snapshot, observation, emit_capture=True)
         node, created = graph.add_snapshot(snapshot)
         if created:
             emitter.emit(EventType.PAGE_DISCOVERED, "发现新页面状态", node.model_dump(mode="json"))
         return snapshot, node
+
+    def _publish_observation(
+        self,
+        trace: RunTrace,
+        emitter: RunEventEmitter,
+        perception: PerceptionService,
+        snapshot: ScreenSnapshot,
+        observation: VisionObservation | None,
+        *,
+        emit_capture: bool,
+    ) -> ScreenSnapshot:
+        """合并观测并登记为「已观测帧」；``emit_capture`` 决定是否补发 SCREEN_CAPTURED。"""
+        merged = perception.merge(snapshot, observation)
+        if all(item.snapshot_id != merged.snapshot_id for item in trace.snapshots):
+            trace.snapshots.append(merged)
+        self._observed_snapshots.add(merged.snapshot_id)
+        if observation is not None:
+            self._observation_cache[merged.image_sha256] = observation
+            while len(self._observation_cache) > 8:
+                self._observation_cache.pop(next(iter(self._observation_cache)))
+        if emit_capture:
+            self._emit_frame(emitter, merged)
+        else:
+            emitter.emit(
+                EventType.ELEMENTS_DETECTED,
+                f"识别到 {len(merged.elements)} 个元素",
+                {"snapshot_id": merged.snapshot_id, "count": len(merged.elements), "summary": merged.summary},
+            )
+        return merged
+
+    def _decision_history(self, trace: RunTrace) -> list[StepHistoryEntry]:
+        """紧凑的跨步历史（计划 5.4）：让 Live 决策能看到此前几步做了什么、结果如何。"""
+        limit = int(self.settings.live_decision_history_steps)
+        if limit <= 0 or not trace.actions:
+            return []
+        snapshot_by_id = {item.snapshot_id: item for item in trace.snapshots}
+        entries: list[StepHistoryEntry] = []
+        for index, action in enumerate(trace.actions, start=1):
+            frame = snapshot_by_id.get(action.after_snapshot_id or "") or snapshot_by_id.get(
+                action.before_snapshot_id or ""
+            )
+            plan_step = trace.plan[index - 1] if index <= len(trace.plan) else None
+            entries.append(
+                StepHistoryEntry(
+                    index=index,
+                    instruction=plan_step.instruction if plan_step else "",
+                    tool=str(action.tool),
+                    target=str(action.params.get("target") or action.params.get("text") or ""),
+                    ok=bool(action.success),
+                    page_path=frame.page_path if frame else "",
+                    note=(action.error or "")[:120],
+                )
+            )
+        return entries[-limit:]
+
+    async def _observe_and_decide_with_timeout(
+        self,
+        step: PlannedStep,
+        snapshot: ScreenSnapshot | None,
+        feedback: str | None,
+        history: list[StepHistoryEntry],
+    ) -> tuple[VisionObservation | None, ToolDecision]:
+        """合并观测+决策的调用入口：同一帧的观测复用缓存，超时语义与 ``decide`` 保持一致。"""
+        cached = self._observation_cache.get(snapshot.image_sha256) if snapshot is not None else None
+        if cached is not None:
+            return cached, await self._decide_with_timeout(step, snapshot, feedback)
+        timeout = self.settings.agent_model_timeout
+        retries = max(int(self.settings.agent_model_retry_limit), 0)
+        attempt_feedback = feedback
+        for attempt in range(retries + 1):
+            try:
+                return await asyncio.wait_for(
+                    self.provider.observe_and_decide(
+                        step, snapshot, feedback=attempt_feedback, history=history or None
+                    ),
+                    timeout=timeout,
+                )
+            except TimeoutError as exc:
+                if attempt >= retries:
+                    raise ToolExecutionError(
+                        f"model decision timed out after {timeout:g} seconds",
+                        RunState.FAILED_MODEL,
+                    ) from exc
+                attempt_feedback = (
+                    "the previous attempt timed out. Reply with ONLY the single observation+decision JSON object "
+                    "and do not expand long reasoning."
+                )
+        raise ToolExecutionError(  # pragma: no cover - 循环内必然 return 或 raise
+            f"model decision timed out after {timeout:g} seconds", RunState.FAILED_MODEL
+        )
 
     async def _execute_with_retry(self, executor, step_id, decision, snapshot):
         last_error = None
@@ -1449,7 +1760,7 @@ class AgentOrchestrator:
         else:
             trace.replay_status = "failed"
 
-    async def _fail(self, trace, emitter, state: RunState, message: str) -> None:
+    async def _fail(self, trace, emitter, state: RunState, message: str, request: RunRequest) -> None:
         trace.state = state
         trace.agent_outcome = "stopped" if state == RunState.STOPPED_BY_USER else "failed"
         trace.agent_error = message
@@ -1457,6 +1768,15 @@ class AgentOrchestrator:
         trace.ended_at = utc_now()
         event_type = EventType.ASSERTION_FAILED if state == RunState.FAILED_ASSERTION else EventType.RUN_FAILED
         emitter.emit(event_type, message, {"state": state})
+        if any(action.success for action in trace.actions):
+            # 失败路径同样收尾产物（计划 R3）：本次实测 13 个成功动作、7 个真实定位器全被丢弃。
+            # 收尾过程会临时改写 state（SCRIPT_GENERATING），必须恢复原始失败状态与错误信息。
+            try:
+                await self._finalize_artifacts(trace, emitter, request, allow_replay=False)
+            finally:
+                trace.state = state
+                trace.agent_error = message
+                trace.error = message
 
     # ------------------------------------------------------------------
     # 用例沉淀与执行结果分析（均为可选注入，失败绝不影响运行结论）
@@ -1494,6 +1814,397 @@ class AgentOrchestrator:
             "执行结果分析完成" if analysis.healthy else f"执行结果分析发现 {len(analysis.findings)} 项异常",
             analysis.model_dump(mode="json"),
         )
+
+    # ------------------------------------------------------------------
+    # 运行收尾：成功与失败路径共用，保证任何有成功动作的运行都留下产物
+    # ------------------------------------------------------------------
+
+    async def _finalize_artifacts(
+        self,
+        trace: RunTrace,
+        emitter: RunEventEmitter,
+        request: RunRequest,
+        *,
+        allow_replay: bool,
+    ) -> None:
+        """生成脚本、执行回放、附加分析与沉淀用例。
+
+        成功路径与失败路径（``_fail`` 内以 ``allow_replay=False``）都调用：失败运行同样产出
+        ``generated/`` 与 ``reports/``，语义由生成器判定的 ``purpose="diagnostic"`` 表达
+        （计划 R3/G1）。除回放门禁外每一步失败都只记 warning，绝不覆盖原始失败状态与错误信息。
+        """
+        if request.auto_generate and trace.generated is None:
+            try:
+                trace.state = RunState.SCRIPT_GENERATING
+                trace.generated = HypiumGenerator(
+                    self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds
+                ).generate(trace, self._synthetic_profile(trace))
+                emitter.emit(
+                    EventType.SCRIPT_GENERATED,
+                    "Hypium Python 和 JSON 已生成",
+                    trace.generated.model_dump(mode="json"),
+                )
+            except Exception as exc:  # noqa: BLE001 - 收尾生成失败不得影响运行结论
+                logger.warning("script generation failed for %s: %s", trace.run_id, exc)
+        if allow_replay and request.auto_execute:
+            if not trace.generated:
+                raise ToolExecutionError("cannot execute before generating a script", RunState.FAILED_SCRIPT)
+            trace.state = RunState.SCRIPT_EXECUTING
+            emitter.emit(EventType.EXECUTION_STARTED, "开始执行生成的 Hypium 用例")
+            runner = HypiumRunner(self.settings.resolved_runtime_home)
+            trace.replays = await self._run_replays(
+                runner, trace.generated, trace.run_id, self.settings.hypium_replay_attempts, emitter
+            )
+            self._update_replay_summary(trace)
+            if not all(item.passed for item in trace.replays):
+                raise ToolExecutionError("one or more Hypium replay attempts failed", RunState.FAILED_SCRIPT)
+            emitter.emit(
+                EventType.EXECUTION_FINISHED,
+                f"Hypium 用例连续执行 {self.settings.hypium_replay_attempts} 次成功",
+                {"replays": [item.model_dump(mode="json") for item in trace.replays]},
+            )
+        self._attach_analysis(trace, emitter)
+        self._save_case_from_trace(trace, emitter)
+        self._harvest_profile_evidence(trace, emitter)
+
+    @staticmethod
+    def _synthetic_profile(trace: RunTrace) -> TargetAppProfile | None:
+        """实时模式（磁盘无任何 Profile）下的最小冻结快照，让产物生成路径仍然可用。
+
+        这类运行没有任何经过设备验证的定位器：生成器据此判定 ``purpose="diagnostic"`` /
+        ``replay_eligible=False``，产物只用于诊断、入库与人工复用，不构成晋级证据。
+        无解析结果（例如目标解析阶段即失败）时返回 ``None``，生成器会自行报错并被降级为 warning。
+        """
+        if trace.profile_snapshot is not None:
+            return trace.profile_snapshot
+        resolved = trace.resolved_target
+        if resolved is None:
+            return None
+        return TargetAppProfile(
+            status=ProfileStatus.DRAFT,
+            target_app_id=resolved.target_app_id,
+            display_name=resolved.display_name,
+            bundle_name=resolved.bundle_name,
+            main_ability=resolved.main_ability,
+            module_name=resolved.module_name,
+            app_version=AppVersion(
+                version_name=resolved.version_name,
+                version_code=resolved.version_code,
+                signature_sha256=resolved.signature_sha256,
+            ),
+            launch_strategy={
+                "kind": "hdc_aa_start",
+                "command_template": "aa start -b {bundle_name} -a {main_ability}",
+            },
+            reset_strategy={
+                "kind": "stop_start_then_navigation_restore",
+                "clear_app_data": False,
+                "recovery_actions": [],
+            },
+            test_data_strategy={"fixed_input_text": "OpenHarmony", "secrets": []},
+            permission_and_popup_strategy={"payment": "always_blocked", "delete": "always_blocked"},
+            known_limitations=["live mode without a verified Profile: locators and assertions are unverified"],
+            provenance=ProfileProvenance(
+                discovery_run_id=trace.run_id,
+                evidence={"verification_passed": False, "live_mode": True},
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # 任务期证据回收（计划 3.3）：把任务期真实解析成功的定位器累加回 Profile
+    # ------------------------------------------------------------------
+
+    def _harvest_profile_evidence(self, trace: RunTrace, emitter: RunEventEmitter) -> None:
+        """收尾时把本次任务期证据累加进 Profile；任何失败都只记日志。"""
+        if not self.settings.profile_harvest_enabled:
+            return
+        try:
+            profile = self._synthetic_profile(trace)
+            if profile is None:
+                return
+            registry = self._registry(trace.exploration_policy.min_interaction_kinds)
+            harvested = self._harvest_task_evidence(trace, profile, registry, emitter)
+            if harvested is not None:
+                trace.profile_snapshot = harvested
+        except Exception as exc:  # noqa: BLE001 - 证据回收失败不得影响运行结论
+            logger.warning("task evidence harvest failed for %s: %s", trace.run_id, exc)
+
+    def _bootstrap_policy(self, requested: ExplorationPolicy) -> ExplorationPolicy:
+        """把 bootstrap 预算注入探索策略；请求显式给出的字段优先（计划 4.2）。
+
+        ``ExplorationPolicy`` 原先只能按请求设置，``max_duration_seconds`` 默认 900 且没有
+        对应 Settings 项，无法用 env 调整：本次日历运行因此烧掉 473 s 纯探索。
+        """
+        explicit = set(requested.model_fields_set)
+        updates: dict[str, object] = {}
+        if "max_pages" not in explicit:
+            updates["max_pages"] = min(int(self.settings.bootstrap_max_pages), 20)
+        if "max_actions_per_page" not in explicit:
+            updates["max_actions_per_page"] = min(int(self.settings.bootstrap_max_actions_per_page), 8)
+        if "max_duration_seconds" not in explicit:
+            updates["max_duration_seconds"] = min(int(self.settings.bootstrap_max_duration_seconds), 900)
+        if "advisor_enabled" not in explicit:
+            updates["advisor_enabled"] = bool(self.settings.bootstrap_advisor_enabled)
+        return requested.model_copy(update=updates) if updates else requested
+
+    def _admission_thresholds(self, min_interaction_kinds: int | None = None) -> AdmissionThresholds:
+        """门禁阈值：统一从 ``Settings`` 读取（计划 4.1/4.2）。"""
+        return AdmissionThresholds.from_settings(
+            self.settings,
+            min_interaction_kinds=min_interaction_kinds,
+            min_evidence_rounds=self.settings.profile_verification_rounds,
+        )
+
+    @staticmethod
+    def _default_admission_thresholds() -> AdmissionThresholds:
+        """静态调用点（``_profile_validation_trace``，也被 dc/distill 复用）的默认阈值。"""
+        from ..config import get_settings
+
+        return AdmissionThresholds.from_settings(get_settings())
+
+    def _registry(self, min_interaction_kinds: int = 2) -> ProfileRegistry:
+        return ProfileRegistry(
+            self.settings.resolved_profiles_dir,
+            min_interaction_kinds=min_interaction_kinds,
+            promotion_replay_attempts=self.settings.hypium_replay_attempts,
+            min_evidence_rounds=self.settings.profile_verification_rounds,
+        )
+
+    def _harvest_task_evidence(
+        self,
+        trace: RunTrace,
+        profile: TargetAppProfile,
+        registry: ProfileRegistry,
+        emitter: RunEventEmitter,
+    ) -> TargetAppProfile | None:
+        """把 ``trace`` 里真实成功动作的定位器与断言合并进 ``profile`` 并存为 draft。
+
+        合并语义（不是覆盖）：同 ``(kind, value, page_signature)`` 的条目 ``observed_rounds += 1``，
+        新条目以 1 起算——这是「多次运行累加到门禁」的机制（计划 3.3/G2）。
+
+        安全边界（计划 3.4）：回收产物**绝不**写入 ``verification_passed``，因此
+        ``registry.save_candidate`` 的准入校验必然拒绝它，只能停留在 draft；要晋级必须真的
+        跑绿一次 ``ProfileVerifier.verify``。若未来配置使准入通过，这里也会自然走 candidate。
+        """
+        locators = self._collect_task_evidence(trace, profile)
+        assertions = [item for item in trace.assertions if item.passed]
+        if not locators and not assertions:
+            return None
+        merged = self._merge_profile_evidence(trace, profile, locators, assertions)
+        try:
+            registry.save_candidate(merged)
+        except Exception:  # noqa: BLE001 - 未获验证证据时按设计退化为 draft
+            registry.save_draft(merged)
+        emitter.emit(
+            EventType.LOCATOR_CANDIDATE_OBSERVED,
+            f"任务期回收 {len(locators)} 个定位器与 {len(assertions)} 条断言证据",
+            {
+                "run_id": trace.run_id,
+                "locators": [{"kind": str(item.candidate.kind), "value": item.candidate.value} for item in locators],
+                "assertions": [{"kind": str(item.kind), "target": item.target} for item in assertions],
+            },
+        )
+        emitter.emit(
+            EventType.PROFILE_HARVESTED,
+            f"Profile 证据已累加（定位器 {len(merged.stable_locator_inventory)}、"
+            f"断言 {len(merged.assertion_inventory)}、状态 {merged.status}）",
+            {
+                "status": str(merged.status),
+                "locators": len(merged.stable_locator_inventory),
+                "assertions": len(merged.assertion_inventory),
+                "page_states": len({item.page_signature for item in merged.stable_locator_inventory}),
+            },
+        )
+        return merged
+
+    def _collect_task_evidence(self, trace: RunTrace, profile: TargetAppProfile) -> list[HarvestedLocator]:
+        """从任务期轨迹收集可入库的定位器证据。
+
+        数据来源全部真实存在却被丢弃（计划 3.3）：``trace.actions[*].locator`` 与
+        ``before_snapshot_id`` 指向的原始帧；当动作只解析出坐标类候选（SPATIAL / VLM_BBOX）
+        时，按 ``params["target"]`` 回查该帧的原始 ``UIElement`` 取出 key/id 作为长期证据。
+        """
+        snapshot_by_id = {item.snapshot_id: item for item in trace.snapshots}
+        foreground = ForegroundApp(bundle_name=profile.bundle_name, ability_name=profile.main_ability)
+        identity_cache: dict[str, str] = {}
+        harvested: list[HarvestedLocator] = []
+        for action in trace.actions:
+            if not action.success:
+                continue
+            snapshot_id = action.before_snapshot_id or ""
+            snapshot = snapshot_by_id.get(snapshot_id)
+            candidate = self._harvest_candidate(action, snapshot)
+            if candidate is None:
+                continue
+            if candidate.kind in {LocatorKind.KEY, LocatorKind.ID} and is_volatile_evidence_key(candidate.value):
+                # 易变 key（时钟/日期格/列表实例序号）直接丢弃，不入库（计划 3.3/2.2）。
+                continue
+            page_signature = ""
+            if snapshot is not None:
+                page_signature = identity_cache.setdefault(
+                    snapshot.snapshot_id, BoundedExplorer._structural_identity(snapshot, foreground)
+                )
+            harvested.append(
+                HarvestedLocator(candidate=candidate, page_signature=page_signature, snapshot_id=snapshot_id)
+            )
+        return harvested
+
+    @staticmethod
+    def _harvest_candidate(action: ActionResult, snapshot: ScreenSnapshot | None) -> LocatorCandidate | None:
+        """把一次成功动作还原成可长期复用的定位器候选；坐标类回退不作为长期证据。"""
+        usable = {LocatorKind.KEY, LocatorKind.ID, LocatorKind.TEXT, LocatorKind.TYPE_TEXT}
+        candidate = action.locator
+        if candidate is not None and candidate.kind in usable and candidate.value:
+            return candidate
+        target = str(action.params.get("target") or "")
+        if snapshot is not None and target:
+            element = next((item for item in snapshot.elements if item.element_id == target), None)
+            if element is None:
+                element = next(
+                    (item for item in snapshot.elements if target in {item.key, item.id, item.content}), None
+                )
+            if element is not None:
+                for item in element.locator_candidates:
+                    if item.kind in usable and item.value:
+                        return item
+                if element.key:
+                    return LocatorCandidate(kind=LocatorKind.KEY, value=element.key, score=1)
+                if element.id:
+                    return LocatorCandidate(kind=LocatorKind.ID, value=element.id, score=1)
+                if element.type and element.content:
+                    return LocatorCandidate(
+                        kind=LocatorKind.TYPE_TEXT, value=f"{element.type}|{element.content}", score=0.85
+                    )
+        return None  # SPATIAL / VLM_BBOX / COORDINATE：resolution-bound，不入库
+
+    @staticmethod
+    def _merge_profile_evidence(
+        trace: RunTrace,
+        profile: TargetAppProfile,
+        harvested: list[HarvestedLocator],
+        assertions: list[AssertionResult],
+    ) -> TargetAppProfile:
+        """合并语义：同键累加轮数，新键以 1 起算；绝不修改 verification_passed。"""
+        # 同一次运行内同一帧的重复观测只算一次：observed_rounds 是「跨轮观察次数」，
+        # 被同一轮里的重复动作抬升会让门禁统计失去意义。
+        seen: set[tuple[str, str, str, str]] = set()
+        unique: list[HarvestedLocator] = []
+        for item in harvested:
+            key = (str(item.candidate.kind), item.candidate.value, item.page_signature, item.snapshot_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        incoming = [AgentOrchestrator._stable_locator_from_candidate(item, trace.run_id) for item in unique]
+        merged_locators = AgentOrchestrator._merge_locators(profile.stable_locator_inventory, incoming)
+        merged_assertions = AgentOrchestrator._merge_assertions(
+            profile.assertion_inventory, assertions, merged_locators, trace.run_id
+        )
+        return profile.model_copy(
+            update={
+                "status": ProfileStatus.DRAFT,
+                "stable_locator_inventory": merged_locators,
+                "assertion_inventory": merged_assertions,
+            },
+            deep=True,
+        )
+
+    @staticmethod
+    def _stable_locator_from_candidate(harvested: HarvestedLocator, run_id: str) -> StableLocator:
+        """把运行时候选定位器转成长期证据条目；动态 key 折叠为稳定前缀模式。"""
+        candidate = harvested.candidate
+        values = {"key": "", "id": "", "text": "", "type": ""}
+        if candidate.kind == LocatorKind.TYPE_TEXT:
+            values["type"], _, values["text"] = candidate.value.partition("|")
+        elif candidate.kind in {LocatorKind.KEY, LocatorKind.ID, LocatorKind.TEXT}:
+            values[candidate.kind.value] = candidate.value
+        confidence = (
+            ConfidenceLevel.HIGH
+            if StabilityAnalyzer._level(candidate.kind) == StabilityLevel.HIGH
+            else ConfidenceLevel.MEDIUM
+        )
+        warning = None
+        dynamic_pattern = None
+        if candidate.kind in {LocatorKind.KEY, LocatorKind.ID} and is_dynamic_identifier(candidate.value):
+            dynamic_pattern = dynamic_identifier_pattern(candidate.value)
+            confidence = ConfidenceLevel.MEDIUM
+            warning = f"identifier appears dynamic; reusable prefix {dynamic_pattern}"
+        name = (candidate.value.split("|", 1)[-1] or candidate.value)[:80]
+        return StableLocator(
+            name=name,
+            page_signature=harvested.page_signature,
+            confidence=confidence,
+            observed_rounds=1,
+            unique_match_rounds=1,
+            source="live_task_harvest",
+            dynamic_pattern=dynamic_pattern,
+            warning=warning,
+            evidence_snapshot_ids=[harvested.snapshot_id] if harvested.snapshot_id else [],
+            last_observed_at=utc_now(),
+            **values,
+        )
+
+    @staticmethod
+    def _merge_locators(existing: list[StableLocator], incoming: list[StableLocator]) -> list[StableLocator]:
+        def key_of(item: StableLocator) -> tuple[str, str, str, str, str]:
+            return (item.key, item.id, item.text, item.type, item.page_signature)
+
+        merged = [item.model_copy(deep=True) for item in existing]
+        index = {key_of(item): item for item in merged}
+        for candidate in incoming:
+            found = index.get(key_of(candidate))
+            if found is None:
+                merged.append(candidate)
+                index[key_of(candidate)] = candidate
+                continue
+            # 累加语义：同一 (kind, value, page_signature) 再次观测到即递增轮数。
+            found.observed_rounds = found.observed_rounds + 1
+            found.unique_match_rounds = found.unique_match_rounds + 1
+            found.last_observed_at = utc_now()
+            for snapshot_id in candidate.evidence_snapshot_ids:
+                if snapshot_id not in found.evidence_snapshot_ids:
+                    found.evidence_snapshot_ids.append(snapshot_id)
+            if found.dynamic_pattern is None and candidate.dynamic_pattern is not None:
+                found.dynamic_pattern = candidate.dynamic_pattern
+            if found.warning is None and candidate.warning is not None:
+                found.warning = candidate.warning
+        return merged
+
+    @staticmethod
+    def _merge_assertions(
+        existing: list[AssertionDefinition],
+        incoming: list[AssertionResult],
+        locators: list[StableLocator],
+        run_id: str,
+    ) -> list[AssertionDefinition]:
+        merged = [item.model_copy(deep=True) for item in existing]
+        index = {(item.kind, item.target, item.page_signature): item for item in merged}
+        for item in incoming:
+            page_signature = ""
+            for locator in locators:
+                if locator.name and locator.name in item.target:
+                    page_signature = locator.page_signature
+                    break
+            key = (str(item.kind), item.target, page_signature)
+            found = index.get(key)
+            if found is None:
+                merged.append(
+                    AssertionDefinition(
+                        name=f"harvested-{len(merged) + 1}",
+                        kind=str(item.kind),
+                        target=item.target,
+                        page_signature=page_signature,
+                        confidence=ConfidenceLevel.MEDIUM,
+                        observed_rounds=1,
+                        evidence_snapshot_ids=[run_id],
+                    )
+                )
+                index[key] = merged[-1]
+                continue
+            found.observed_rounds = found.observed_rounds + 1
+            if run_id not in found.evidence_snapshot_ids:
+                found.evidence_snapshot_ids.append(run_id)
+        return merged
 
 
 # ---------------------------------------------------------------------------

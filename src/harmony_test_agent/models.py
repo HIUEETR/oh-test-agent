@@ -121,6 +121,8 @@ class EventType(StrEnum):
     DISCOVERY_PATH_BLOCKED = "discovery_path_blocked"
     LOCATOR_CANDIDATE_OBSERVED = "locator_candidate_observed"
     PROFILE_LIVE_MODE = "profile_live_mode"
+    PROFILE_INCREMENTAL = "profile_incremental"
+    PROFILE_HARVESTED = "profile_harvested"
     PROFILE_DRAFT_SAVED = "profile_draft_saved"
     PROFILE_VERIFICATION_STARTED = "profile_verification_started"
     PROFILE_VERIFICATION_ROUND_STARTED = "profile_verification_round_started"
@@ -306,6 +308,9 @@ class ScreenSnapshot(BaseModel):
     captured_at: datetime = Field(default_factory=utc_now)
     image_path: Path
     image_sha256: str
+    # 设备返回的原始 JPEG（计划 5.3）：模型上传直接用它，省掉 PNG 转码与 3-8× 传输量。
+    # PNG 落盘版本仍然保留，用于报告与证据。旧快照缺省为 None。
+    model_image_path: Path | None = None
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     page_title: str = ""
@@ -484,19 +489,23 @@ class TargetAppProfile(BaseModel):
             if locator.coordinate is not None and (locator.resolution_bound is None or not locator.warning):
                 raise ValueError("coordinate locators require a resolution bound and warning")
         if self.status == ProfileStatus.VERIFIED:
-            if self.provenance.verified_at is None:
-                raise ValueError("verified Profile requires provenance.verified_at")
-            replay_ids = self.provenance.hypium_replay_run_ids
-            # 2026-09-17 重构：主流程内联 1 次回放即可晋级，剩余 2 次由
-            # POST /api/profiles/{id}/replay 异步追加，因此门禁只要求「至少一次」。
-            if len(replay_ids) < 1 or len(set(replay_ids)) != len(replay_ids):
-                raise ValueError("verified Profile requires at least one unique Hypium replay run ID")
-            if not self.provenance.evidence.get("verification_passed"):
-                raise ValueError("verified Profile requires passed device verification evidence")
-            if len({item.page_signature for item in self.stable_locator_inventory}) < 3:
-                raise ValueError("verified Profile requires locators on three pages")
-            if len(self.assertion_inventory) < 2:
-                raise ValueError("verified Profile requires two application assertions")
+            # 门禁唯一实现见 profiles/admission.py（计划 4.1/R15）；文案保持历史字面量。
+            from .config import get_settings
+            from .profiles.admission import (
+                MODEL_GATES,
+                AdmissionEvidence,
+                AdmissionThresholds,
+                describe_admission_failure,
+                evaluate_admission,
+                pick_first_failure,
+            )
+
+            thresholds = AdmissionThresholds.from_settings(get_settings())
+            evidence = AdmissionEvidence.from_profile(self, thresholds, include=MODEL_GATES)
+            failures = evaluate_admission(evidence, thresholds=thresholds)
+            gate = pick_first_failure(failures, style="model")
+            if gate is not None:
+                raise ValueError(describe_admission_failure(gate, style="model", thresholds=thresholds))
         return self
 
 
@@ -529,6 +538,23 @@ class PlannedStep(BaseModel):
     direction: Literal["up", "down", "left", "right"] | None = None
     wait_seconds: float | None = None
     expected: str | None = None
+    # 精确滑动参数（计划 5.5，additive）：显式起止坐标优先于方向 + 锚点，格距 × 格数次之。
+    start: tuple[int, int] | None = None
+    end: tuple[int, int] | None = None
+    distance: int | None = Field(default=None, ge=0)
+    steps: int | None = Field(default=None, ge=0)
+
+
+class StepHistoryEntry(BaseModel):
+    """紧凑的跨步历史条目，供 Live 决策携带（计划 5.4，借鉴 DC 的连续上下文）。"""
+
+    index: int = Field(ge=0)
+    instruction: str = ""
+    tool: str = ""
+    target: str = ""
+    ok: bool = False
+    page_path: str = ""
+    note: str = ""
 
 
 class PlanResult(BaseModel):
@@ -549,6 +575,12 @@ class ToolDecision(BaseModel):
     coordinate: tuple[int, int] | None = None
     direction: Literal["up", "down", "left", "right"] | None = None
     wait_seconds: float | None = None
+    # 精确滑动（计划 5.5）：``start``/``end`` 为屏幕绝对像素坐标；
+    # ``steps`` 表示滚轮列上要移动的格数（配合 ``direction``），``distance`` 为像素行程下限。
+    start: tuple[int, int] | None = None
+    end: tuple[int, int] | None = None
+    distance: int | None = Field(default=None, ge=0)
+    steps: int | None = Field(default=None, ge=0)
     reasoning: str = ""
 
 

@@ -87,6 +87,8 @@ const NOTICE_RULES: Record<string, { level: NoticeLevel; skip?: boolean }> = {
   profile_revalidation_started: { level: "info" },
   profile_revalidation_finished: { level: "success" },
   profile_live_mode: { level: "warn" },
+  profile_incremental: { level: "info" },
+  profile_harvested: { level: "success" },
   profile_draft_saved: { level: "success" },
   profile_verification_started: { level: "info" },
   profile_verification_round_started: { level: "info" },
@@ -150,7 +152,13 @@ export function aggregateThoughts(events: RunEvent[]): ThoughtBlock[] {
       case "elements_detected": {
         const snapshotId = String(payload.snapshot_id ?? "");
         const target = snapshotId ? perceptionBySnapshot.get(snapshotId) : undefined;
-        if (target) target.elementCount = Number(payload.count ?? 0);
+        if (target) {
+          target.elementCount = Number(payload.count ?? 0);
+          // 合并视觉请求（计划 5.1）：帧先推送画面，观测摘要在随后的 elements_detected 里回填，
+          // 因此这里补写摘要，避免界面丢失 LLM 对页面的理解。
+          const summary = typeof payload.summary === "string" ? payload.summary : "";
+          if (summary) target.summary = summary;
+        }
         break;
       }
       case "action_started": {

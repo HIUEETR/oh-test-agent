@@ -90,6 +90,7 @@ def make_orchestrator(tmp_path: Path, device: MinimalDevice, provider: MockAgent
         runtime_dir=tmp_path / "runs",
         database_path=tmp_path / "agent.db",
         target_profile_path=profile_path,
+        profiles_dir=tmp_path / "profiles",
         runtime_home=tmp_path / "home",
         agent_action_timeout=1,
     )

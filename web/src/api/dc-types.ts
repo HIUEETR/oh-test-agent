@@ -120,7 +120,7 @@ export type DcEventType =
   | "screenshot_captured" | "ui_tree_captured"
   | "assistant_message" | "thinking" | "agent_text" | "message_delta"
   | "token_usage_updated"
-  | "script_generated" | "tier_changed" | "needs_attention" | "error";
+  | "script_generated" | "case_suggested" | "tier_changed" | "needs_attention" | "error";
 
 /**
  * `message_delta` 事件 payload 契约（token 级流式增量）：
@@ -149,7 +149,7 @@ export const DC_EVENT_TYPES: DcEventType[] = [
   "screenshot_captured", "ui_tree_captured",
   "assistant_message", "thinking", "agent_text", "message_delta",
   "token_usage_updated",
-  "script_generated", "tier_changed", "needs_attention", "error",
+  "script_generated", "case_suggested", "tier_changed", "needs_attention", "error",
 ];
 
 /** DC 事件 */
@@ -246,6 +246,10 @@ export interface DcSessionView {
   continuation?: DcContinuationContext | null;
   /** 会话内累计 token 用量（Mock 或旧快照可能为 null） */
   token_usage?: DcTokenUsage | null;
+  /** 轮次结束后自动推断出的可复用身份（计划 7）：生成脚本/蒸馏可直接复用，无需手填 */
+  suggested_bundle_name?: string | null;
+  suggested_main_ability?: string | null;
+  suggested_step_count?: number;
 }
 
 /** 会话摘要（GET /api/dc/sessions 列表项；active=false 表示可从磁盘恢复） */

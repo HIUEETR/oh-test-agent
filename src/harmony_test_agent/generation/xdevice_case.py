@@ -243,6 +243,13 @@ def _action_lines(step: TestStepSpec, context: _EmitContext) -> list[str]:
         return [f"driver.clear_text({expression}){comment}"]
 
     if action == StepAction.SWIPE:
+        if step.start is not None and step.end is not None:
+            # 计划 5.5：显式起止坐标渲染为 driver.slide（xdevice 与 hypium 同款 API）。
+            start = render_coordinate(step.start)
+            end = render_coordinate(step.end)
+            if step.slide_time is not None:
+                return [f"driver.slide({start}, {end}, slide_time={float(step.slide_time)!r})"]
+            return [f"driver.slide({start}, {end})"]
         return [f"driver.swipe({(step.direction or 'up').upper()!r})"]
 
     if action == StepAction.FLING:

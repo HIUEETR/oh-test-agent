@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     agent_max_steps: int = Field(default=20, ge=1, le=100)
     agent_action_timeout: float = Field(default=30, gt=0, le=300)
     agent_model_timeout: float = Field(default=90, gt=0, le=300)
+    agent_model_retry_limit: int = Field(default=1, ge=0, le=3)
+    """单步模型决策超时后的重试次数；重试沿用同一帧并附加「只输出工具决策」的收敛提示。"""
     agent_retry_limit: int = Field(default=2, ge=0, le=5)
     agent_step_recovery_limit: int = Field(default=2, ge=0, le=5)
     unchanged_screen_limit: int = Field(default=2, ge=1, le=5)
@@ -51,6 +53,48 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     profile_verification_rounds: int = Field(default=1, ge=1, le=3)
     """Profile 设备验证轮次；默认 1 轮，可通过 PROFILE_VERIFICATION_ROUNDS=3 恢复旧行为。"""
+
+    profile_harvest_enabled: bool = True
+    """收尾时把任务期真实定位器证据累加回 Profile（计划 3.3）。
+
+    单测可通过 ``PROFILE_HARVEST_ENABLED=false`` 关闭，避免把产物写进仓库 ``profiles/``。"""
+
+    # ------------------------------------------------------------------
+    # Bootstrap 预算与 Profile 门禁阈值（计划 4.1/4.2）
+    # ------------------------------------------------------------------
+    bootstrap_enabled_on_task_run: bool = False
+    """任务型运行（带明确 task 且非 bootstrap_only）是否前置完整探索。
+
+    默认 False：Profile 由任务期证据回收（PROFILE_HARVEST）作为副产物建立，
+    完整探索通过 ``POST /api/profiles/{id}/verify``（bootstrap_only=True）显式触发。
+    显式打开可恢复「同一次运行先探索晋级再执行任务」的旧行为。"""
+
+    bootstrap_max_pages: int = Field(default=8, ge=1, le=20)
+    bootstrap_max_actions_per_page: int = Field(default=6, ge=1, le=8)
+    bootstrap_max_duration_seconds: int = Field(default=300, ge=30, le=900)
+    bootstrap_advisor_enabled: bool = True
+    """探索预算上界必须落在 ``ExplorationPolicy`` 的字段约束内（tests/unit/test_discovery.py 钉住）。"""
+
+    profile_min_stable_locators: int = Field(default=3, ge=1, le=20)
+    profile_min_page_states: int = Field(default=3, ge=1, le=20)
+    profile_min_assertions: int = Field(default=2, ge=1, le=10)
+    profile_min_interaction_kinds: int = Field(default=2, ge=1, le=3)
+    """Profile 准入门禁阈值；单页应用调试时可把 ``profile_min_page_states`` 调到 1。"""
+
+    # ------------------------------------------------------------------
+    # Live 执行效率（计划 5.1/5.2/5.4）
+    # ------------------------------------------------------------------
+    merge_observe_and_decide: bool = True
+    """把每步的 analyze + decide 合并为一次视觉请求；关闭即回退两次调用。"""
+
+    model_element_limit: int = Field(default=80, ge=10, le=500)
+    """送模型的元素列表上限（按分数排序取前 N），降低单次请求延迟。"""
+
+    model_image_format: Literal["jpeg", "png"] = "jpeg"
+    """送模型的截图格式；jpeg 显著降低上传字节数与延迟。"""
+
+    live_decision_history_steps: int = Field(default=4, ge=0, le=10)
+    """Live 决策注入的跨步历史条数；0 关闭（回退到只带最近一次失败反馈）。"""
 
     hypium_replay_attempts: int = Field(default=1, ge=1, le=3)
     """主流程内联 Hypium 回放次数；默认 1 次，剩余由 POST /api/profiles/{id}/replay 异步追加。"""
@@ -93,6 +137,8 @@ class Settings(BaseSettings):
     # token 级流式输出：开启后模型侧按增量发 message_delta，前端逐字显示。
     # 关闭即回退整块输出（每个 part 仍发全量 THINKING/AGENT_TEXT，行为与旧版一致）。
     dc_token_streaming: bool = True
+    # 轮次成功结束后自动推断目标身份并发 CASE_SUGGESTED（计划 7）：关掉即回到「用户手填 bundle」。
+    dc_auto_resolve_identity: bool = True
 
     # ------------------------------------------------------------------
     # 用例库 / 官方 xdevice harness / 执行结果分析配置
