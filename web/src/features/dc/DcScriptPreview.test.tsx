@@ -95,18 +95,28 @@ describe("DcScriptPreview", () => {
     expect(document.body.querySelector(".dc-script-overlay")).toBeNull();
   });
 
-  it("无断言脚本显示「诊断回放专用」", () => {
+  it("无断言但可执行时提示「无检查点，建议补充断言」", () => {
+    useDcConsole.setState({ script: { ...artifact(), replay_eligible: true, explicit_assertions: 0 } });
+
     render(<Harness />);
 
-    expect(screen.getByText("诊断回放专用 · 未包含断言")).toBeInTheDocument();
+    expect(screen.getByText("可立即执行 · 断言 0 条（无检查点，建议补充断言）")).toBeInTheDocument();
   });
 
-  it("有断言且非占位身份时显示「可作为验收脚本执行」并给出断言数", () => {
+  it("有断言且可执行时显示「可立即执行」并给出断言数", () => {
     useDcConsole.setState({ script: { ...artifact(), replay_eligible: true, explicit_assertions: 3 } });
 
     render(<Harness />);
 
-    expect(screen.getByText("可作为验收脚本执行 · 断言 3 条")).toBeInTheDocument();
+    expect(screen.getByText("可立即执行 · 断言 3 条")).toBeInTheDocument();
+  });
+
+  it("不可执行（占位身份/无可回放动作）时显示原因", () => {
+    useDcConsole.setState({ script: { ...artifact(), replay_eligible: false } });
+
+    render(<Harness />);
+
+    expect(screen.getByText("不可执行 · 缺少可回放动作或身份为占位值")).toBeInTheDocument();
   });
 
   it("footer 的「重新生成」重新调用生成接口", async () => {

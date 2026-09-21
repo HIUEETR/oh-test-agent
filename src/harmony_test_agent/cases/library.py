@@ -166,10 +166,10 @@ def scenario_for_trace(trace: Any) -> ScenarioKind:
     ``provisional`` / ``live_mode`` 的探索型运行 → ``EXPLORATORY`` →
     ``phase="bootstrap"``（Profile 引导/校验运行）→ ``SMOKE`` → 其余 ``CORE_FLOW``。
 
-    公开导出：``POST /api/cases/from-run/{run_id}?force=true`` 这类「绕过
-    ``replay_eligible`` 门槛」的构建路径可以直接复用它，保证强制入库的用例场景一致。
-    注意 provisional 轨迹永远不会通过 ``build_from_run`` 的合格门槛，因此该分支只在这条
-    强制路径上生效。
+    公开导出：``POST /api/cases/from-run/{run_id}?force=true`` 这类「强制入库」的构建路径
+    可以直接复用它，保证强制入库的用例场景一致。该分支现在只在 ``runnable_blockers``
+    非空（缺可回放动作或身份占位）时才需要——provisional / live_mode 轨迹只要物理上
+    可执行就会正常入库，不再被质量门禁拦下。
     """
     declared = getattr(trace, "scenario", None)
     if declared is not None:
@@ -446,6 +446,11 @@ class CaseLibrary:
             "case_version": version,
             "purpose": built.purpose,
             "replay_eligible": built.replay_eligible,
+            "confidence": built.confidence,
+            "confidence_factors": list(built.confidence_factors),
+            "promotion_eligible": built.promotion_eligible,
+            "promotion_blockers": list(built.promotion_blockers),
+            "runnable_blockers": list(built.runnable_blockers),
             "source_agent_outcome": built.source_agent_outcome,
             "incomplete_reasons": list(built.incomplete_reasons),
             "warnings": list(built.warnings),
@@ -486,12 +491,13 @@ class CaseLibrary:
     # ------------------------------------------------------------------
 
     def build_from_run(self, trace: Any) -> CaseRecord | None:
-        """从 Live 轨迹构建并保存用例；不合格返回 ``None``。
+        """从 Live 轨迹构建并保存用例；不可执行时返回 ``None``。
 
-        规则（与计划 B2 一致）：
+        规则（计划 G5：质量门禁不再拦下自动入库）：
 
         * ``trace.profile_snapshot`` 为空 ⇒ ``None``（没有冻结 Profile 就没有可复现的应用身份）；
-        * ``CaseBuilder.from_trace`` 判定 ``replay_eligible=False`` ⇒ ``None``（诊断态不入库）；
+        * ``runnable_blockers`` 非空 ⇒ ``None``——只剩 G3 的两条**物理**必要条件
+          （缺可回放动作 / 应用身份为占位）；失败动作、无断言、live_mode 等只降置信度；
         * ``case_id`` 由 ``run_id`` 稳定推导，因此同一 run 重复构建会命中版本去重。
         """
         profile = getattr(trace, "profile_snapshot", None)
@@ -506,15 +512,15 @@ class CaseLibrary:
             case_id=case_id,
             scenario=scenario_for_trace(trace),
         )
-        if not built.replay_eligible:
+        if built.runnable_blockers:
             return None
         return self.save_built(self._pin_source_identity(built, case_id=case_id, source_time=source_time))
 
     def build_from_dc(self, snapshot: Any, bundle_name: str, main_ability: str) -> CaseRecord | None:
-        """从 DC 会话快照构建并保存用例；不合格返回 ``None``。
+        """从 DC 会话快照构建并保存用例；不可执行时返回 ``None``。
 
-        规则：``CaseBuilder.from_dc_invocations`` 判定 ``replay_eligible=False`` ⇒ ``None``
-        （没有显式断言、没有可回放操作，或身份仍是占位 ``com.example.app``）。
+        规则：``CaseBuilder.from_dc_invocations`` 的 ``runnable_blockers`` 非空 ⇒ ``None``
+        （没有可回放操作，或身份仍是占位 ``com.example.app``）；缺显式断言只降置信度。
         ``snapshots`` 显式传 ``None``：DC 会话快照不携带屏幕分辨率，坐标兜底会带
         ``unknown resolution bound`` 警告（宁可用坐标也不静默丢步骤）。
         """
@@ -531,7 +537,7 @@ class CaseLibrary:
             snapshots=None,
             case_id=case_id,
         )
-        if not built.replay_eligible:
+        if built.runnable_blockers:
             return None
         return self.save_built(self._pin_source_identity(built, case_id=case_id, source_time=source_time))
 
@@ -576,6 +582,7 @@ class CaseLibrary:
         if row is None:
             return None
         spec, stored_version, status, artifact_dir = row
+        quality = self._quality_of(artifact_dir, spec.case_id)
         return CaseRecord(
             case_id=spec.case_id,
             version=stored_version,
@@ -591,7 +598,43 @@ class CaseLibrary:
             created_at=spec.provenance.created_at,
             artifact_dir=str(artifact_dir),
             spec=spec,
+            confidence=quality["confidence"],
+            confidence_factors=quality["confidence_factors"],
+            promotion_eligible=quality["promotion_eligible"],
+            promotion_blockers=quality["promotion_blockers"],
         )
+
+    @staticmethod
+    def _quality_of(artifact_dir: Path, case_id: str) -> dict[str, Any]:
+        """从入库时写下的 ``standalone/test_<safe>.json`` 读回质量与晋级标注。
+
+        这些字段是**审计信息**、不参与版本去重（``spec_json`` 里没有它们），因此读侧按
+        产物配置回填，避免给 ``cases`` 表加列与迁移；文件缺失（旧版本目录）时退化为最低档。
+        """
+        fallback: dict[str, Any] = {
+            "confidence": "low",
+            "confidence_factors": [],
+            "promotion_eligible": False,
+            "promotion_blockers": [],
+        }
+        config_path = artifact_dir / STANDALONE_DIRNAME / f"test_{safe_script_id(case_id)}.json"
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        except OSError, ValueError:
+            return fallback
+        if not isinstance(payload, dict):
+            return fallback
+        confidence = str(payload.get("confidence") or "low")
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "low"
+        return {
+            "confidence": confidence,
+            "confidence_factors": [
+                str(item) for item in (payload.get("confidence_factors") or payload.get("incomplete_reasons") or [])
+            ],
+            "promotion_eligible": bool(payload.get("promotion_eligible")),
+            "promotion_blockers": [str(item) for item in (payload.get("promotion_blockers") or [])],
+        }
 
     def list(self, **filters: Any) -> list[CaseSummary]:
         """委托仓库列表查询（``target_app_id`` / ``scenario`` / ``tag`` / ``status`` / ``limit``）。"""
@@ -638,8 +681,9 @@ class CaseLibrary:
         """重跑一个已入库的用例，返回终态执行记录。
 
         * ``engine="hypium_standalone"``：构造 ``GeneratedArtifact`` 后调
-          ``HypiumRunner.execute_diagnostic``——**故意绕过 run 级验收门禁**（用例库重跑不是
-          Profile 晋级证据），但证据布局与 ``generated_result.json`` 解析完全一致。
+          ``HypiumRunner.execute_diagnostic``——用例库重跑是**不计入 Profile 晋级证据**的
+          独立执行路径，因此不经过 run 级执行门禁；证据布局与 ``generated_result.json``
+          解析完全一致。
         * ``engine="xdevice_devicetest"``：用 emitter 幂等重建工程 → ``build_project`` →
           ``XDeviceRunner.execute``。
         * 超时取 ``spec.timeout_seconds``；``device_sn`` / ``params`` 通过 ``extra_env``
@@ -744,13 +788,16 @@ class CaseLibrary:
         )
         if not python_path.is_file():
             raise FileNotFoundError(f"case {spec.case_id!r} v{version} has no standalone script: {python_path}")
-        # purpose / replay_eligible 只作审计说明：``execute_diagnostic`` 内部会重建一个
-        # ``replay_eligible=False`` 的产物，从而**故意**绕过 run 级验收门禁。
+        # purpose / replay_eligible 只作审计说明：``execute_diagnostic`` 会重建产物并**故意**
+        # 跳过 run 级执行门禁——用例库重跑属于「不计入 Profile 晋级证据」的独立执行路径，
+        # 与脚本本身能否执行（runnable）无关。
+        # purpose 跟随入库时写下的 runnable 判定（standalone config 的 replay_eligible），
+        # 而不是 ``spec.status``：无硬检查点的压测用例 status=draft 但照样可执行。
         generated = GeneratedArtifact(
             python_path=python_path,
             config_path=python_path.with_suffix(".json"),
             metadata_path=python_path.with_suffix(".json"),
-            purpose="acceptance" if spec.status == "active" else "diagnostic",
+            purpose="acceptance" if self._standalone_is_runnable(python_path, spec) else "diagnostic",
             replay_eligible=False,
             case_id=spec.case_id,
         )
@@ -773,6 +820,20 @@ class CaseLibrary:
             error=_replay_error_text(replay.error),
             analysis=self._analyze_replay(replay, directory=directory, spec=spec, device=device),
         )
+
+    @staticmethod
+    def _standalone_is_runnable(python_path: Path, spec: TestCaseSpec) -> bool:
+        """读入库时写下的 ``test_<safe>.json`` 判断脚本是否可执行（G3 两条物理条件）。
+
+        config 不可读（旧版本目录）时退回 ``spec.status == "active"``，保持历史行为。
+        """
+        try:
+            payload = json.loads(python_path.with_suffix(".json").read_text(encoding="utf-8-sig"))
+        except OSError, ValueError:
+            return spec.status == "active"
+        if not isinstance(payload, dict) or "replay_eligible" not in payload:
+            return spec.status == "active"
+        return bool(payload["replay_eligible"])
 
     def _run_xdevice(
         self,

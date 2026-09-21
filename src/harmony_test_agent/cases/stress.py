@@ -38,6 +38,8 @@ from .builder import (
     UNKNOWN_RESOLUTION_BOUND,
     CaseBuilder,
     CaseBuildResult,
+    evaluate_confidence,
+    evaluate_runnable,
     new_case_id,
     slugify,
 )
@@ -275,7 +277,7 @@ def build_stress_case(
         raise ValueError("SOAK 压测必须提供 duration_budget_seconds（10..7200 秒）")
 
     warnings: list[str] = []
-    bundle_name, main_ability, placeholder = _resolve_identity(profile, request, warnings)
+    bundle_name, main_ability, _placeholder = _resolve_identity(profile, request, warnings)
     if profile is None:
         warnings.append("未提供 Profile：循环体只能来自请求本身，且没有入口页锚点可供检查点使用")
     elif profile.status != ProfileStatus.VERIFIED:
@@ -298,13 +300,16 @@ def build_stress_case(
     if not hard_checkpoints:
         warnings.append("压测用例没有任何非软检查点，用例降级为 draft")
 
-    replay_eligible = bool(hard_checkpoints) and not placeholder
-    incomplete_reasons: list[str] = []
-    if not replay_eligible:
-        if not hard_checkpoints:
-            incomplete_reasons.append("stress case has no non-soft checkpoint")
-        if placeholder:
-            incomplete_reasons.append(f"source app identity is a placeholder ({PLACEHOLDER_BUNDLE})")
+    # 无硬检查点从阻断条件降为质量因素（循环体照样能跑）；占位身份仍是 runnable blocker。
+    replay_eligible, runnable_blockers = evaluate_runnable(
+        included_actions=len(body_steps),
+        bundle_name=bundle_name,
+        main_ability=main_ability,
+    )
+    confidence_factors: list[str] = []
+    if not hard_checkpoints:
+        confidence_factors.append("stress case has no non-soft checkpoint")
+    confidence = evaluate_confidence(confidence_factors, outcome="completed")
 
     title = (request.title_zh or "").strip() or f"{KIND_TITLE_ZH[request.kind]}（{request.iterations} 轮）"
     spec = TestCaseSpec(
@@ -360,8 +365,12 @@ def build_stress_case(
         omitted_actions=[],
         warnings=list(dict.fromkeys(warnings)),
         counts=counts,
-        incomplete_reasons=incomplete_reasons,
+        incomplete_reasons=confidence_factors,  # 兼容别名：与 confidence_factors 同值
+        confidence_factors=confidence_factors,
+        confidence=confidence,
         replay_eligible=replay_eligible,
+        runnable_blockers=runnable_blockers,
+        promotion_eligible=replay_eligible,
         purpose="acceptance" if replay_eligible else "diagnostic",
         explicit_assertions=len(hard_checkpoints),
     )
@@ -689,7 +698,7 @@ def _resolve_identity(
         bundle = PLACEHOLDER_BUNDLE
         warnings.append(
             f"没有可用的 bundle 名（Profile 缺失或 target 只给了应用名），"
-            f"使用占位身份 {PLACEHOLDER_BUNDLE}，用例仅作诊断用途"
+            f"使用占位身份 {PLACEHOLDER_BUNDLE}，脚本缺少真实应用身份因而不可执行"
         )
     ability = (profile.main_ability if profile is not None else "") or PLACEHOLDER_ABILITY
     return bundle, ability, placeholder

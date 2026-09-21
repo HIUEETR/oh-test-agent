@@ -105,6 +105,48 @@ UNKNOWN_RESOLUTION_BOUND = (0, 0)
 #: 兜底检查点的中文说明。
 FALLBACK_CHECKPOINT_MESSAGE = "检查点：应可见一个已观察到的稳定元素"
 
+#: ``confidence`` 三档中判为 low 的质量因素前缀。
+LOW_CONFIDENCE_PREFIXES: tuple[str, ...] = (
+    "source agent outcome is failed",
+    "source trace contains failed actions",
+    "source trace does not end with a successful FINISH action",
+)
+
+ConfidenceLevel = Literal["high", "medium", "low"]
+
+
+def evaluate_runnable(
+    *,
+    included_actions: int,
+    bundle_name: str,
+    main_ability: str,
+) -> tuple[bool, list[str]]:
+    """可执行性判定：**只有 2 条物理必要条件**。
+
+    任何质量、验证、Profile 状态相关的顾虑都不得进入这里——它们属于 confidence 层
+    （``evaluate_confidence``）或晋级层（``_promotion_blockers``）。缺任一条的脚本在物理上
+    根本无法运行：没有可回放动作，或应用身份还是占位值。
+
+    **身份占位只认 ``bundle_name``**：``EntryAbility`` 是鸿蒙工程的默认且常见的**真实**
+    ability 名——本案 ``com.github.zhuoyi233.zhplus / EntryAbility`` 就是真实身份，把它当成
+    占位会让默认路径下的真实脚本永远不可执行（计划的 G1 与 Phase 4 验收都要求它可执行）。
+    因此这里只在 bundle 缺失/等于哨兵 ``com.example.app``，或 ability 为空（脚本连启动参数都
+    没有）时判为不可执行。
+    """
+    blockers: list[str] = []
+    if included_actions <= 0:
+        blockers.append("script has no replayable action")
+    if not bundle_name or bundle_name == PLACEHOLDER_BUNDLE or not main_ability:
+        blockers.append(f"app identity is a placeholder ({PLACEHOLDER_BUNDLE}/{PLACEHOLDER_ABILITY})")
+    return not blockers, blockers
+
+
+def evaluate_confidence(factors: list[str], *, outcome: str) -> ConfidenceLevel:
+    """按质量因素把脚本分到 high/medium/low 三档（**非阻断**，只影响徽章与排序）。"""
+    if outcome == "failed" or any(factor.startswith(LOW_CONFIDENCE_PREFIXES) for factor in factors):
+        return "low"
+    return "medium" if factors else "high"
+
 
 @dataclass
 class CaseBuildResult:
@@ -115,10 +157,17 @@ class CaseBuildResult:
     warnings: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     incomplete_reasons: list[str] = field(default_factory=list)
+    """.. deprecated:: 与 ``confidence_factors`` 同值的兼容别名（旧 JSON 产物 / 旧 API 消费方）。"""
     replay_eligible: bool = False
+    """脚本是否可执行（runnable）；质量看 ``confidence``，晋级看 ``promotion_eligible``。"""
     purpose: Literal["acceptance", "diagnostic"] = "diagnostic"
     explicit_assertions: int = 0
     source_agent_outcome: Literal["completed", "failed", "stopped", "unknown"] = "unknown"
+    confidence: ConfidenceLevel = "low"
+    confidence_factors: list[str] = field(default_factory=list)
+    promotion_eligible: bool = False
+    promotion_blockers: list[str] = field(default_factory=list)
+    runnable_blockers: list[str] = field(default_factory=list)
 
 
 def new_case_id() -> str:
@@ -384,14 +433,21 @@ class CaseBuilder:
             "coordinate_fallbacks": coordinate_fallbacks,
         }
         outcome = self._agent_outcome(trace)
-        incomplete_reasons = self._incomplete_reasons(
+        confidence_factors = self._confidence_factors(
             trace,
             outcome,
             explicit_assertions=explicit_assertions,
             omitted=omitted,
             warnings=warnings,
         )
-        replay_eligible = not incomplete_reasons
+        promotion_blockers = self._promotion_blockers(trace)
+        included_actions = counts["generated_actions"] + counts["generated_assertions"]
+        replay_eligible, runnable_blockers = evaluate_runnable(
+            included_actions=included_actions,
+            bundle_name=profile.bundle_name,
+            main_ability=profile.main_ability,
+        )
+        confidence = evaluate_confidence(confidence_factors, outcome=outcome)
         spec = self._assemble(
             steps=steps,
             profile=profile,
@@ -411,8 +467,13 @@ class CaseBuilder:
             omitted_actions=omitted,
             warnings=warnings,
             counts=counts,
-            incomplete_reasons=incomplete_reasons,
+            incomplete_reasons=confidence_factors,  # 兼容别名：与 confidence_factors 同值
+            confidence_factors=confidence_factors,
+            confidence=confidence,
             replay_eligible=replay_eligible,
+            runnable_blockers=runnable_blockers,
+            promotion_eligible=replay_eligible and not promotion_blockers,
+            promotion_blockers=promotion_blockers,
             purpose="acceptance" if replay_eligible else "diagnostic",
             explicit_assertions=explicit_assertions,
             source_agent_outcome=outcome,  # type: ignore[arg-type]
@@ -543,17 +604,16 @@ class CaseBuilder:
             add_step(StepAction.NOOP_COMMENT, step_id="no-replayable-operations", comment=NO_REPLAYABLE_COMMENT)
 
         explicit_assertions = sum(1 for item in invocations if item.success and item.tool in assert_tools)
-        replay_eligible = bool(
-            explicit_assertions >= 1
-            and bundle_name != PLACEHOLDER_BUNDLE
-            and main_ability != PLACEHOLDER_ABILITY
-            and included_count > 0
+        replay_eligible, runnable_blockers = evaluate_runnable(
+            included_actions=included_count,
+            bundle_name=bundle_name,
+            main_ability=main_ability,
         )
-        if not replay_eligible:
-            if explicit_assertions == 0:
-                warnings.append("no explicit assert_* tool call was recorded; script is diagnostic only")
-            if bundle_name == PLACEHOLDER_BUNDLE or main_ability == PLACEHOLDER_ABILITY:
-                warnings.append("placeholder bundle/ability supplied; script is diagnostic only")
+        confidence_factors: list[str] = []
+        if explicit_assertions == 0:
+            # 「无显式断言」从阻断条件降为 medium 置信度：脚本照样能跑，只是没有检查点。
+            confidence_factors.append("no explicit assert_* tool call was recorded")
+        confidence = evaluate_confidence(confidence_factors, outcome="completed")
 
         counts = {
             "source_actions": len(invocations),
@@ -585,8 +645,13 @@ class CaseBuilder:
             omitted_actions=omitted,
             warnings=warnings,
             counts=counts,
-            incomplete_reasons=[] if replay_eligible else list(dict.fromkeys(warnings)),
+            incomplete_reasons=confidence_factors,  # 兼容别名：与 confidence_factors 同值
+            confidence_factors=confidence_factors,
+            confidence=confidence,
             replay_eligible=replay_eligible,
+            runnable_blockers=runnable_blockers,
+            promotion_eligible=replay_eligible,
+            promotion_blockers=[],
             purpose="acceptance" if replay_eligible else "diagnostic",
             explicit_assertions=explicit_assertions,
         )
@@ -734,7 +799,7 @@ class CaseBuilder:
                     )
                 )
             # 历史实现里断言也会渲染成一行脚本体，因此同样计入 included_count
-            # （replay_eligible 的第三个条件依赖这个口径）。
+            # （``evaluate_runnable`` 的「至少 1 个可回放动作」依赖这个口径）。
             # 历史实现把 Back 键事件映射到 ToolName.BACK 并渲染 driver.go_back()；
             # 其他按键由调用方在进入本函数前就 omit 掉了。
             return True, True
@@ -1066,7 +1131,7 @@ class CaseBuilder:
         return "unknown"
 
     @staticmethod
-    def _incomplete_reasons(
+    def _confidence_factors(
         trace: RunTrace,
         outcome: str,
         *,
@@ -1074,28 +1139,43 @@ class CaseBuilder:
         omitted: list[dict[str, str]],
         warnings: list[str],
     ) -> list[str]:
-        reasons: list[str] = []
-        if trace.provisional:
-            reasons.append("provisional trace cannot qualify for acceptance replay")
-        if trace.live_mode:
-            # 实时模式降级运行的定位器/断言都未经设备验证：产物保留为诊断脚本，
-            # 只有 purpose="diagnostic" 才如实表达它不能作为验收证据（计划 R2/G1）。
-            reasons.append("live-mode trace cannot qualify for acceptance replay")
+        """质量顾虑清单：**不阻断执行**，只决定 ``confidence`` 分档与前端提示。
+
+        文案与历史 ``incomplete_reasons`` 逐字一致（``tests/unit/test_case_builder_trace.py``
+        钉住这些字符串），只是**去掉** ``provisional`` / ``live_mode`` 两条——它们属于
+        Profile 晋级资格（``_promotion_blockers``），与「这脚本能不能跑」无关。
+        """
+        factors: list[str] = []
         if outcome != "completed":
-            reasons.append(f"source agent outcome is {outcome}")
+            factors.append(f"source agent outcome is {outcome}")
         if trace.agent_error:
-            reasons.append(f"source agent error: {trace.agent_error}")
+            factors.append(f"source agent error: {trace.agent_error}")
         if any(not action.success for action in trace.actions):
-            reasons.append("source trace contains failed actions")
+            factors.append("source trace contains failed actions")
         if not trace.actions or trace.actions[-1].tool != ToolName.FINISH or not trace.actions[-1].success:
-            reasons.append("source trace does not end with a successful FINISH action")
+            factors.append("source trace does not end with a successful FINISH action")
         if explicit_assertions == 0:
-            reasons.append("source trace has no successful explicit assertion")
+            factors.append("source trace has no successful explicit assertion")
         if any(item["reason"].startswith("unsupported replay tool") for item in omitted):
-            reasons.append("source trace contains unsupported replay actions")
+            factors.append("source trace contains unsupported replay actions")
         if any(item.startswith("unvalidated dynamic ") for item in warnings):
-            reasons.append("source trace contains a dynamic locator without stable unique-prefix evidence")
-        return list(dict.fromkeys(reasons))
+            factors.append("source trace contains a dynamic locator without stable unique-prefix evidence")
+        return list(dict.fromkeys(factors))
+
+    @staticmethod
+    def _promotion_blockers(trace: RunTrace) -> list[str]:
+        """Profile 晋级证据资格：与「能否执行」完全解耦的防御性标注。
+
+        晋级实际使用 ``trace.profile_validation_generated`` 与
+        ``provenance.generated_script_path``，任务脚本本就不参与晋级；这两个字段只供 API
+        在误用时给出明确拒绝理由。
+        """
+        blockers: list[str] = []
+        if trace.provisional:
+            blockers.append("provisional trace is not Profile-promotion evidence")
+        if trace.live_mode:
+            blockers.append("live-mode trace is not Profile-promotion evidence")
+        return blockers
 
     @staticmethod
     def _is_nondeterministic_system_click(trace: RunTrace, action: ActionResult) -> bool:
@@ -1228,6 +1308,7 @@ def _case_title(*, trace: RunTrace | None, source_kind: str, steps: list[TestSte
 
 __all__ = [
     "FALLBACK_CHECKPOINT_MESSAGE",
+    "LOW_CONFIDENCE_PREFIXES",
     "PLACEHOLDER_ABILITY",
     "PLACEHOLDER_BUNDLE",
     "SWIPE_DIRECTIONS",
@@ -1235,6 +1316,8 @@ __all__ = [
     "UNKNOWN_RESOLUTION_BOUND",
     "CaseBuildResult",
     "CaseBuilder",
+    "evaluate_confidence",
+    "evaluate_runnable",
     "format_args",
     "new_case_id",
     "slugify",

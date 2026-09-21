@@ -59,11 +59,12 @@ class HypiumRunner:
         *,
         extra_env: dict[str, str] | None = None,
     ) -> ReplayResult:
-        """诊断执行一个脚本，跳过 ``replay_eligible`` 门禁。
+        """诊断执行一个脚本，不经过 run 级执行门禁。
 
-        用于直流模式录制的脚本（``purpose=dc_recording`` / ``replay_eligible=False``）
-        与用例库重跑：证据仍按 ``<产物目录>/hypium/attempt-XX/`` 落盘，但**不**写入任何
-        Run 的 trace/report，因此不会影响验收结论。
+        用于直流模式录制的脚本与用例库重跑：这是「结果不计入 Profile 晋级证据」的
+        独立执行路径，因此不要求脚本可执行为验收产物。证据仍按
+        ``<产物目录>/hypium/attempt-XX/`` 落盘，但**不**写入任何 Run 的 trace/report，
+        因此不会影响验收结论。
 
         ``extra_env`` 透传 ``HARMONY_AGENT_DEVICE_SN`` / ``HARMONY_AGENT_CASE_PARAMS``，
         使用例库的执行真正带上设备选择与数据驱动参数。
@@ -103,8 +104,12 @@ class HypiumRunner:
             command = CommandResult(command=command_text, args=command_args, returncode=None)
             error = ReplayError(
                 kind="ineligible",
-                message="generated artifact is not eligible for replay",
-                details={"purpose": generated.purpose, "incomplete_reasons": generated.incomplete_reasons},
+                message="generated script is not runnable",
+                details={
+                    "purpose": generated.purpose,
+                    "runnable_blockers": list(generated.runnable_blockers),
+                    "incomplete_reasons": generated.incomplete_reasons,
+                },
             )
             self._write_evidence(attempt_dir, command, self.environment(attempt_dir, extra_env=extra_env))
             return self._result(

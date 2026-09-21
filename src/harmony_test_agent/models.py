@@ -685,7 +685,7 @@ class PageGraph(BaseModel):
 
 
 class GeneratedArtifact(BaseModel):
-    """记录生成的 Hypium 脚本、用途、完整性及可回放资格。"""
+    """记录生成的 Hypium 脚本、用途、完整性、可执行性与质量分档。"""
 
     python_path: Path
     config_path: Path
@@ -693,13 +693,26 @@ class GeneratedArtifact(BaseModel):
     generated_at: datetime = Field(default_factory=utc_now)
     purpose: Literal["acceptance", "diagnostic"] = "diagnostic"
     replay_eligible: bool = False
+    """脚本是否**可执行**（runnable）：只取决于「有可回放动作」与「应用身份非占位」两条物理条件。
+    不代表质量合格——质量看 ``confidence``；能否作为 Profile 晋级证据看 ``promotion_eligible``。"""
     source_agent_outcome: Literal["completed", "failed", "stopped", "unknown"] = "unknown"
     source_action_count: int = 0
     included_action_count: int = 0
     omitted_action_count: int = 0
     counts: dict[str, int] = Field(default_factory=dict)
     incomplete_reasons: list[str] = Field(default_factory=list)
+    """.. deprecated:: 与 ``confidence_factors`` 同值的兼容别名（旧产物 / 旧消费方）。"""
     warnings: list[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "low"
+    """质量分档（非阻断）：``high`` 无质量顾虑，``medium`` 有质量顾虑，``low`` 命中失败/未完成结局。"""
+    confidence_factors: list[str] = Field(default_factory=list)
+    """质量顾虑清单（非阻断），逐条对应 ``confidence`` 分档依据。"""
+    promotion_eligible: bool = False
+    """能否作为 Profile 晋级证据：``runnable and not provisional and not live_mode``。"""
+    promotion_blockers: list[str] = Field(default_factory=list)
+    """不能作为晋级证据的原因（provisional / live_mode）。"""
+    runnable_blockers: list[str] = Field(default_factory=list)
+    """不可执行的原因；非空时 ``replay_eligible`` 必为 ``False``。"""
     # 用例 IR 产物（additive）：case_spec.json 与官方 xdevice 工程目录。
     case_spec_path: Path | None = None
     xdevice_project_path: Path | None = None

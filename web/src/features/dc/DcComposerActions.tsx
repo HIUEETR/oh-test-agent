@@ -15,7 +15,9 @@ import { FileCode2, FlaskConical } from "lucide-react";
 import { useDcConsole } from "../../stores/dc-console";
 import { DcScriptPreview } from "./DcScriptPreview";
 
-/** 脚本使用占位身份时后端给出的警告片段（见 src/harmony_test_agent/dc/generator.py）。 */
+/** 脚本使用占位身份时的结构化提示（见 cases/builder.py 的 evaluate_runnable）。 */
+const PLACEHOLDER_BLOCKER = "app identity is a placeholder";
+/** 旧产物（2026-09 之前）只在 warnings 里表达占位身份；保留兼容匹配。 */
 const PLACEHOLDER_WARNING = "placeholder bundle/ability";
 
 /** 占位身份的含义：脚本仍能生成，但回放/验收/蒸馏都拿不到真实应用。 */
@@ -57,8 +59,15 @@ export function DcComposerActions() {
   const suggestedBundle = session?.suggested_bundle_name ?? undefined;
   const suggestedAbility = session?.suggested_main_ability ?? undefined;
 
-  const hasPlaceholderIdentity = (artifact: { warnings?: string[] } | null): boolean =>
-    Boolean(artifact?.warnings?.some((warning) => warning.includes(PLACEHOLDER_WARNING)));
+  // 占位身份现在是**不可执行原因**（runnable_blockers），不再只是一条 warning 文案；
+  // 匹配结构化数组比匹配字符串稳定，旧产物再回退到历史 warning 文案。
+  const hasPlaceholderIdentity = (
+    artifact: { warnings?: string[]; runnable_blockers?: string[] } | null,
+  ): boolean =>
+    Boolean(
+      artifact?.runnable_blockers?.some((blocker) => blocker.includes(PLACEHOLDER_BLOCKER)) ||
+        artifact?.warnings?.some((warning) => warning.includes(PLACEHOLDER_WARNING)),
+    );
 
   /** 生成脚本；未传身份时由后端推断，推断不出会退回占位身份（此时给出手动填写入口）。 */
   const handleScript = async (bundleName?: string, mainAbility?: string) => {

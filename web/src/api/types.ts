@@ -284,6 +284,11 @@ export type RunTrace = {
     purpose?: string;
     diagnostic?: boolean;
     replay_eligible?: boolean;
+    confidence?: "high" | "medium" | "low";
+    confidence_factors?: string[];
+    promotion_eligible?: boolean;
+    promotion_blockers?: string[];
+    runnable_blockers?: string[];
     incomplete_reasons?: string[];
   };
   replays: ReplayResult[];
@@ -315,6 +320,11 @@ export type ScriptResult = {
   purpose?: "acceptance" | "diagnostic" | string;
   diagnostic?: boolean;
   acceptance_replay_enabled?: boolean;
+  confidence?: "high" | "medium" | "low";
+  confidence_factors?: string[];
+  promotion_eligible?: boolean;
+  promotion_blockers?: string[];
+  runnable_blockers?: string[];
   source_agent_outcome?: string;
   source_action_count?: number;
   included_action_count?: number;

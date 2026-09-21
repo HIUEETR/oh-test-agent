@@ -12,6 +12,8 @@ from harmony_test_agent.models import (
     ActionResult,
     AssertionDefinition,
     EventType,
+    LocatorCandidate,
+    LocatorKind,
     PageGraph,
     PageNode,
     ProfileStatus,
@@ -420,7 +422,64 @@ def test_execute_queues_replay_persists_each_attempt_and_rejects_concurrent_requ
         release.set()
 
 
-def test_execute_rejects_diagnostic_script_with_incomplete_reasons(tmp_path: Path):
+def test_execute_rejects_unrunnable_script_with_runnable_blockers(tmp_path: Path):
+    """没有可回放动作（G3 第一条物理必要条件）⇒ 409 + runnable_blockers。
+
+    注意失败动作本身**不再**阻断执行：源结局只决定 confidence（见下一个用例）。
+    """
+    profile_path = tmp_path / "profile.json"
+    profile = TargetAppProfile(target_app_id="zhihu-plus", display_name="知乎++", bundle_name="com.example")
+    profile_path.write_text(profile.model_dump_json(indent=2), encoding="utf-8")
+    settings = Settings(
+        runtime_dir=tmp_path / "runs",
+        database_path=tmp_path / "agent.db",
+        target_profile_path=profile_path,
+        runtime_home=tmp_path / "runtime-home",
+        agent_provider="mock",
+    )
+    app = create_app(settings)
+    manager = app.state.manager
+    # 全部动作都被 omit（桌面图标启动点击 + 失败动作）⇒ included_action_count == 0。
+    snapshot = ScreenSnapshot(
+        snapshot_id="desktop",
+        run_id="run-unrunnable-api",
+        image_path=tmp_path / "desktop.png",
+        image_sha256="abc",
+        width=100,
+        height=200,
+        elements=[UIElement(element_id="target-icon", type="AppIcon", clickable=True)],
+    )
+    trace = RunTrace(
+        run_id="run-unrunnable-api",
+        target_app_id=profile.target_app_id,
+        task="failed",
+        device_id="fake-device",
+        state=RunState.FAILED_ACTION,
+        error="failed source step",
+        snapshots=[snapshot],
+        actions=[
+            ActionResult(
+                step_id="desktop-launch",
+                tool=ToolName.CLICK_ELEMENT,
+                success=True,
+                params={"target": "target-icon"},
+                before_snapshot_id="desktop",
+            ),
+            ActionResult(step_id="failed", tool=ToolName.BACK, success=False, error="device disconnected"),
+        ],
+    )
+    trace.generated = HypiumGenerator(manager.artifacts).generate(trace, profile)
+    manager.repository.save_trace(trace)
+    with TestClient(app) as client:
+        response = client.post("/api/runs/run-unrunnable-api/execute")
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["message"] == "script is not runnable"
+        assert detail["runnable_blockers"] == ["script has no replayable action"]
+
+
+def test_failed_trace_is_still_runnable_and_keeps_low_confidence(tmp_path: Path):
+    """失败轨迹只要有 ≥1 个可回放动作 + 真实身份就能执行，质量顾虑只体现在 confidence。"""
     profile_path = tmp_path / "profile.json"
     profile = TargetAppProfile(target_app_id="zhihu-plus", display_name="知乎++", bundle_name="com.example")
     profile_path.write_text(profile.model_dump_json(indent=2), encoding="utf-8")
@@ -434,17 +493,35 @@ def test_execute_rejects_diagnostic_script_with_incomplete_reasons(tmp_path: Pat
     app = create_app(settings)
     manager = app.state.manager
     trace = RunTrace(
-        run_id="run-diagnostic-api",
+        run_id="run-failed-but-runnable",
         target_app_id=profile.target_app_id,
-        task="failed",
+        task="失败但可执行",
         device_id="fake-device",
         state=RunState.FAILED_ACTION,
+        agent_outcome="failed",
         error="failed source step",
+        actions=[
+            ActionResult(
+                step_id="click",
+                tool=ToolName.CLICK_ELEMENT,
+                success=True,
+                params={"target": "搜索"},
+                locator=LocatorCandidate(kind=LocatorKind.KEY, value="search_input"),
+            ),
+            ActionResult(step_id="failed", tool=ToolName.BACK, success=False, error="device disconnected"),
+        ],
     )
     trace.generated = HypiumGenerator(manager.artifacts).generate(trace, profile)
     manager.repository.save_trace(trace)
+    assert trace.generated is not None
+
     with TestClient(app) as client:
-        response = client.post("/api/runs/run-diagnostic-api/execute")
-        assert response.status_code == 409
-        detail = response.json()["detail"]
-        assert detail["incomplete_reasons"]
+        detail = client.get("/api/runs/run-failed-but-runnable/script").json()
+        assert detail["purpose"] == "acceptance"
+        assert detail["acceptance_replay_enabled"] is True
+        assert detail["confidence"] == "low"
+        assert "source trace contains failed actions" in detail["confidence_factors"]
+        assert detail["runnable_blockers"] == []
+
+        accepted = client.post("/api/runs/run-failed-but-runnable/execute?attempts=1")
+        assert accepted.status_code == 202

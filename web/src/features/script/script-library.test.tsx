@@ -118,7 +118,9 @@ describe("ScriptPanel 脚本库", () => {
     expect(await screen.findByText("live_case")).toBeInTheDocument();
     expect(screen.getByText("dc_case")).toBeInTheDocument();
     expect(screen.getByText("直流")).toBeInTheDocument();
-    expect(screen.getByText("诊断")).toBeInTheDocument();
+    // DC_ENTRY 没有 confidence 字段 ⇒ 退化为「低置信」徽章；不可执行时额外显示「不可执行」。
+    expect(screen.getAllByText("低置信").length).toBeGreaterThan(0);
+    expect(screen.getByText("不可执行")).toBeInTheDocument();
     expect(screen.getByText(/2 个脚本/)).toBeInTheDocument();
 
     // 当前运行的脚本（LIVE_ID 属于 runId）优先选中
@@ -170,13 +172,36 @@ describe("ScriptPanel 脚本库", () => {
     expect(dcArtifactUrl).not.toHaveBeenCalled();
   });
 
-  it("Live 诊断脚本禁用启动并说明原因", async () => {
+  it("有质量顾虑的脚本仍可执行，只显示质量提示（不让位给阻断告警）", async () => {
+    const medium = entry({
+      script_id: "run-2/generated/test_run.py",
+      source: "run",
+      case_id: "medium_case",
+      replay_eligible: true,
+      confidence: "medium",
+      confidence_factors: ["source trace has no successful explicit assertion"],
+    });
+    listScripts.mockResolvedValue([medium]);
+    getScript.mockResolvedValue(detailFor(medium));
+
+    render(<ScriptPanel />);
+
+    const launch = await screen.findByRole("button", { name: /验收回放 1 次/ });
+    expect(launch).toBeEnabled();
+    expect(screen.getByText("可执行 · 中置信")).toBeInTheDocument();
+    expect(screen.getByText(/质量提示（不影响执行）：置信度 中置信/)).toBeInTheDocument();
+    expect(screen.getByText("source trace has no successful explicit assertion")).toBeInTheDocument();
+    expect(screen.queryByText(/该脚本当前不可执行/)).not.toBeInTheDocument();
+  });
+
+  it("物理上不可执行的脚本禁用启动并列出 runnable_blockers", async () => {
     const blocked = entry({
       script_id: "run-2/generated/test_run.py",
       source: "run",
       case_id: "blocked_case",
       replay_eligible: false,
-      incomplete_reasons: ["agent outcome failed"],
+      confidence: "high",
+      runnable_blockers: ["script has no replayable action"],
     });
     listScripts.mockResolvedValue([blocked]);
     getScript.mockResolvedValue(detailFor(blocked));
@@ -185,7 +210,7 @@ describe("ScriptPanel 脚本库", () => {
 
     const launch = await screen.findByRole("button", { name: /验收回放 1 次/ });
     expect(launch).toBeDisabled();
-    expect(screen.getByText(/不参与正式 Hypium 验收回放/)).toBeInTheDocument();
-    expect(screen.getByText("agent outcome failed")).toBeInTheDocument();
+    expect(screen.getByText(/该脚本当前不可执行/)).toBeInTheDocument();
+    expect(screen.getByText("script has no replayable action")).toBeInTheDocument();
   });
 });

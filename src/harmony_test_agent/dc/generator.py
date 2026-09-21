@@ -6,7 +6,7 @@
 
 保持不变的契约（``tests/unit/test_dc_generator.py`` 逐条断言）：
 脚本落盘路径、``dc_test_*.json`` 的键值、warning/omitted 文案、
-``replay_eligible`` 三条件规则、``# skipped: ...`` 与
+``replay_eligible`` 的**可执行性**语义（缺可回放动作或身份占位才为 False）、``# skipped: ...`` 与
 ``pass  # no replayable operations`` 字面量。
 """
 
@@ -131,6 +131,10 @@ class DcHypiumGenerator:
             "main_ability": main_ability,
             "purpose": "acceptance" if built.replay_eligible else "dc_recording",
             "replay_eligible": built.replay_eligible,
+            "confidence": built.confidence,
+            "confidence_factors": built.confidence_factors,
+            "promotion_eligible": built.promotion_eligible,
+            "runnable_blockers": built.runnable_blockers,
             "explicit_assertions": built.explicit_assertions,
             "generated_from_session_id": session_id,
             "included_operations": built.counts["generated_actions"],
@@ -154,6 +158,10 @@ class DcHypiumGenerator:
             included_operations=built.counts["generated_actions"],
             omitted_operations=built.omitted_actions,
             replay_eligible=built.replay_eligible,
+            confidence=built.confidence,
+            confidence_factors=built.confidence_factors,
+            promotion_eligible=built.promotion_eligible,
+            runnable_blockers=built.runnable_blockers,
             explicit_assertions=built.explicit_assertions,
             case_id=built.spec.case_id,
             case_spec_path=str(case_spec_path.resolve()),

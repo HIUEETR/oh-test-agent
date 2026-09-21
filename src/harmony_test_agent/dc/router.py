@@ -37,7 +37,7 @@ from .models import (
 from .session import DcSession, DcSessionManager
 from .tools import _TOOL_REGISTRY
 
-# 断言工具清单（replay_eligible 判定的同一集合；供 GET /api/dc/tools 投影）。
+# 断言工具清单（决定 confidence 是否降为 medium 的同一集合；供 GET /api/dc/tools 投影）。
 ASSERTION_TOOL_NAMES: tuple[DcToolName, ...] = (
     DcToolName.ASSERT_VISIBLE,
     DcToolName.ASSERT_NOT_VISIBLE,

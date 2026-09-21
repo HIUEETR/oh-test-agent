@@ -444,6 +444,14 @@ class CaseRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     artifact_dir: str = ""
     spec: TestCaseSpec
+    confidence: Literal["high", "medium", "low"] = "low"
+    """质量分档（非阻断，来自入库时写下的 ``standalone/test_*.json``）。"""
+    confidence_factors: list[str] = Field(default_factory=list)
+    """质量顾虑清单（非阻断）。"""
+    promotion_eligible: bool = False
+    """能否作为 Profile 晋级证据；与「能否执行」解耦。"""
+    promotion_blockers: list[str] = Field(default_factory=list)
+    """不能作为 Profile 晋级证据的原因（provisional / live_mode）。"""
 
 
 class CaseSummary(BaseModel):

@@ -124,12 +124,9 @@ def inferred_swipe_warnings(result: CaseBuildResult) -> list[str]:
 
 
 def asserted_replay_rule(result: CaseBuildResult, *, bundle_name: str, main_ability: str) -> bool:
-    """把计划里的三条件规则原样写一遍，用于逐条对照实测结果。"""
+    """把计划的 G3 两条物理必要条件原样写一遍，用于逐条对照实测结果。"""
     return bool(
-        result.explicit_assertions >= 1
-        and bundle_name != PLACEHOLDER_BUNDLE
-        and main_ability != PLACEHOLDER_ABILITY
-        and result.counts["generated_actions"] > 0
+        result.counts["generated_actions"] > 0 and bundle_name and bundle_name != PLACEHOLDER_BUNDLE and main_ability
     )
 
 
@@ -496,13 +493,16 @@ def test_replay_eligible_baseline_is_true(artifacts: ArtifactStore) -> None:
     assert result.purpose == "acceptance"
 
 
-def test_replay_eligible_fails_without_a_successful_assert_tool(artifacts: ArtifactStore) -> None:
+def test_no_assertion_only_lowers_confidence_to_medium(artifacts: ArtifactStore) -> None:
+    """缺显式断言从阻断条件降为质量因素：脚本照样可执行，只是没有检查点。"""
     result = build_dc(artifacts, [invocation(DcToolName.CLICK, {"x": 10, "y": 20}, invocation_id="inv-click")])
 
-    assert asserted_replay_rule(result, bundle_name="com.demo.app", main_ability="MainAbility") is False
-    assert result.replay_eligible is False
+    assert asserted_replay_rule(result, bundle_name="com.demo.app", main_ability="MainAbility") is True
+    assert result.replay_eligible is True
+    assert result.purpose == "acceptance"
     assert result.explicit_assertions == 0
-    assert "no explicit assert_* tool call was recorded; script is diagnostic only" in result.warnings
+    assert result.confidence == "medium"
+    assert result.confidence_factors == ["no explicit assert_* tool call was recorded"]
 
 
 def test_replay_eligible_fails_with_a_failed_assert_tool(artifacts: ArtifactStore) -> None:
@@ -519,7 +519,9 @@ def test_replay_eligible_fails_with_a_failed_assert_tool(artifacts: ArtifactStor
     )
 
     assert result.explicit_assertions == 0
+    # 唯一一次调用失败 ⇒ 没有任何可回放动作 ⇒ 命中 G3 第一条。
     assert result.replay_eligible is False
+    assert result.runnable_blockers == ["script has no replayable action"]
 
 
 def test_replay_eligible_fails_with_a_placeholder_bundle(artifacts: ArtifactStore) -> None:
@@ -527,15 +529,21 @@ def test_replay_eligible_fails_with_a_placeholder_bundle(artifacts: ArtifactStor
 
     assert asserted_replay_rule(result, bundle_name=PLACEHOLDER_BUNDLE, main_ability="MainAbility") is False
     assert result.replay_eligible is False
-    assert "placeholder bundle/ability supplied; script is diagnostic only" in result.warnings
+    assert result.runnable_blockers == [f"app identity is a placeholder ({PLACEHOLDER_BUNDLE}/{PLACEHOLDER_ABILITY})"]
 
 
-def test_replay_eligible_fails_with_a_placeholder_ability(artifacts: ArtifactStore) -> None:
+def test_entry_ability_is_a_real_identity_and_stays_runnable(artifacts: ArtifactStore) -> None:
+    """``EntryAbility`` 是鸿蒙工程的默认且常见的**真实** ability 名。
+
+    计划的 G3 原文把它写成占位哨兵，但那会让本案真实运行
+    （``com.github.zhuoyi233.zhplus / EntryAbility``）永远不可执行，直接违背 G1。
+    因此占位判定只认 bundle 哨兵；这里把该决策钉成回归。
+    """
     result = build_dc(artifacts, eligible_invocations(), main_ability=PLACEHOLDER_ABILITY)
 
-    assert asserted_replay_rule(result, bundle_name="com.demo.app", main_ability=PLACEHOLDER_ABILITY) is False
-    assert result.replay_eligible is False
-    assert "placeholder bundle/ability supplied; script is diagnostic only" in result.warnings
+    assert asserted_replay_rule(result, bundle_name="com.demo.app", main_ability=PLACEHOLDER_ABILITY) is True
+    assert result.replay_eligible is True
+    assert result.runnable_blockers == []
 
 
 def test_replay_eligible_fails_without_included_operations(artifacts: ArtifactStore) -> None:

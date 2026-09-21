@@ -224,7 +224,7 @@ class TestDcScriptEndpoints:
         assert BUNDLE not in text
 
     def test_generate_script_without_identity_evidence_falls_back_to_placeholder(self, client: TestClient) -> None:
-        """录制无身份线索且未显式提供 → 回退占位身份：脚本仍生成，但只作诊断脚本。"""
+        """录制无身份线索且未显式提供 → 回退占位身份：脚本仍生成，但物理上不可执行。"""
         session_id = _seed_script_session(client, [_click_recording()])
 
         response = client.post(f"/api/dc/sessions/{session_id}/script", json={})
@@ -232,7 +232,8 @@ class TestDcScriptEndpoints:
         assert response.status_code == 200, response.text
         body = response.json()
         assert "BUNDLE_NAME = 'com.example.app'" in body["python_text"]
-        assert any("placeholder" in warning for warning in body["warnings"])
+        assert body["replay_eligible"] is False
+        assert body["runnable_blockers"] == ["app identity is a placeholder (com.example.app/EntryAbility)"]
 
 
 class TestDcSSEEndpoint:

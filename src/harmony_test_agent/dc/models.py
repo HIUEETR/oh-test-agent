@@ -457,12 +457,21 @@ class DcScriptArtifact(BaseModel):
     included_operations: int = 0
     omitted_operations: list[dict[str, str]] = Field(default_factory=list)
     replay_eligible: bool = False
-    """脚本是否包含显式断言且应用身份非占位值：为真时可作为验收脚本执行。
+    """脚本是否**可执行**（runnable）：只取决于「有可回放动作」与「应用身份非占位」两条物理条件。
 
-    旧脚本（无此字段）反序列化后为 ``False``，前端据此降级为「诊断回放专用」。
+    不代表质量合格——质量看 ``confidence``；能否作为 Profile 晋级证据看 ``promotion_eligible``。
+    旧脚本（无此字段）反序列化后为 ``False``，前端据此降级为「不可执行」。
     """
+    confidence: Literal["high", "medium", "low"] = "low"
+    """质量分档（非阻断）：``high`` 无质量顾虑，``medium`` 有质量顾虑，``low`` 命中失败/未完成结局。"""
+    confidence_factors: list[str] = Field(default_factory=list)
+    """质量顾虑清单（非阻断），逐条对应 ``confidence`` 分档依据。"""
+    promotion_eligible: bool = False
+    """能否作为 Profile 晋级证据；DC 录制脚本恒为可执行性的镜像，不参与晋级。"""
+    runnable_blockers: list[str] = Field(default_factory=list)
+    """不可执行的原因；非空时 ``replay_eligible`` 必为 ``False``。"""
     explicit_assertions: int = 0
-    """成功执行的 assert_* 工具调用数（replay_eligible 的判定依据之一）。"""
+    """成功执行的 assert_* 工具调用数（决定 ``confidence`` 是否降为 medium，不再阻断执行）。"""
     case_id: str | None = None
     """用例 IR 的 ``case_id``（``cases/spec.py``）；旧产物为 ``None``。"""
     case_spec_path: str | None = None
