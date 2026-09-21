@@ -437,6 +437,70 @@ def test_dynamic_key_without_stable_evidence_keeps_exact_value_and_feeds_incompl
     assert "source trace contains a dynamic locator without stable unique-prefix evidence" in (
         result.incomplete_reasons
     )
+
+
+# ---------------------------------------------------------------------------
+# 连字符 + 毫秒时间戳型动态 key（真机回放失败复盘）
+# ---------------------------------------------------------------------------
+
+
+def hyphen_dynamic_key_trace() -> RunTrace:
+    """真机实例 key：``add_agenda_title-<13 位毫秒>``（见 run-20260921T053514Z-8418044b）。"""
+    return RunTrace(
+        run_id="run-hyphen-dynamic",
+        target_app_id="com-huawei-hmos-calendar",
+        task="新建日程并填写标题",
+        device_id="device-1",
+        state=RunState.COMPLETED,
+        agent_outcome="completed",
+        actions=[
+            click_action(
+                step_id="click-title",
+                target="标题",
+                locator=LocatorCandidate(kind=LocatorKind.KEY, value="add_agenda_title-1789969034729"),
+            ),
+            assert_visible_action(),
+            finish_action(),
+        ],
+    )
+
+
+def test_hyphen_dynamic_key_generalizes_with_harvested_prefix_evidence() -> None:
+    """任务期回收把毫秒 key 记成 ``name-#`` 前缀模式时，脚本必须用 starts_with 前缀。"""
+    harvested = StableLocator(
+        name="add_agenda_title",
+        key="add_agenda_title-1789969034729",
+        dynamic_pattern="add_agenda_title-#",
+        page_signature="editor",
+        observed_rounds=1,
+        unique_match_rounds=1,
+        source="live_task_harvest",
+    )
+
+    result = CaseBuilder(min_observed_rounds=1).from_trace(
+        hyphen_dynamic_key_trace(),
+        profile(inventory=[harvested]),
+    )
+
+    locator = result.spec.steps[0].locator
+    assert locator is not None
+    assert locator.value == "add_agenda_title-"
+    assert locator.match == MatchMode.STARTS_WITH
+    assert locator.evidence is not None and locator.evidence.source == "profile_stable_locator"
+    assert "add_agenda_title-1789969034729" in " ".join(result.warnings)
+
+
+def test_hyphen_dynamic_key_without_evidence_is_flagged_as_dynamic() -> None:
+    """没有前缀证据时也必须识别为动态 key（回归：旧正则漏判导致脚本写死毫秒 key）。"""
+    result = CaseBuilder(min_observed_rounds=1).from_trace(hyphen_dynamic_key_trace(), profile(inventory=[]))
+
+    locator = result.spec.steps[0].locator
+    assert locator is not None
+    assert locator.match == MatchMode.EQUALS
+    assert any("unvalidated dynamic key" in item for item in result.warnings)
+    assert "source trace contains a dynamic locator without stable unique-prefix evidence" in (
+        result.incomplete_reasons
+    )
     assert result.replay_eligible is False
     assert result.purpose == "diagnostic"
 

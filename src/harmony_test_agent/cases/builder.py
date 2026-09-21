@@ -77,7 +77,22 @@ NON_REPLAYABLE_DC_TOOLS: frozenset[str] = frozenset(
 )
 
 #: 动态 key 前缀泛化的历史正则（``generation/hypium.py``）。
-_DYNAMIC_LOCATOR = re.compile(r"(.+_)\d{8,}")
+#:
+#: 真机复盘（run-20260921T053514Z-8418044b 的回放失败）：鸿蒙的实例 key 既可能是
+#: ``feed_card_20240101``（下划线分隔），也可能是 ``add_agenda_title-1789969034729``
+#: （连字符 + 毫秒时间戳）。旧正则只认下划线，后者会被当成稳定 key 原样写进脚本，
+#: 回放时必然 ``Can't find component with [BY.key(...)]``。
+_DYNAMIC_LOCATOR = re.compile(r"(.+?[_-])\d{8,}")
+
+
+def _dynamic_pattern_variants(prefix: str, value: str) -> set[str]:
+    """前缀泛化的等价写法：``foo-``/``foo_`` 与收割侧记录的 ``foo-#`` 必须互相认得。
+
+    任务期证据回收（``orchestrator._stable_locator_from_candidate``）把动态标识折叠为
+    ``<prefix>#`` 存进 ``dynamic_pattern``；而选择器渲染需要的是可直接用于 starts_with 的
+    裸前缀，因此比较时同时接受这两种写法。
+    """
+    return {prefix, re.sub(r"\d+", "#", value)}
 
 #: DC 占位应用身份。
 PLACEHOLDER_BUNDLE = "com.example.app"
@@ -764,6 +779,8 @@ class CaseBuilder:
                 prefix = dynamic.group(1)
                 evidence = self._stable_locator_evidence(locator, prefix, profile)
                 if evidence is not None:
+                    # 前缀可能是 ``foo-``（连字符 + 毫秒时间戳）或 ``foo_``：Hypium 的
+                    # starts_with 对二者同样有效，用前缀本身作为选择器值。
                     warnings.append(
                         f"validated dynamic {'key' if locator.kind == LocatorKind.KEY else 'id'} "
                         f"{locator.value!r} generalized to unique prefix {prefix!r}"
@@ -828,10 +845,11 @@ class CaseBuilder:
             return None
         method = "key" if locator.kind == LocatorKind.KEY else "id"
         threshold = self.min_observed_rounds
+        accepted_patterns = _dynamic_pattern_variants(prefix, locator.value)
         for item in profile.stable_locator_inventory:
             if (
                 getattr(item, method) == locator.value
-                and item.dynamic_pattern == prefix
+                and item.dynamic_pattern in accepted_patterns
                 and item.observed_rounds >= threshold
                 and item.unique_match_rounds >= threshold
             ):
