@@ -86,6 +86,13 @@ When a step must CHANGE a value shown on a wheel or scroll picker (hour, minute,
 columns), plan that step as swipe with the column as target and state the required final value in the
 instruction; never plan a click on an individual picker row, and never plan a blind click_coordinate for a
 picker value. Use click_element only to open the picker.
+Some tasks ask you to CONFIRM whether an abnormal behaviour happens (for example "check whether clicking it
+does nothing", "see if the click has no response", or reproduces a defect). For such a step the assertion
+passing is the DEFECT, not a success: set `expects_defect` to true on that step and write in `expected`
+exactly which observed phenomenon counts as abnormal (for example "after clicking the first poster the poster
+is still visible and the page did not navigate, which means the click has no response"). Every ordinary
+verification step must keep `expects_defect` false. Never use `expects_defect` for a step whose passing means
+the application behaved correctly.
 """
 
 VISION_PROMPT = """Analyze this OpenHarmony screenshot. Return a concise page title and summary plus actionable
@@ -126,6 +133,11 @@ If a control you click produces no visible change in the page structure, do NOT 
 with a different control: that may be a real defect in the application under test. State explicitly in your reasoning
 "疑似无响应控件：<target>" and try it once more; if the structure still does not change, treat the step as failed
 instead of hiding it behind a workaround.
+When the planned step carries `expects_defect: true`, that step is a REVERSE assertion: the planned assertion
+PASSING means the abnormal phenomenon was observed (for example the poster is still visible after the click, so
+the click had no response). Re-issue the planned assertion against the latest state instead of downgrading it to
+inspect_screen, and never try to make it fail. Say in your reasoning that a passing assertion here confirms the
+defect.
 """
 
 # 合并观测里的摘要长度上限：摘要只用于前端思考流与恢复提示，长摘要纯属输出 token 浪费。

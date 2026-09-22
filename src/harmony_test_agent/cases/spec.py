@@ -178,6 +178,15 @@ class CheckpointSpec(BaseModel):
     toast_fuzzy: Literal["equal", "contain"] = "equal"
     page_path: str = ""
     anchors: list[LocatorSpec] = Field(default_factory=list)
+    polarity: Literal["expected", "unexpected"] = "expected"
+    """``expected``（默认）：断言通过 = 行为正常。
+
+    ``unexpected``：断言通过 = **观测到了不期望的现象**（例：点击海报后海报仍可见 ⇒ 未跳转
+    ⇒ 疑似无响应）。这类检查点通过时上报 :attr:`defect_kind` 对应的 finding，而**不**改变
+    断言本身的 ``passed`` —— 脚本语义与 ``expected`` 完全相同，只有注释与元数据不同。"""
+
+    defect_kind: AnomalyKind | None = None
+    """``polarity="unexpected"`` 且断言通过时上报的异常类别；缺省按检查点 kind 推导。"""
 
     @model_validator(mode="after")
     def validate_checkpoint_invariants(self) -> CheckpointSpec:
@@ -189,7 +198,24 @@ class CheckpointSpec(BaseModel):
             raise ValueError("property_equals checkpoint requires property_name")
         if self.kind == CheckpointKind.PROPERTY_EQUALS and not self.locator:
             raise ValueError("property_equals checkpoint requires a locator")
+        if self.polarity == "unexpected" and not self.message_zh:
+            # defect_kind 可以留空（有推导规则），但报告必须能说清「什么现象算异常」。
+            raise ValueError("unexpected polarity checkpoint requires a non-empty message_zh")
         return self
+
+    @property
+    def reported_defect_kind(self) -> AnomalyKind:
+        """``polarity="unexpected"`` 通过时上报的类别：显式 ``defect_kind`` 优先。
+
+        缺省推导保持保守：``element_absent`` 通过 = 元素**不该在却在** ⇒ 布局 / 渲染异常；
+        其余（元素存在、文本、属性、toast、应用、截图）一律按「点击后未导航」的语义级
+        无反应处理 —— 探索性复现的绝大多数用法都是这一条。
+        """
+        if self.defect_kind is not None:
+            return self.defect_kind
+        if self.kind == CheckpointKind.ELEMENT_ABSENT:
+            return AnomalyKind.LAYOUT_ANOMALY
+        return AnomalyKind.NO_OP_NAVIGATION
 
 
 # ---------------------------------------------------------------------------

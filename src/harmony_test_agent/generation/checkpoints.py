@@ -20,6 +20,10 @@ from .selectors import render_selector
 
 DEFAULT_INDENT = "        "
 
+#: ``polarity="unexpected"`` 的检查点注释：断言通过 = 观测到异常现象。
+#: **只加注释**，不改任何选择器字面量 —— 脚本语义与本字段引入前逐字一致。
+UNEXPECTED_POLARITY_COMMENT = "# 检查点（反向断言）：通过即代表观测到异常现象"
+
 #: ``page_signature`` 的锚点默认等待时间（秒）。
 ANCHOR_WAIT_SECONDS = 5
 #: ``toast`` 检查点的默认超时（秒）。
@@ -78,12 +82,19 @@ def _wrap_soft_devicetest(lines: list[str], checkpoint: CheckpointSpec, indent: 
 # ---------------------------------------------------------------------------
 
 
+def _with_polarity_comment(checkpoint: CheckpointSpec, lines: list[str], indent: str) -> list[str]:
+    """``polarity="unexpected"`` 时在检查点前面加一行注释；其余情况原样返回。"""
+    if checkpoint.polarity != "unexpected":
+        return lines
+    return [f"{indent}{UNEXPECTED_POLARITY_COMMENT}", *lines]
+
+
 def render_standalone_checkpoint(checkpoint: CheckpointSpec, *, indent: str = DEFAULT_INDENT) -> list[str]:
     """渲染一个检查点为独立脚本的代码行（含执行动作后的求值）。"""
     lines = _standalone_body(checkpoint)
     if checkpoint.soft:
-        return _wrap_soft_standalone(lines, checkpoint, indent)
-    return [f"{indent}{line}" for line in lines]
+        return _with_polarity_comment(checkpoint, _wrap_soft_standalone(lines, checkpoint, indent), indent)
+    return _with_polarity_comment(checkpoint, [f"{indent}{line}" for line in lines], indent)
 
 
 def _standalone_body(checkpoint: CheckpointSpec) -> list[str]:
@@ -150,8 +161,8 @@ def render_devicetest_checkpoint(checkpoint: CheckpointSpec, *, indent: str = DE
     """渲染一个检查点为官方 devicetest TestCase 的代码行。"""
     lines = _devicetest_body(checkpoint)
     if checkpoint.soft:
-        return _wrap_soft_devicetest(lines, checkpoint, indent)
-    return [f"{indent}{line}" for line in lines]
+        return _with_polarity_comment(checkpoint, _wrap_soft_devicetest(lines, checkpoint, indent), indent)
+    return _with_polarity_comment(checkpoint, [f"{indent}{line}" for line in lines], indent)
 
 
 def _devicetest_body(checkpoint: CheckpointSpec) -> list[str]:
@@ -225,6 +236,7 @@ __all__ = [
     "DEFAULT_INDENT",
     "DEFAULT_SCREENSHOT_NAME",
     "DEFAULT_TOAST_TIMEOUT",
+    "UNEXPECTED_POLARITY_COMMENT",
     "CheckpointRenderError",
     "needs_listen_toast",
     "render_devicetest_checkpoint",

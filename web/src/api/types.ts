@@ -373,7 +373,7 @@ export const TERMINAL_STATES = new Set([
 export type AnomalyKind =
   | "cppcrash" | "jscrash" | "appfreeze" | "anr"
   | "white_screen" | "page_unresponsive" | "layout_anomaly" | "memory_growth"
-  | "locator_stale";
+  | "locator_stale" | "noop_navigation";
 
 export type AnomalySeverity = "info" | "warning" | "critical";
 

@@ -22,6 +22,8 @@ from harmony_test_agent.models import (
 from harmony_test_agent.perception.normalizer import normalize_layout, page_path
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "defects"
+#: 真机 run-20260922T141003Z-6bf8bf42（网易云音乐「点击无反应」复盘）抽出的帧。
+NOOP_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "noop"
 
 BUNDLE = "com.zhihu.hmos"
 OTHER_BUNDLE = "com.huawei.hmos.settings"
@@ -125,6 +127,24 @@ def snapshot_from_layout_fixture(
         page_path=page_path(layout),
         hierarchy_path=path,
         elements=normalize_layout(layout, width, height),
+    )
+
+
+def noop_case(step_id: str) -> dict:
+    """读取 ``tests/fixtures/noop/<step_id>.json`` 原文。
+
+    帧来自真机 run-20260922T141003Z-6bf8bf42（网易云音乐「点击无反应」复盘）：
+    ``step-5`` 是漏报的那次点击（三条件全中），``step-2`` / ``step-3`` 是确实导航了的对照。
+    """
+    return json.loads((NOOP_FIXTURES / f"{step_id}.json").read_text(encoding="utf-8"))
+
+
+def noop_snapshots(step_id: str) -> tuple[ScreenSnapshot, ScreenSnapshot]:
+    """把一份 noop fixture 还原成 ``(before, after)`` 两帧。"""
+    payload = noop_case(step_id)
+    return (
+        ScreenSnapshot.model_validate(payload["before"]),
+        ScreenSnapshot.model_validate(payload["after"]),
     )
 
 

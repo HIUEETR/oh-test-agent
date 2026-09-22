@@ -1,0 +1,3599 @@
+{
+  "source_run": "run-20260922T141003Z-6bf8bf42",
+  "step_id": "step-3",
+  "tool": "click_element",
+  "target": "ui-1695d0faa5a9",
+  "page_path": "pages/Index",
+  "before": {
+    "snapshot_id": "snap-0c824f96edc8",
+    "run_id": "run-20260922T141003Z-6bf8bf42",
+    "captured_at": "2026-09-22T14:11:55.614304Z",
+    "image_path": "tests\\fixtures\\noop\\not-a-real-screenshot.png",
+    "image_sha256": "9a4b789ee76adf8fd7296cc15233c53a5364be8c6982892e4cc7e13e09bf3aeb",
+    "model_image_path": null,
+    "width": 1320,
+    "height": 2232,
+    "page_title": "我的（个人主页）",
+    "page_path": "pages/Index",
+    "source": "hdc",
+    "hierarchy_path": null,
+    "elements": [
+      {
+        "element_id": "ui-5f45465954de",
+        "content": "",
+        "type": "Row",
+        "bbox": {
+          "left": 24,
+          "top": 117,
+          "right": 126,
+          "bottom": 309
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-201bb4e25dc8",
+        "content": "朽木自雕",
+        "type": "Text",
+        "bbox": {
+          "left": 573,
+          "top": 185,
+          "right": 766,
+          "bottom": 241
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "朽木自雕",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|朽木自雕",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,1,1"
+        }
+      },
+      {
+        "element_id": "ui-3643c1524642",
+        "content": "",
+        "type": "Scroll",
+        "bbox": {
+          "left": 0,
+          "top": 117,
+          "right": 1320,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2"
+        }
+      },
+      {
+        "element_id": "ui-ae2cf590216d",
+        "content": "朽木自雕",
+        "type": "Text",
+        "bbox": {
+          "left": 541,
+          "top": 627,
+          "right": 781,
+          "bottom": 697
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "朽木自雕",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|朽木自雕",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-79bf6a42ccdc",
+        "content": "地球之所以是圆的，是为了让那些走散的人，在绕过大半个世界后，还能在同一首歌里重逢",
+        "type": "Text",
+        "bbox": {
+          "left": 12,
+          "top": 757,
+          "right": 1309,
+          "bottom": 869
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "地球之所以是圆的，是为了让那些走散的人，在绕过大半个世界后，还能在同一首歌里重逢",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|地球之所以是圆的，是为了让那些走散的人，在绕过大半个世界后，还能在同一首歌里重逢",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,0,3"
+        }
+      },
+      {
+        "element_id": "ui-35879b8b63a1",
+        "content": "18枚勋章",
+        "type": "Text",
+        "bbox": {
+          "left": 574,
+          "top": 923,
+          "right": 748,
+          "bottom": 972
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "18枚勋章",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|18枚勋章",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,0,5,0"
+        }
+      },
+      {
+        "element_id": "ui-7d3075aad17d",
+        "content": "30 关注",
+        "type": "Text",
+        "bbox": {
+          "left": 300,
+          "top": 1038,
+          "right": 453,
+          "bottom": 1094
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "30 关注",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|30 关注",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,0,7,0"
+        }
+      },
+      {
+        "element_id": "ui-27e1f0f32dc6",
+        "content": "9 粉丝",
+        "type": "Text",
+        "bbox": {
+          "left": 501,
+          "top": 1038,
+          "right": 626,
+          "bottom": 1094
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "9 粉丝",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|9 粉丝",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,0,7,2"
+        }
+      },
+      {
+        "element_id": "ui-4b5aeb4dc3a2",
+        "content": "Lv.8",
+        "type": "Text",
+        "bbox": {
+          "left": 674,
+          "top": 1038,
+          "right": 762,
+          "bottom": 1094
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "Lv.8",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|Lv.8",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,0,7,4"
+        }
+      },
+      {
+        "element_id": "ui-432da3ffdc19",
+        "content": "1520 小时",
+        "type": "Text",
+        "bbox": {
+          "left": 810,
+          "top": 1038,
+          "right": 1021,
+          "bottom": 1094
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "1520 小时",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|1520 小时",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,0,7,6"
+        }
+      },
+      {
+        "element_id": "ui-b4dc7199691d",
+        "content": "",
+        "type": "Row",
+        "bbox": {
+          "left": 120,
+          "top": 1160,
+          "right": 241,
+          "bottom": 1245
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,0"
+        }
+      },
+      {
+        "element_id": "ui-843e468269a6",
+        "content": "最近",
+        "type": "Text",
+        "bbox": {
+          "left": 138,
+          "top": 1178,
+          "right": 223,
+          "bottom": 1227
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "最近",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|最近",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,0,0"
+        }
+      },
+      {
+        "element_id": "ui-8c17da2dd262",
+        "content": "",
+        "type": "Row",
+        "bbox": {
+          "left": 360,
+          "top": 1160,
+          "right": 481,
+          "bottom": 1245
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,1"
+        }
+      },
+      {
+        "element_id": "ui-cfd23606f6f0",
+        "content": "本地",
+        "type": "Text",
+        "bbox": {
+          "left": 378,
+          "top": 1178,
+          "right": 463,
+          "bottom": 1227
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "本地",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|本地",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,1,0"
+        }
+      },
+      {
+        "element_id": "ui-bf35a52e6dcd",
+        "content": "",
+        "type": "Row",
+        "bbox": {
+          "left": 600,
+          "top": 1160,
+          "right": 721,
+          "bottom": 1245
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,2"
+        }
+      },
+      {
+        "element_id": "ui-ffa40c4f7a4a",
+        "content": "网盘",
+        "type": "Text",
+        "bbox": {
+          "left": 618,
+          "top": 1178,
+          "right": 703,
+          "bottom": 1227
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "网盘",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|网盘",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,2,0"
+        }
+      },
+      {
+        "element_id": "ui-3096e0e6d0c5",
+        "content": "",
+        "type": "Row",
+        "bbox": {
+          "left": 839,
+          "top": 1160,
+          "right": 960,
+          "bottom": 1245
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,3"
+        }
+      },
+      {
+        "element_id": "ui-d38fc47e6409",
+        "content": "装扮",
+        "type": "Text",
+        "bbox": {
+          "left": 857,
+          "top": 1178,
+          "right": 942,
+          "bottom": 1227
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "装扮",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|装扮",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,3,0"
+        }
+      },
+      {
+        "element_id": "ui-6ca4463ce10e",
+        "content": "",
+        "type": "Row",
+        "bbox": {
+          "left": 1079,
+          "top": 1160,
+          "right": 1200,
+          "bottom": 1245
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,4"
+        }
+      },
+      {
+        "element_id": "ui-410340157d1c",
+        "content": "更多",
+        "type": "Text",
+        "bbox": {
+          "left": 1097,
+          "top": 1178,
+          "right": 1182,
+          "bottom": 1227
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "更多",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|更多",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,0,1,4,0"
+        }
+      },
+      {
+        "element_id": "ui-611c675a892f",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 317,
+          "top": 1355,
+          "right": 486,
+          "bottom": 1411
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,1,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-5bd7c4905625",
+        "content": "音乐",
+        "type": "Text",
+        "bbox": {
+          "left": 317,
+          "top": 1355,
+          "right": 486,
+          "bottom": 1411
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "音乐",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|音乐",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,1,0,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-032145feb656",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 576,
+          "top": 1355,
+          "right": 745,
+          "bottom": 1411
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,1,0,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-bfc9d202ee24",
+        "content": "播客",
+        "type": "Text",
+        "bbox": {
+          "left": 576,
+          "top": 1355,
+          "right": 745,
+          "bottom": 1411
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "播客",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|播客",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,1,0,0,0,0,1,0"
+        }
+      },
+      {
+        "element_id": "ui-fef316025308",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 835,
+          "top": 1355,
+          "right": 1004,
+          "bottom": 1411
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,1,0,0,0,0,2"
+        }
+      },
+      {
+        "element_id": "ui-bcbb08451ffc",
+        "content": "笔记",
+        "type": "Text",
+        "bbox": {
+          "left": 835,
+          "top": 1355,
+          "right": 1004,
+          "bottom": 1411
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "笔记",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|笔记",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,1,0,0,0,0,2,0"
+        }
+      },
+      {
+        "element_id": "ui-4adf89d1e157",
+        "content": "",
+        "type": "Swiper",
+        "bbox": {
+          "left": 0,
+          "top": 1449,
+          "right": 1320,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,2"
+        }
+      },
+      {
+        "element_id": "ui-46e0d133d196",
+        "content": "",
+        "type": "List",
+        "bbox": {
+          "left": 0,
+          "top": 1449,
+          "right": 1320,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,2,0,0"
+        }
+      },
+      {
+        "element_id": "ui-58d5f7b093e5",
+        "content": "我喜欢的音乐",
+        "type": "Text",
+        "bbox": {
+          "left": 246,
+          "top": 1487,
+          "right": 535,
+          "bottom": 1543
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "我喜欢的音乐",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|我喜欢的音乐",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,2,0,0,0,0,1,0"
+        }
+      },
+      {
+        "element_id": "ui-6e8443679b6a",
+        "content": "177首·3350次播放",
+        "type": "Text",
+        "bbox": {
+          "left": 246,
+          "top": 1543,
+          "right": 603,
+          "bottom": 1592
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "177首·3350次播放",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|177首·3350次播放",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,2,0,0,0,0,1,1"
+        }
+      },
+      {
+        "element_id": "ui-7e72000d5baa",
+        "content": "曾经是否有被一句歌词打动过",
+        "type": "Text",
+        "bbox": {
+          "left": 246,
+          "top": 1727,
+          "right": 871,
+          "bottom": 1783
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "曾经是否有被一句歌词打动过",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|曾经是否有被一句歌词打动过",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,2,0,0,1,0,1,0"
+        }
+      },
+      {
+        "element_id": "ui-04c36de2d42e",
+        "content": "177首·3350次播放",
+        "type": "Text",
+        "bbox": {
+          "left": 246,
+          "top": 1783,
+          "right": 603,
+          "bottom": 1832
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "177首·3350次播放",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|177首·3350次播放",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,2,0,0,1,0,1,1"
+        }
+      },
+      {
+        "element_id": "ui-f1ef30d7919c",
+        "content": "那人那景都将在遗忘中重新拾起",
+        "type": "Text",
+        "bbox": {
+          "left": 246,
+          "top": 1967,
+          "right": 919,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "那人那景都将在遗忘中重新拾起",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|那人那景都将在遗忘中重新拾起",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,2,0,2,0,0,2,0,1,0"
+        }
+      },
+      {
+        "element_id": "ui-b520a3a1e28e",
+        "content": "首页底部导航图标（图标-only，无文字覆盖区）",
+        "type": "Column",
+        "bbox": {
+          "left": 0,
+          "top": 1980,
+          "right": 330,
+          "bottom": 2148
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,0",
+          "vision_reason": "底部导航图标在层次中仅有相邻文字节点，图标本身未见独立元素"
+        }
+      },
+      {
+        "element_id": "ui-1695d0faa5a9",
+        "content": "首页",
+        "type": "Text",
+        "bbox": {
+          "left": 117,
+          "top": 2028,
+          "right": 214,
+          "bottom": 2084
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "首页",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|首页",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-a454bf3c2cb7",
+        "content": "搜索底部导航图标",
+        "type": "Column",
+        "bbox": {
+          "left": 330,
+          "top": 1980,
+          "right": 660,
+          "bottom": 2148
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,1",
+          "vision_reason": "图标-only控件，层次中缺失"
+        }
+      },
+      {
+        "element_id": "ui-b7b741ddcf1b",
+        "content": "搜索",
+        "type": "Text",
+        "bbox": {
+          "left": 447,
+          "top": 2028,
+          "right": 544,
+          "bottom": 2084
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "搜索",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|搜索",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,1,0,0"
+        }
+      },
+      {
+        "element_id": "ui-69760df5966a",
+        "content": "笔记底部导航图标",
+        "type": "Column",
+        "bbox": {
+          "left": 660,
+          "top": 1980,
+          "right": 990,
+          "bottom": 2148
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,2",
+          "vision_reason": "图标-only控件，层次中缺失"
+        }
+      },
+      {
+        "element_id": "ui-478afd8683cf",
+        "content": "笔记",
+        "type": "Text",
+        "bbox": {
+          "left": 777,
+          "top": 2028,
+          "right": 874,
+          "bottom": 2084
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "笔记",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|笔记",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,2,0,0"
+        }
+      },
+      {
+        "element_id": "ui-1bc26111be87",
+        "content": "我的底部导航图标",
+        "type": "Column",
+        "bbox": {
+          "left": 990,
+          "top": 1980,
+          "right": 1320,
+          "bottom": 2148
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": true,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,3",
+          "vision_reason": "图标-only控件，层次中缺失"
+        }
+      },
+      {
+        "element_id": "ui-09aa4ab6a108",
+        "content": "我的",
+        "type": "Text",
+        "bbox": {
+          "left": 1107,
+          "top": 2028,
+          "right": 1204,
+          "bottom": 2084
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "我的",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|我的",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,3,0,0"
+        }
+      },
+      {
+        "element_id": "ui-5ff856b4cf06",
+        "content": "status_bar_color_picker",
+        "type": "Row",
+        "bbox": {
+          "left": 98,
+          "top": 41,
+          "right": 1222,
+          "bottom": 113
+        },
+        "key": "status_bar_color_picker",
+        "id": "status_bar_color_picker",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "key",
+            "value": "status_bar_color_picker",
+            "score": 1.0
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-c9b7c2ab85c5",
+        "content": "10, :, 11",
+        "type": "Row",
+        "bbox": {
+          "left": 98,
+          "top": 41,
+          "right": 219,
+          "bottom": 113
+        },
+        "key": "",
+        "id": "",
+        "description": "长按时间切换显示格式",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "10, :, 11",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Row|10, :, 11",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0"
+        }
+      },
+      {
+        "element_id": "ui-fa60461fc804",
+        "content": "TimeView_Text_timeText",
+        "type": "TextClock",
+        "bbox": {
+          "left": 98,
+          "top": 51,
+          "right": 152,
+          "bottom": 104
+        },
+        "key": "TimeView_Text_timeText",
+        "id": "TimeView_Text_timeText",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "key",
+            "value": "TimeView_Text_timeText",
+            "score": 1.0
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-65bab8bb3172",
+        "content": "10",
+        "type": "Text",
+        "bbox": {
+          "left": 98,
+          "top": 51,
+          "right": 152,
+          "bottom": 104
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "10",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|10",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-2b8bb79b26fb",
+        "content": ":",
+        "type": "Text",
+        "bbox": {
+          "left": 152,
+          "top": 55,
+          "right": 165,
+          "bottom": 100
+        },
+        "key": "TimeView_Text_timeText",
+        "id": "TimeView_Text_timeText",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "key",
+            "value": "TimeView_Text_timeText",
+            "score": 1.0
+          },
+          {
+            "kind": "text",
+            "value": ":",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|:",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-2ef6155ebf3f",
+        "content": "TimeView_Text_timeText",
+        "type": "TextClock",
+        "bbox": {
+          "left": 165,
+          "top": 51,
+          "right": 219,
+          "bottom": 104
+        },
+        "key": "TimeView_Text_timeText",
+        "id": "TimeView_Text_timeText",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "key",
+            "value": "TimeView_Text_timeText",
+            "score": 1.0
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-c9b094b4d319",
+        "content": "11",
+        "type": "Text",
+        "bbox": {
+          "left": 165,
+          "top": 51,
+          "right": 219,
+          "bottom": 104
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "11",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|11",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,1,0"
+        }
+      }
+    ],
+    "summary": "当前显示个人主页，底部导航栏可见“首页/搜索/笔记/我的”四个标签，需点击“首页”返回首页。"
+  },
+  "after": {
+    "snapshot_id": "snap-ed22ab1ae6f8",
+    "run_id": "run-20260922T141003Z-6bf8bf42",
+    "captured_at": "2026-09-22T14:12:10.919887Z",
+    "image_path": "tests\\fixtures\\noop\\not-a-real-screenshot.png",
+    "image_sha256": "f262e6b42d7a50e29606f01f7a5af30f35dfed2b0bf00dbf11eddaa3341744a1",
+    "model_image_path": null,
+    "width": 1320,
+    "height": 2232,
+    "page_title": "首页（推荐）",
+    "page_path": "pages/Index",
+    "source": "hdc",
+    "hierarchy_path": null,
+    "elements": [
+      {
+        "element_id": "ui-ef5212341a2c",
+        "content": "",
+        "type": "Scroll",
+        "bbox": {
+          "left": 198,
+          "top": 117,
+          "right": 1122,
+          "bottom": 243
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-91d8d7ec8959",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 198,
+          "top": 152,
+          "right": 367,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-c73bb81b00cc",
+        "content": "心动",
+        "type": "Text",
+        "bbox": {
+          "left": 198,
+          "top": 152,
+          "right": 367,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "心动",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|心动",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-3d75c82c745b",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 367,
+          "top": 152,
+          "right": 536,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-1c32f98f1e0d",
+        "content": "推荐",
+        "type": "Text",
+        "bbox": {
+          "left": 367,
+          "top": 152,
+          "right": 536,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "推荐",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|推荐",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0"
+        }
+      },
+      {
+        "element_id": "ui-7cf24355c0b3",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 536,
+          "top": 152,
+          "right": 705,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,2"
+        }
+      },
+      {
+        "element_id": "ui-2364ac656375",
+        "content": "音乐",
+        "type": "Text",
+        "bbox": {
+          "left": 536,
+          "top": 152,
+          "right": 705,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "音乐",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|音乐",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0"
+        }
+      },
+      {
+        "element_id": "ui-cd533fda0481",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 705,
+          "top": 152,
+          "right": 918,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,3"
+        }
+      },
+      {
+        "element_id": "ui-c65abddbd891",
+        "content": "AI写歌",
+        "type": "Text",
+        "bbox": {
+          "left": 705,
+          "top": 152,
+          "right": 918,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "AI写歌",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|AI写歌",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,3,0"
+        }
+      },
+      {
+        "element_id": "ui-e5a77c892612",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 918,
+          "top": 152,
+          "right": 1087,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,4"
+        }
+      },
+      {
+        "element_id": "ui-b654884c3a52",
+        "content": "年报",
+        "type": "Text",
+        "bbox": {
+          "left": 918,
+          "top": 152,
+          "right": 1087,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "年报",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|年报",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0"
+        }
+      },
+      {
+        "element_id": "ui-21128f3d83fd",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 1087,
+          "top": 152,
+          "right": 1122,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,5"
+        }
+      },
+      {
+        "element_id": "ui-04164be80d54",
+        "content": "播客",
+        "type": "Text",
+        "bbox": {
+          "left": 1087,
+          "top": 152,
+          "right": 1122,
+          "bottom": 208
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "播客",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|播客",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0"
+        }
+      },
+      {
+        "element_id": "ui-56f26fe7beee",
+        "content": "",
+        "type": "Row",
+        "bbox": {
+          "left": 24,
+          "top": 117,
+          "right": 162,
+          "bottom": 261
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-518ec9c28ce5",
+        "content": "",
+        "type": "Swiper",
+        "bbox": {
+          "left": 0,
+          "top": 261,
+          "right": 1320,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-2cba0e075fce",
+        "content": "",
+        "type": "Scroll",
+        "bbox": {
+          "left": 0,
+          "top": 261,
+          "right": 1320,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0"
+        }
+      },
+      {
+        "element_id": "ui-2b43fab4cb81",
+        "content": "",
+        "type": "List",
+        "bbox": {
+          "left": 0,
+          "top": 285,
+          "right": 1320,
+          "bottom": 915
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-152b5e10bc1c",
+        "content": "每日推荐卡片播放按钮",
+        "type": "ListItem",
+        "bbox": {
+          "left": 48,
+          "top": 285,
+          "right": 528,
+          "bottom": 915
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0",
+          "vision_reason": "卡片右下角白色三角形播放图标，未出现在层级中"
+        }
+      },
+      {
+        "element_id": "ui-38f1ce4659fd",
+        "content": "每日推荐",
+        "type": "Text",
+        "bbox": {
+          "left": 84,
+          "top": 321,
+          "right": 277,
+          "bottom": 377
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "每日推荐",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|每日推荐",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-0a94bbad3a4f",
+        "content": "免费听",
+        "type": "Text",
+        "bbox": {
+          "left": 84,
+          "top": 635,
+          "right": 217,
+          "bottom": 689
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "免费听",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|免费听",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,2,0"
+        }
+      },
+      {
+        "element_id": "ui-f82649946517",
+        "content": "Lofi/复古/一场听觉盛宴",
+        "type": "Text",
+        "bbox": {
+          "left": 58,
+          "top": 784,
+          "right": 519,
+          "bottom": 882
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "Lofi/复古/一场听觉盛宴",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|Lofi/复古/一场听觉盛宴",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,3,0"
+        }
+      },
+      {
+        "element_id": "ui-5081a5af1d87",
+        "content": "",
+        "type": "ListItem",
+        "bbox": {
+          "left": 558,
+          "top": 285,
+          "right": 1038,
+          "bottom": 915
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-153d299d03c6",
+        "content": "漫游",
+        "type": "Text",
+        "bbox": {
+          "left": 594,
+          "top": 321,
+          "right": 691,
+          "bottom": 377
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "漫游",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|漫游",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,1,0,1"
+        }
+      },
+      {
+        "element_id": "ui-d679998c40bf",
+        "content": "低沉鼓点，极致低音享受 「车载」",
+        "type": "Text",
+        "bbox": {
+          "left": 558,
+          "top": 784,
+          "right": 1038,
+          "bottom": 882
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "低沉鼓点，极致低音享受 「车载」",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|低沉鼓点，极致低音享受 「车载」",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,1,0,3,0"
+        }
+      },
+      {
+        "element_id": "ui-89bbbb6b227a",
+        "content": "",
+        "type": "ListItem",
+        "bbox": {
+          "left": 1068,
+          "top": 285,
+          "right": 1320,
+          "bottom": 915
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,2"
+        }
+      },
+      {
+        "element_id": "ui-b6285b0eca10",
+        "content": "歌单推荐",
+        "type": "Text",
+        "bbox": {
+          "left": 1104,
+          "top": 321,
+          "right": 1297,
+          "bottom": 377
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "歌单推荐",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|歌单推荐",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,2,0,1"
+        }
+      },
+      {
+        "element_id": "ui-632300edf4c5",
+        "content": "KTV麦霸必点歌曲",
+        "type": "Text",
+        "bbox": {
+          "left": 1110,
+          "top": 808,
+          "right": 1320,
+          "bottom": 857
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "KTV麦霸必点歌曲",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|KTV麦霸必点歌曲",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,0,2,0,3,0"
+        }
+      },
+      {
+        "element_id": "ui-b0b46c64f618",
+        "content": "专属你的「治愈」精选",
+        "type": "Text",
+        "bbox": {
+          "left": 36,
+          "top": 1005,
+          "right": 517,
+          "bottom": 1061
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "专属你的「治愈」精选",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|专属你的「治愈」精选",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,0"
+        }
+      },
+      {
+        "element_id": "ui-5520f0faa0c8",
+        "content": "",
+        "type": "List",
+        "bbox": {
+          "left": 0,
+          "top": 1109,
+          "right": 1320,
+          "bottom": 1709
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0"
+        }
+      },
+      {
+        "element_id": "ui-26ecd4b59d12",
+        "content": "第二行左侧卡片播放按钮",
+        "type": "ListItem",
+        "bbox": {
+          "left": 48,
+          "top": 1109,
+          "right": 528,
+          "bottom": 1709
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,0",
+          "vision_reason": "视觉可见的播放图标"
+        }
+      },
+      {
+        "element_id": "ui-e13a99770d01",
+        "content": "10.6万",
+        "type": "Text",
+        "bbox": {
+          "left": 126,
+          "top": 1139,
+          "right": 268,
+          "bottom": 1195
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "10.6万",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|10.6万",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,0,0,0,0,1,1"
+        }
+      },
+      {
+        "element_id": "ui-792e2e1b3044",
+        "content": "互删 (我走以后)",
+        "type": "Text",
+        "bbox": {
+          "left": 142,
+          "top": 1610,
+          "right": 435,
+          "bottom": 1659
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "互删 (我走以后)",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|互删 (我走以后)",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,0,0,0,0,3,0"
+        }
+      },
+      {
+        "element_id": "ui-6b390ce86f61",
+        "content": "第二行中间卡片播放按钮",
+        "type": "ListItem",
+        "bbox": {
+          "left": 558,
+          "top": 1109,
+          "right": 1038,
+          "bottom": 1709
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,1",
+          "vision_reason": "视觉可见的播放图标"
+        }
+      },
+      {
+        "element_id": "ui-46fea1f5895a",
+        "content": "10.6万",
+        "type": "Text",
+        "bbox": {
+          "left": 636,
+          "top": 1139,
+          "right": 778,
+          "bottom": 1195
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "10.6万",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|10.6万",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,1,0,0,0,1,1"
+        }
+      },
+      {
+        "element_id": "ui-0bdbaa7afb5f",
+        "content": "If The Sun Burns Out Tonight (feat. Oli Sykes & Courtney LaPlante)",
+        "type": "Text",
+        "bbox": {
+          "left": 594,
+          "top": 1585,
+          "right": 1002,
+          "bottom": 1683
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "If The Sun Burns Out Tonight (feat. Oli Sykes & Courtney LaPlante)",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|If The Sun Burns Out Tonight (feat. Oli Sykes & Courtney LaPlante)",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,1,0,0,0,3,0"
+        }
+      },
+      {
+        "element_id": "ui-bf007adb1988",
+        "content": "",
+        "type": "ListItem",
+        "bbox": {
+          "left": 1068,
+          "top": 1109,
+          "right": 1320,
+          "bottom": 1709
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,2"
+        }
+      },
+      {
+        "element_id": "ui-505b9ea67b84",
+        "content": "10.6万",
+        "type": "Text",
+        "bbox": {
+          "left": 1146,
+          "top": 1139,
+          "right": 1288,
+          "bottom": 1195
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "10.6万",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|10.6万",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,2,0,0,0,1,1"
+        }
+      },
+      {
+        "element_id": "ui-706ea0af3f6d",
+        "content": "Thank You",
+        "type": "Text",
+        "bbox": {
+          "left": 1209,
+          "top": 1610,
+          "right": 1320,
+          "bottom": 1659
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "Thank You",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|Thank You",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1,0,0,2,0,0,0,3,0"
+        }
+      },
+      {
+        "element_id": "ui-d068598028ab",
+        "content": "回忆歌单",
+        "type": "Text",
+        "bbox": {
+          "left": 36,
+          "top": 1799,
+          "right": 229,
+          "bottom": 1855
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "回忆歌单",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|回忆歌单",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,2,0"
+        }
+      },
+      {
+        "element_id": "ui-7ddb80705762",
+        "content": "",
+        "type": "List",
+        "bbox": {
+          "left": 0,
+          "top": 1903,
+          "right": 1320,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": true,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,2,1,0,0"
+        }
+      },
+      {
+        "element_id": "ui-16c954891814",
+        "content": "",
+        "type": "ListItem",
+        "bbox": {
+          "left": 48,
+          "top": 1903,
+          "right": 528,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,2,1,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-d1855f29cadc",
+        "content": "飙升榜",
+        "type": "Text",
+        "bbox": {
+          "left": 84,
+          "top": 1939,
+          "right": 229,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "飙升榜",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|飙升榜",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,2,1,0,0,0,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-c8ee9a185b9b",
+        "content": "",
+        "type": "ListItem",
+        "bbox": {
+          "left": 558,
+          "top": 1903,
+          "right": 1038,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,2,1,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-95d48818785c",
+        "content": "新歌榜",
+        "type": "Text",
+        "bbox": {
+          "left": 594,
+          "top": 1939,
+          "right": 739,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "新歌榜",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|新歌榜",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,2,1,0,0,1,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-eac265b44013",
+        "content": "",
+        "type": "ListItem",
+        "bbox": {
+          "left": 1068,
+          "top": 1903,
+          "right": 1320,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,2,1,0,0,2"
+        }
+      },
+      {
+        "element_id": "ui-23e9651114d0",
+        "content": "原创榜",
+        "type": "Text",
+        "bbox": {
+          "left": 1104,
+          "top": 1939,
+          "right": 1249,
+          "bottom": 1980
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "原创榜",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|原创榜",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,0,0,0,1,0,0,0,2,1,0,0,2,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-0754bdd769c2",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 0,
+          "top": 1980,
+          "right": 330,
+          "bottom": 2148
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": true,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,0"
+        }
+      },
+      {
+        "element_id": "ui-8e79c891f910",
+        "content": "首页",
+        "type": "Text",
+        "bbox": {
+          "left": 117,
+          "top": 2028,
+          "right": 214,
+          "bottom": 2084
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "首页",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|首页",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-ea83fd43a3c3",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 330,
+          "top": 1980,
+          "right": 660,
+          "bottom": 2148
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,1"
+        }
+      },
+      {
+        "element_id": "ui-b6479e85fa42",
+        "content": "搜索",
+        "type": "Text",
+        "bbox": {
+          "left": 447,
+          "top": 2028,
+          "right": 544,
+          "bottom": 2084
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "搜索",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|搜索",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,1,0,0"
+        }
+      },
+      {
+        "element_id": "ui-920e4ed88300",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 660,
+          "top": 1980,
+          "right": 990,
+          "bottom": 2148
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,2"
+        }
+      },
+      {
+        "element_id": "ui-c1fecfe0db33",
+        "content": "笔记",
+        "type": "Text",
+        "bbox": {
+          "left": 777,
+          "top": 2028,
+          "right": 874,
+          "bottom": 2084
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "笔记",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|笔记",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,2,0,0"
+        }
+      },
+      {
+        "element_id": "ui-195b3dfd952c",
+        "content": "",
+        "type": "Column",
+        "bbox": {
+          "left": 990,
+          "top": 1980,
+          "right": 1320,
+          "bottom": 2148
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": true,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,3"
+        }
+      },
+      {
+        "element_id": "ui-e1387fdef648",
+        "content": "我的",
+        "type": "Text",
+        "bbox": {
+          "left": 1107,
+          "top": 2028,
+          "right": 1204,
+          "bottom": 2084
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "我的",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|我的",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT287,0,1,0,1,0,0,2,3,0,0"
+        }
+      },
+      {
+        "element_id": "ui-3192fec75e1b",
+        "content": "status_bar_color_picker",
+        "type": "Row",
+        "bbox": {
+          "left": 98,
+          "top": 41,
+          "right": 1222,
+          "bottom": 113
+        },
+        "key": "status_bar_color_picker",
+        "id": "status_bar_color_picker",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "key",
+            "value": "status_bar_color_picker",
+            "score": 1.0
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-5201d792cd23",
+        "content": "10, :, 12",
+        "type": "Row",
+        "bbox": {
+          "left": 98,
+          "top": 41,
+          "right": 219,
+          "bottom": 113
+        },
+        "key": "",
+        "id": "",
+        "description": "长按时间切换显示格式",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "10, :, 12",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Row|10, :, 12",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0"
+        }
+      },
+      {
+        "element_id": "ui-358b9569e77c",
+        "content": "TimeView_Text_timeText",
+        "type": "TextClock",
+        "bbox": {
+          "left": 98,
+          "top": 51,
+          "right": 152,
+          "bottom": 104
+        },
+        "key": "TimeView_Text_timeText",
+        "id": "TimeView_Text_timeText",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "key",
+            "value": "TimeView_Text_timeText",
+            "score": 1.0
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-e76d39957712",
+        "content": "10",
+        "type": "Text",
+        "bbox": {
+          "left": 98,
+          "top": 51,
+          "right": 152,
+          "bottom": 104
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "10",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|10",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,0,0,0"
+        }
+      },
+      {
+        "element_id": "ui-427ea2e3f105",
+        "content": ":",
+        "type": "Text",
+        "bbox": {
+          "left": 152,
+          "top": 55,
+          "right": 165,
+          "bottom": 100
+        },
+        "key": "TimeView_Text_timeText",
+        "id": "TimeView_Text_timeText",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "key",
+            "value": "TimeView_Text_timeText",
+            "score": 1.0
+          },
+          {
+            "kind": "text",
+            "value": ":",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|:",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-a6402f8257fd",
+        "content": "TimeView_Text_timeText",
+        "type": "TextClock",
+        "bbox": {
+          "left": 165,
+          "top": 51,
+          "right": 219,
+          "bottom": 104
+        },
+        "key": "TimeView_Text_timeText",
+        "id": "TimeView_Text_timeText",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "key",
+            "value": "TimeView_Text_timeText",
+            "score": 1.0
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,1"
+        }
+      },
+      {
+        "element_id": "ui-f26b8118cb13",
+        "content": "12",
+        "type": "Text",
+        "bbox": {
+          "left": 165,
+          "top": 51,
+          "right": 219,
+          "bottom": 104
+        },
+        "key": "",
+        "id": "",
+        "description": "",
+        "clickable": false,
+        "editable": false,
+        "scrollable": false,
+        "enabled": true,
+        "selected": false,
+        "score": 1.0,
+        "source": "hdc_uitest_dumpLayout",
+        "locator_candidates": [
+          {
+            "kind": "text",
+            "value": "12",
+            "score": 0.9
+          },
+          {
+            "kind": "type_text",
+            "value": "Text|12",
+            "score": 0.85
+          }
+        ],
+        "metadata": {
+          "page_path": "",
+          "hierarchy": "ROOT27,0,0,0,0,1,1,0,2,0,0,1,0"
+        }
+      }
+    ],
+    "summary": "当前显示网易云音乐首页推荐内容，底部导航栏可见“首页/搜索/笔记/我的”，可确认已返回首页。"
+  }
+}

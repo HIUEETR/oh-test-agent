@@ -82,7 +82,10 @@ FREEZE_KINDS = frozenset({AnomalyKind.APP_FREEZE, AnomalyKind.ANR, AnomalyKind.P
 SYMPTOM_KINDS: dict[str, frozenset[AnomalyKind]] = {
     "crash": frozenset({AnomalyKind.CPP_CRASH, AnomalyKind.JS_CRASH}),
     "freeze": FREEZE_KINDS,
-    "unresponsive": FREEZE_KINDS,
+    # 「无响应」比整页冻屏宽一档：页面还活着、轮播还在动，但点击没有产生导航
+    # （``NO_OP_NAVIGATION``）同样是用户视角的「点了没反应」，因此并入本条目。
+    # 不并入 ``FREEZE_KINDS`` 本身——那会让 ``symptom_kind="freeze"`` 也接受它。
+    "unresponsive": FREEZE_KINDS | {AnomalyKind.NO_OP_NAVIGATION},
     "white_screen": frozenset({AnomalyKind.WHITE_SCREEN}),
     "layout": frozenset({AnomalyKind.LAYOUT_ANOMALY}),
     "cppcrash": frozenset({AnomalyKind.CPP_CRASH}),
@@ -330,6 +333,13 @@ class _AnalysisInput:
     事后分析据此**继承它的 page_path / action_id / target**：否则升级出的 critical finding
     与它自己归并键不同，同一次前台丢失会在缺陷库里裂成两条，而闭环可能选中没有上下文的那条。"""
 
+    in_run_noop_finding: AnomalyFinding | None = None
+    """运行中检测到的 ``NO_OP_NAVIGATION`` finding（如果有）。
+
+    与 ``in_run_stall_finding`` 并列的第二类运行中信号 (a)：它证明「点击确实没产生导航」
+    这个**语义级**结论，而帧 / UI 树是否停滞是另一回事——轮播在动的页面正是帧不停滞、
+    但点击无反应的场景（真机复盘 run-20260922T141003Z-6bf8bf42）。"""
+
 
 class ExecutionAnalyzer:
     """执行结果分析器：所有入口都返回合法 :class:`ExecutionAnalysis`，永不抛出。
@@ -491,6 +501,11 @@ class ExecutionAnalyzer:
                 # 它的 page_path / action_id / target，才能与它归并成同一条缺陷。
                 in_run_stall_finding=next(
                     (item for item in trace.defects if item.kind == AnomalyKind.PAGE_UNRESPONSIVE),
+                    None,
+                ),
+                # 同一来源的第二类信号：运行中检测已经判出「点击没产生导航」。
+                in_run_noop_finding=next(
+                    (item for item in trace.defects if item.kind == AnomalyKind.NO_OP_NAVIGATION),
                     None,
                 ),
             )
@@ -776,8 +791,11 @@ class ExecutionAnalyzer:
             logger.warning("timeout marker scan failed: %s: %s", type(exc).__name__, exc)
             return []
         marker = bool(match) or analysis_input.timed_out
+        noop_origin = analysis_input.in_run_noop_finding
         stalled = tail_run >= 2 or layout_stale
-        if not stalled:
+        # 「点击后未导航」不依赖帧 / UI 树停滞：轮播在动的页面正是帧不停滞、但点击无反应，
+        # 因此只要有运行中信号就继续（其余分支仍要求 stalled，规则不变）。
+        if not stalled and noop_origin is None:
             return []
         # 继承触发信号的那条运行中 finding 的上下文：升级后的 critical finding 必须与它
         # 归并成同一条缺陷（否则同一次前台丢失会裂成两条，闭环可能选到没有上下文的那条）。
@@ -789,6 +807,7 @@ class ExecutionAnalyzer:
             "timed_out_status": analysis_input.timed_out,
             # 缺口 3：Live 运行没有 replay stdout，信号 (a) 由 InRunDetector 的结构停滞观测提供
             "in_run_stall": analysis_input.in_run_stall or origin is not None,
+            "in_run_noop_navigation": noop_origin is not None,
             "identical_tail_frames": tail_run,
             "layout_stale": layout_stale,
             "stress_context": analysis_input.stress_context,
@@ -801,8 +820,9 @@ class ExecutionAnalyzer:
                 value = origin_evidence.get(key)
                 if value:
                     evidence[key] = value
+        findings: list[AnomalyFinding] = []
         if marker:
-            return [
+            findings.append(
                 AnomalyFinding(
                     kind=AnomalyKind.PAGE_UNRESPONSIVE,
                     severity="critical",
@@ -814,9 +834,9 @@ class ExecutionAnalyzer:
                     page_path=origin.page_path if origin is not None else "",
                     evidence=evidence,
                 )
-            ]
-        if evidence["in_run_stall"]:
-            return [
+            )
+        elif evidence["in_run_stall"]:
+            findings.append(
                 AnomalyFinding(
                     kind=AnomalyKind.PAGE_UNRESPONSIVE,
                     severity="critical",
@@ -829,9 +849,29 @@ class ExecutionAnalyzer:
                     screenshot=origin.screenshot if origin is not None else "",
                     evidence=evidence,
                 )
-            ]
-        if analysis_input.stress_context:
-            return [
+            )
+        if noop_origin is not None:
+            # 「点击后未导航」与整页冻结是**两种故障模式**，互不抑制：前者在这里只把运行中
+            # 那条 finding 带进事后分析（analysis.findings / healthy / symptom_reproduced），
+            # 结论与证据都沿用运行中那条，避免另造一条归并键不同的缺陷。
+            # severity 保持 warning —— 单次点击无反应是信号不是判决。
+            findings.append(
+                AnomalyFinding(
+                    kind=AnomalyKind.NO_OP_NAVIGATION,
+                    severity=noop_origin.severity,
+                    summary_zh=noop_origin.summary_zh or "点击后页面未发生跳转，疑似无响应控件",
+                    detail=noop_origin.detail or "运行中检测（InRunDetector）观测到点击后页面未发生跳转",
+                    source="screenshot",
+                    phase="in_run",
+                    action_id=noop_origin.action_id,
+                    page_path=noop_origin.page_path,
+                    screenshot=noop_origin.screenshot,
+                    detected_at=noop_origin.detected_at,
+                    evidence={**dict(noop_origin.evidence), **evidence},
+                )
+            )
+        if not findings and analysis_input.stress_context:
+            findings.append(
                 AnomalyFinding(
                     kind=AnomalyKind.PAGE_UNRESPONSIVE,
                     severity="warning",
@@ -840,8 +880,8 @@ class ExecutionAnalyzer:
                     source="screenshot",
                     evidence=evidence,
                 )
-            ]
-        return []
+            )
+        return findings
 
     def _detect_stale_locator(self, analysis_input: _AnalysisInput) -> AnomalyFinding | None:
         """第 3.5 步：脚本定位器在设备上已失效（选择器过期，非应用缺陷）。

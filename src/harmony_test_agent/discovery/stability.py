@@ -222,9 +222,16 @@ class StabilityAnalyzer:
         return re.sub(r"\s+", " ", semantic).strip()[:80]
 
 
+#: UUID（任意版本）。UUID 被连字符切成 8-4-4-4-12 段，因此 ``\d{6,}`` 与 ``[0-9a-f]{16,}``
+#: 都抓不到它（真机复盘 ``b3911500-f93c-4ab0-8c02-44751c2ca862`` 因此以 ``confidence: high``
+#: 进了 Profile，planner 随后把它当成稳定定位器）。
+_UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
 def _dynamic_identifier(value: str) -> bool:
     return bool(
-        re.search(r"(?:^|[_-])\d{6,}(?:$|[_-])", value)
+        _UUID_PATTERN.search(value)
+        or re.search(r"(?:^|[_-])\d{6,}(?:$|[_-])", value)
         or re.search(r"[0-9a-f]{16,}", value, re.I)
         or re.search(r"(?:session|timestamp|nonce|random|uuid)", value, re.I)
     )
@@ -240,7 +247,20 @@ def dynamic_identifier_pattern(value: str) -> str:
     return re.sub(r"\d{6,}", "#", value)
 
 
-__all__.extend(["dynamic_identifier_pattern", "is_dynamic_identifier"])
+def is_unreusable_dynamic_identifier(value: str) -> bool:
+    """动态标识中**泛化不出可复用前缀**的那一类：UUID 与长 hex 内容 ID。
+
+    :func:`dynamic_identifier_pattern` 只能折叠时间戳式的 ``\\d{6,}``，于是
+    ``add_agenda_title-1789951623657`` 能折成 ``add_agenda_title-#``、回放时按前缀匹配到
+    真实元素；而 UUID 折完还是它自己（内容 ID 同理），入库只会在下一次渲染时失效。
+    判定因此分两步：命中 UUID 一律算；其余动态标识只在「折叠是空操作」时才算。
+    """
+    if _UUID_PATTERN.search(value):
+        return True
+    return _dynamic_identifier(value) and dynamic_identifier_pattern(value) == value
+
+
+__all__.extend(["dynamic_identifier_pattern", "is_dynamic_identifier", "is_unreusable_dynamic_identifier"])
 
 
 def _dynamic_text(value: str) -> bool:

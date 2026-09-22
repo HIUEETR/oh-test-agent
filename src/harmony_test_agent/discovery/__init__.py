@@ -20,6 +20,7 @@ from .stability import (
     StabilityReport,
     dynamic_identifier_pattern,
     is_dynamic_identifier,
+    is_unreusable_dynamic_identifier,
 )
 from .verification import ProfileVerificationResult, ProfileVerifier, VerificationRound
 
@@ -42,6 +43,7 @@ __all__ = [
     "VerificationRound",
     "dynamic_identifier_pattern",
     "is_dynamic_identifier",
+    "is_unreusable_dynamic_identifier",
     "is_volatile_evidence_key",
     "is_volatile_structural_key",
 ]

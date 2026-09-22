@@ -25,6 +25,7 @@ from ..discovery import (
     StabilityLevel,
     dynamic_identifier_pattern,
     is_dynamic_identifier,
+    is_unreusable_dynamic_identifier,
     is_volatile_evidence_key,
 )
 from ..discovery.advisor import ExplorationAdvisor
@@ -32,6 +33,8 @@ from ..generation import HypiumGenerator
 from ..graph import PageGraphBuilder
 from ..models import (
     ActionResult,
+    AnomalyFinding,
+    AnomalyKind,
     AppVersion,
     AssertionDefinition,
     AssertionResult,
@@ -404,12 +407,17 @@ class AgentOrchestrator:
                 result.after_snapshot_id = after.snapshot_id
                 trace.actions.append(result)
                 if result.assertion:
+                    if step.expects_defect:
+                        # 反向断言：计划已声明「断言通过 = 观测到异常现象」，把它透传到断言结果，
+                        # IR（``polarity``）与下面的「通过即缺陷」判定都以它为准。
+                        result.assertion.expects_defect = True
                     trace.assertions.append(result.assertion)
                     emitter.emit(
                         EventType.ASSERTION_PASSED,
                         result.assertion.message,
                         result.assertion.model_dump(mode="json"),
                     )
+                    self._record_confirmed_defect(trace, emitter, result, step, after)
                 trace.state = RunState.GRAPH_UPDATING
                 if current_node and after_node:
                     edge = graph.add_edge(current_node, after_node, decision.tool, decision.target or "")
@@ -2006,6 +2014,8 @@ class AgentOrchestrator:
                 after=after,
                 tool=decision.tool,
                 target=decision.target or "",
+                # 「点击后未导航」的三条件判定需要被点元素的 id（点击类动作才是 element_id）。
+                clicked_element_id=decision.target or "",
             )
         except Exception as exc:  # noqa: BLE001 - 检测失败不得打断任务
             logger.warning("in-run detection failed for %s: %s: %s", step.step_id, type(exc).__name__, exc)
@@ -2019,6 +2029,66 @@ class AgentOrchestrator:
         payload["action_id"] = step.step_id
         payload["evidence_paths"] = list(observation.evidence_paths)
         emitter.emit(EventType.ANOMALY_DETECTED, finding.summary_zh, payload)
+
+    def _record_confirmed_defect(
+        self,
+        trace: RunTrace,
+        emitter: Any,
+        result: ActionResult,
+        step: PlannedStep,
+        after: ScreenSnapshot,
+    ) -> AnomalyFinding | None:
+        """反向断言通过 ⇒ 把它记成一条缺陷 finding（改动 2 的核心）。
+
+        **语义反转**：普通断言的缺陷模型是「断言失败 = 发现问题」，而探索性复现的断言是
+        「断言成功 = 发现问题」（例：点击海报后海报仍可见 ⇒ 未跳转 ⇒ 疑似无响应）。真机复盘
+        run-20260922T141003Z-6bf8bf42 step-7 的断言 ``passed=true``，agent 正确发现了缺陷，
+        系统却把它记成一条**通过**的断言 ⇒ ``state=completed``、``defects=[]``。
+
+        红线（与 ``_detect_in_run_anomalies`` 一致）：检测是 advisory —— 只写
+        ``ActionResult.anomaly`` / ``trace.defects`` 并发出 ``ANOMALY_DETECTED``，
+        **绝不**改变 ``result.success``、``trace.state`` 或断言的 ``passed``。
+        """
+        assertion = result.assertion
+        if assertion is None or not assertion.passed or not assertion.expects_defect:
+            return None
+        finding = AnomalyFinding(
+            kind=AnomalyKind.NO_OP_NAVIGATION,
+            severity="warning",
+            summary_zh=f"断言确认了异常现象：{step.expected or step.instruction}",
+            detail=assertion.message,
+            source="ui_dump",
+            action_id=step.step_id,
+            page_path=after.page_path,
+            screenshot=self._run_relative_path(trace, after.image_path),
+            detected_at=utc_now(),
+            phase="in_run",
+            evidence={
+                "assertion_target": assertion.target,
+                "polarity": "unexpected",
+                # 与运行中检测的 finding 用同一套归并键字段（``analysis/defects.py`` 取
+                # ``target``）：同一处「点击无反应」被检测器与反向断言各确认一次时合成一条缺陷。
+                "target": assertion.target,
+                "tool": str(result.tool),
+                "page_path": after.page_path,
+                "detected_by": "reverse_assertion",
+            },
+        )
+        result.anomaly = finding
+        trace.defects.append(finding)
+        payload = finding.model_dump(mode="json")
+        payload["action_id"] = step.step_id
+        emitter.emit(EventType.ANOMALY_DETECTED, finding.summary_zh, payload)
+        return finding
+
+    def _run_relative_path(self, trace: RunTrace, path: Any) -> str:
+        """把产物路径折算成 run 内相对路径（报告据此建链接）；不可折算时返回空串。"""
+        if path is None:
+            return ""
+        try:
+            return Path(path).resolve().relative_to(self.artifacts.run_dir(trace.run_id).resolve()).as_posix()
+        except ValueError, OSError:
+            return ""
 
     @staticmethod
     def _analysis_bundle(trace: RunTrace) -> str:
@@ -2320,8 +2390,15 @@ class AgentOrchestrator:
             candidate = self._harvest_candidate(action, snapshot)
             if candidate is None:
                 continue
-            if candidate.kind in {LocatorKind.KEY, LocatorKind.ID} and is_volatile_evidence_key(candidate.value):
-                # 易变 key（时钟/日期格/列表实例序号）直接丢弃，不入库（计划 3.3/2.2）。
+            if candidate.kind in {LocatorKind.KEY, LocatorKind.ID} and (
+                is_volatile_evidence_key(candidate.value) or is_unreusable_dynamic_identifier(candidate.value)
+            ):
+                # 易变 key（时钟/日期格/列表实例序号）与**泛化不出前缀**的动态标识
+                # （UUID / 长 hex 内容 ID）都不入库：前者回放时值已变，后者回放时必然失效。
+                # 真机复盘 com-example-neteasymusic 的 b3911500-f93c-4ab0-8c02-44751c2ca862
+                # 曾被当成 high 置信度稳定定位器喂给 planner。
+                # 时间戳后缀 key（add_agenda_title-1789951623657）例外：它折叠出的
+                # ``add_agenda_title-#`` 是可复用前缀，仍按 MEDIUM + 警告入库。
                 continue
             page_signature = ""
             if snapshot is not None:

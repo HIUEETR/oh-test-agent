@@ -61,6 +61,9 @@ ANOMALY_TO_SYMPTOM: dict[AnomalyKind, str] = {
     AnomalyKind.APP_FREEZE: "freeze",
     AnomalyKind.ANR: "unresponsive",
     AnomalyKind.PAGE_UNRESPONSIVE: "unresponsive",
+    # 「点击后未导航」在用户视角同样是「点了没反应」，因此与 ``PAGE_UNRESPONSIVE`` 归到
+    # 同一个症状词；两者是不同的故障模式，但重跑时的复现判据相同（SYMPTOM_KINDS 认这两个 kind）。
+    AnomalyKind.NO_OP_NAVIGATION: "unresponsive",
     AnomalyKind.WHITE_SCREEN: "white_screen",
     AnomalyKind.LAYOUT_ANOMALY: "layout",
     AnomalyKind.MEMORY_GROWTH: "other",
