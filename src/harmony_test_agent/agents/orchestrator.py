@@ -403,11 +403,11 @@ class AgentOrchestrator:
             trace.graph = graph.graph
             self.artifacts.write_json(self.artifacts.run_dir(trace.run_id) / "graph.json", trace.graph)
 
-            if trace.provisional or trace.live_mode:
-                # 实时模式仍可生成脚本（计划 R2）：Profile 未 verified 时生成器自行判定
-                # purpose="diagnostic" / replay_eligible=False，产物依然可复用、可入库、
-                # 可人工执行；只有关乎 Profile 晋级证据的自动回放必须关闭，避免用未经验证
-                # 的实时轨迹污染晋级门禁。
+            if (trace.provisional or trace.live_mode) and not self.settings.auto_execute_on_first_run:
+                # 脚本现在**立即可执行**（live_mode 只影响 confidence，不再阻断执行与入库），
+                # 但自动回放失败会把整个 run 判为 FAILED_SCRIPT（见 _finalize_artifacts 末段），
+                # 首次运行不应因自动回放而失败：默认关掉自动回放，用户点一次「验收回放」即可；
+                # settings.auto_execute_on_first_run=True 可恢复「生成即自动验收」的旧行为。
                 request.auto_execute = False
             await self._finalize_artifacts(trace, emitter, request, allow_replay=True)
 
@@ -617,7 +617,12 @@ class AgentOrchestrator:
 
     @staticmethod
     def _enter_live_mode(trace: RunTrace, emitter: RunEventEmitter, reason: str) -> None:
-        """记录实时模式并通知前端；实时模式不生成/回放脚本，但仍产出诊断产物。"""
+        """记录实时模式并通知前端。
+
+        实时模式**照常生成脚本**：没有经过设备验证的定位器只影响 ``confidence``
+        （``provisional`` / ``live_mode`` 会写进 ``promotion_blockers``），脚本本身立即可执行、
+        可入库、可手动回放。
+        """
         trace.live_mode = True
         trace.profile_status_at_start = ProfileStatus.ABSENT
         emitter.emit(EventType.PROFILE_LIVE_MODE, reason, {"live_mode": True})
@@ -876,6 +881,9 @@ class AgentOrchestrator:
         if not all(item.passed for item in trace.profile_validation_replays):
             raise ToolExecutionError("Profile Hypium replay gate failed", RunState.FAILED_SCRIPT)
         trace.state = RunState.PROFILE_PROMOTING
+        # 晋级证据只能来自 Profile 验证脚本；用显式断言把「生成器产物缺失」挡在晋级之前。
+        if trace.profile_validation_generated is None:
+            raise ToolExecutionError("profile validation script is missing", RunState.FAILED_SCRIPT)
         replay_ids = [f"{trace.run_id}:profile-attempt-{item.attempt}" for item in trace.profile_validation_replays]
         try:
             verified_path = registry.promote(candidate, replay_run_ids=replay_ids)
@@ -1020,7 +1028,8 @@ class AgentOrchestrator:
         )
         if replay_gate is not None:
             raise ValueError(describe_admission_failure(replay_gate, style="admission_replay"))
-        # 合成准入轨迹代表一次完整成功的准入运行；缺少完成结局与 FINISH 会被回放资格门控判为诊断脚本。
+        # 合成准入轨迹代表一次完整成功的准入运行；缺少完成结局与 FINISH 会被判为
+        # confidence=low，并因此无法满足 Profile 晋级门禁。
         validation.actions.append(ActionResult(step_id="profile-finish", tool=ToolName.FINISH, success=True))
         validation.snapshots = [
             snapshot.model_copy(update={"run_id": validation_id}, deep=True)
@@ -1881,6 +1890,14 @@ class AgentOrchestrator:
             logger.warning("case library save failed for %s: %s", trace.run_id, exc)
             return
         if record is None:
+            # G5 之后这里只在两条物理必要条件不满足时命中（缺可回放动作 / 身份占位），
+            # 或 trace 没有冻结 Profile 快照；留一条日志便于诊断「为什么没入库」。
+            logger.info(
+                "case not persisted for run %s: runnable_blockers=%s has_profile_snapshot=%s",
+                trace.run_id,
+                list(getattr(trace.generated, "runnable_blockers", []) or []),
+                trace.profile_snapshot is not None,
+            )
             return
         emitter.emit(
             EventType.CASE_SAVED,
@@ -1960,8 +1977,10 @@ class AgentOrchestrator:
     def _synthetic_profile(trace: RunTrace) -> TargetAppProfile | None:
         """实时模式（磁盘无任何 Profile）下的最小冻结快照，让产物生成路径仍然可用。
 
-        这类运行没有任何经过设备验证的定位器：生成器据此判定 ``purpose="diagnostic"`` /
-        ``replay_eligible=False``，产物只用于诊断、入库与人工复用，不构成晋级证据。
+        这类运行没有任何经过设备验证的定位器：生成器据此把 ``live_mode`` 写进
+        ``promotion_blockers``（不作为晋级证据），但脚本本身**可执行**——``purpose`` 与
+        ``replay_eligible`` 只由「有可回放动作 + 应用身份非占位」两条物理条件决定，
+        质量顾虑只体现在 ``confidence`` 上。
         无解析结果（例如目标解析阶段即失败）时返回 ``None``，生成器会自行报错并被降级为 warning。
         """
         if trace.profile_snapshot is not None:

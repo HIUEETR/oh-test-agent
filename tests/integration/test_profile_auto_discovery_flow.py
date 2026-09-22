@@ -668,10 +668,12 @@ async def test_provisional_profile_blocks_formal_hypium_generation_and_execution
         assert draft.status == ProfileStatus.INVALID
     assert trace.replays == []
     assert replay_called is False
-    # 自动回放被关闭 ≠ 放弃脚本生成：provisional 产物必须是不可回放的诊断脚本。
+    # 自动回放被关闭 ≠ 脚本不可用：provisional 只把晋级资格判为 False，脚本立即可执行。
     assert trace.generated is not None
-    assert trace.generated.purpose == "diagnostic"
-    assert trace.generated.replay_eligible is False
+    assert trace.generated.purpose == "acceptance"
+    assert trace.generated.replay_eligible is True
+    assert trace.generated.promotion_eligible is False
+    assert "provisional trace is not Profile-promotion evidence" in trace.generated.promotion_blockers
     assert trace.generated.python_path.exists()
 
 
@@ -932,12 +934,14 @@ async def test_live_mode_runs_original_task_without_profile(tmp_path: Path) -> N
     assert trace.state == RunState.COMPLETED, trace.error
     assert trace.live_mode is True
     # 磁盘无任何 Profile：运行期为生成产物合成一份最小快照（计划 R2/G1），
-    # 它不写盘、不构成晋级证据，脚本因此必然是 diagnostic / 不可回放。
+    # 它不写盘、不构成晋级证据；脚本本身立即可执行（计划 G1）。
     assert trace.profile_snapshot is not None
     assert trace.profile_snapshot.provenance.evidence["live_mode"] is True
     assert trace.generated is not None
-    assert trace.generated.purpose == "diagnostic"
-    assert trace.generated.replay_eligible is False
+    assert trace.generated.purpose == "acceptance"
+    assert trace.generated.replay_eligible is True
+    assert trace.generated.promotion_eligible is False
+    # 自动回放仍然关闭（失败会把整个 run 判为 FAILED_SCRIPT），但脚本已可手动执行。
     assert trace.replays == []
     assert any(event.type == EventType.PROFILE_LIVE_MODE for event in trace.events)
     assert any(event.type == EventType.ORIGINAL_TASK_STARTED for event in trace.events)
@@ -960,12 +964,14 @@ async def test_failed_profile_verification_downgrades_to_live_mode(tmp_path: Pat
 
     assert trace.state == RunState.COMPLETED, trace.error
     assert trace.live_mode is True
-    # 失败草稿保留为证据（无定位器 ⇒ INVALID，有回收定位器 ⇒ DRAFT），实时模式仍从它生成诊断脚本。
+    # 失败草稿保留为证据（无定位器 ⇒ INVALID，有回收定位器 ⇒ DRAFT），实时模式仍从它生成可执行脚本。
     assert trace.profile_snapshot is not None
     expected_status = ProfileStatus.DRAFT if trace.profile_snapshot.stable_locator_inventory else ProfileStatus.INVALID
     assert trace.profile_snapshot.status == expected_status
     assert trace.generated is not None
-    assert trace.generated.purpose == "diagnostic"
+    assert trace.generated.purpose == "acceptance"
+    assert trace.generated.replay_eligible is True
+    assert trace.generated.promotion_eligible is False
     live_events = [event for event in trace.events if event.type == EventType.PROFILE_LIVE_MODE]
     assert live_events
     registry = ProfileRegistry(orchestrator.settings.resolved_profiles_dir)

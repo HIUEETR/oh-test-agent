@@ -67,8 +67,11 @@ async def test_failed_run_still_generates_diagnostic_artifacts(tmp_path: Path) -
     # 失败运行照样留下脚本、用例 IR 与报告：本次实测 13 个成功动作、7 个真实定位器全被丢弃。
     generated = trace.generated
     assert generated is not None
-    assert generated.purpose == "diagnostic"
-    assert generated.replay_eligible is False
+    # 失败只降置信度（low），不再阻断执行：脚本本身仍然立即可用（计划 G1/G5）。
+    assert generated.purpose == "acceptance"
+    assert generated.replay_eligible is True
+    assert generated.confidence == "low"
+    assert "source trace contains failed actions" in generated.confidence_factors
     assert generated.python_path.exists()
     assert generated.case_spec_path is not None and generated.case_spec_path.exists()
     assert generated.included_action_count >= 1

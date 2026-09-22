@@ -41,6 +41,8 @@ from .builder import (
     SWIPE_DIRECTIONS,
     CaseBuilder,
     CaseBuildResult,
+    evaluate_confidence,
+    evaluate_runnable,
     new_case_id,
     slugify,
 )
@@ -497,12 +499,17 @@ def build_bug_repro_case(
     }
 
     title = (plan.title_zh.strip() or request.title.strip())[:200]
-    incomplete_reasons: list[str] = []
+    # 硬检查点缺失从阻断条件降为质量因素（脚本照样能跑，只是没有检查点）；
+    # 占位应用身份则保留为 runnable blocker（物理上跑不到目标应用）。
+    confidence_factors: list[str] = []
     if hard == 0:
-        incomplete_reasons.append("no hard checkpoint was produced for the bug reproduction")
-    if bundle_name == PLACEHOLDER_BUNDLE:
-        incomplete_reasons.append("placeholder bundle supplied; the case is diagnostic only")
-    replay_eligible = not incomplete_reasons
+        confidence_factors.append("no hard checkpoint was produced for the bug reproduction")
+    replay_eligible, runnable_blockers = evaluate_runnable(
+        included_actions=counts["generated_actions"] + counts["generated_assertions"],
+        bundle_name=bundle_name,
+        main_ability=main_ability,
+    )
+    confidence = evaluate_confidence(confidence_factors, outcome="completed")
     spec = TestCaseSpec(
         case_id=new_case_id(),
         slug=slugify(title, fallback="bug-repro"),
@@ -542,8 +549,12 @@ def build_bug_repro_case(
         omitted_actions=omitted,
         warnings=warnings,
         counts=counts,
-        incomplete_reasons=incomplete_reasons,
+        incomplete_reasons=confidence_factors,  # 兼容别名：与 confidence_factors 同值
+        confidence_factors=confidence_factors,
+        confidence=confidence,
         replay_eligible=replay_eligible,
+        runnable_blockers=runnable_blockers,
+        promotion_eligible=replay_eligible,
         purpose="acceptance" if replay_eligible else "diagnostic",
         explicit_assertions=explicit_assertions,
         source_agent_outcome="unknown",

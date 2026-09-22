@@ -126,7 +126,8 @@ describe("DcComposerActions", () => {
     generateDcScript
       .mockResolvedValueOnce({
         ...artifact(),
-        warnings: ["placeholder bundle/ability supplied; script is diagnostic only"],
+        replay_eligible: false,
+        runnable_blockers: ["app identity is a placeholder (com.example.app/EntryAbility)"],
       })
       .mockResolvedValueOnce(artifact());
     render(<DcComposerActions />);
@@ -161,7 +162,11 @@ describe("DcComposerActions", () => {
   it("已有占位身份脚本时再次点击 pill 仍保留手动身份入口", () => {
     seed();
     useDcConsole.setState({
-      script: { ...artifact(), warnings: ["placeholder bundle/ability supplied; script is diagnostic only"] },
+      script: {
+        ...artifact(),
+        replay_eligible: false,
+        runnable_blockers: ["app identity is a placeholder (com.example.app/EntryAbility)"],
+      },
     });
     render(<DcComposerActions />);
 

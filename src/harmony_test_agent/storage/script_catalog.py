@@ -50,17 +50,27 @@ class ScriptCatalogEntry(BaseModel):
     main_ability: str | None = None
     purpose: str | None = None
     replay_eligible: bool = False
+    """脚本是否可执行（runnable）；不代表质量合格——质量看 ``confidence``。"""
+    confidence: str | None = None
+    """质量分档 ``high`` / ``medium`` / ``low``；旧产物缺该键时为 ``None``。"""
+    confidence_factors: list[str] = Field(default_factory=list)
+    """质量顾虑清单（非阻断）；旧产物回退到 ``incomplete_reasons``。"""
+    promotion_eligible: bool = False
+    """能否作为 Profile 晋级证据；旧产物缺该键时为 ``False``。"""
+    runnable_blockers: list[str] = Field(default_factory=list)
+    """不可执行的原因；非空时脚本物理上跑不起来。"""
     included_actions: int | None = None
     omitted_actions: int | None = None
     warnings: list[str] = Field(default_factory=list)
     incomplete_reasons: list[str] = Field(default_factory=list)
+    """.. deprecated:: 与 ``confidence_factors`` 同值的兼容别名。"""
     generated_at: str | None = None
     modified_at: str | None = None
     size_bytes: int = 0
 
     @property
     def diagnostic(self) -> bool:
-        """是否为诊断脚本（不可用于正式验收回放）。"""
+        """是否**不可执行**（缺可回放动作或应用身份为占位）。"""
         return not self.replay_eligible
 
 
@@ -118,6 +128,14 @@ class ScriptCatalog:
             main_ability=_str_or_none(config.get("main_ability")),
             purpose=_str_or_none(config.get("purpose")) or _str_or_none(metadata.get("purpose")),
             replay_eligible=bool(config.get("replay_eligible", metadata.get("replay_eligible", False))),
+            confidence=_str_or_none(metadata.get("confidence")) or _str_or_none(config.get("confidence")),
+            confidence_factors=_str_list(
+                metadata.get("confidence_factors")
+                or config.get("confidence_factors")
+                or metadata.get("incomplete_reasons")
+            ),
+            promotion_eligible=bool(metadata.get("promotion_eligible", config.get("promotion_eligible", False))),
+            runnable_blockers=_str_list(metadata.get("runnable_blockers") or config.get("runnable_blockers")),
             included_actions=_int_or_none(config.get("included_operations", metadata.get("included_action_count"))),
             omitted_actions=_int_or_none(config.get("omitted_operations", metadata.get("omitted_action_count"))),
             warnings=_str_list(config.get("warnings") or metadata.get("warnings")),

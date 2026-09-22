@@ -495,15 +495,20 @@ def test_build_from_run_persists_replay_eligible_trace(tmp_path: Path, cases_roo
     assert len(library.versions(record.case_id)) == 1
 
 
-def test_build_from_run_returns_none_when_not_replay_eligible(tmp_path: Path, cases_root: Path):
+def test_build_from_run_persists_trace_without_assertions(tmp_path: Path, cases_root: Path):
+    """无显式断言只降置信度：用例照样自动入库（计划 G5）。"""
     library = make_library(tmp_path, cases_root)
     trace = make_eligible_trace()
-    # 没有显式断言 ⇒ builder 注入兜底断言并给出 incomplete_reasons ⇒ 不合格。
     trace.actions = [action for action in trace.actions if action.tool != ToolName.ASSERT_VISIBLE]
     trace.snapshots = []
 
-    assert library.build_from_run(trace) is None
-    assert library.list() == []
+    record = library.build_from_run(trace)
+
+    assert record is not None
+    assert record.spec.case_id
+    assert record.confidence == "medium"
+    assert "source trace has no successful explicit assertion" in record.confidence_factors
+    assert len(library.list()) == 1
 
 
 def test_scenario_for_trace_follows_plan_c1_mapping():
@@ -522,11 +527,13 @@ def test_build_from_run_persists_mapped_scenario(tmp_path: Path, cases_root: Pat
         assert record is not None
         return record.spec.scenario
 
-    # live-mode / provisional 轨迹是诊断态（计划 R2：purpose=diagnostic、不可回放），
-    # 因此**不会**通过 build_from_run 的合格门槛；场景映射只对强制入库路径生效
-    # （POST /api/cases/from-run/{id}?force=true），这里直接断言映射函数本身。
-    assert scenario_for_trace(make_eligible_trace(run_id="run-live-mode", live_mode=True)) == ScenarioKind.EXPLORATORY
-    assert library.build_from_run(make_eligible_trace(run_id="run-live-mode-2", live_mode=True)) is None
+    # live-mode / provisional 只影响 Profile 晋级资格（promotion_eligible=False），
+    # 不再阻断入库与执行：只要物理上可执行（有可回放动作 + 真实身份）就会自动入档。
+    live = library.build_from_run(make_eligible_trace(run_id="run-live-mode", live_mode=True))
+    assert live is not None
+    assert live.spec.scenario == ScenarioKind.EXPLORATORY
+    assert live.promotion_eligible is False
+    assert "live-mode trace is not Profile-promotion evidence" in live.promotion_blockers
     assert scenario_of(make_eligible_trace(run_id="run-bootstrap", phase="bootstrap")) == ScenarioKind.SMOKE
     assert scenario_of(make_eligible_trace(run_id="run-task")) == ScenarioKind.CORE_FLOW
 
@@ -535,16 +542,16 @@ def test_build_from_dc_requires_real_identity(tmp_path: Path, cases_root: Path):
     library = make_library(tmp_path, cases_root)
     snapshot = make_dc_snapshot()
 
-    # 注意：``EntryAbility`` 本身就是 builder 的**占位 ability**，合格用例必须给出真实全名。
     record = library.build_from_dc(snapshot, "com.example.notes", "com.example.notes.MainAbility")
     assert record is not None
     assert record.source_kind == "dc_session"
     assert record.source_id == snapshot.session_id
     assert record.spec.main_ability == "com.example.notes.MainAbility"
 
-    # 占位身份（com.example.app / EntryAbility）⇒ 不可回放 ⇒ 不入库。
+    # ``EntryAbility`` 是真实 ability 名（鸿蒙工程默认值），不构成占位 ⇒ 仍然入库。
+    assert library.build_from_dc(make_dc_snapshot(session_id="dc-third"), "com.example.notes", "EntryAbility")
+    # 只有 bundle 哨兵（com.example.app）才让用例不可执行 ⇒ 不入库。
     assert library.build_from_dc(make_dc_snapshot(session_id="dc-other"), PLACEHOLDER_BUNDLE, "EntryAbility") is None
-    assert library.build_from_dc(make_dc_snapshot(session_id="dc-third"), "com.example.notes", "EntryAbility") is None
 
 
 # ---------------------------------------------------------------------------

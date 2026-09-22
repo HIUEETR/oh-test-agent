@@ -258,8 +258,8 @@ class TestDcHypiumGenerator:
         assert config["replay_eligible"] is True
         assert config["explicit_assertions"] == 3
 
-    def test_dc_script_without_assertions_is_not_replay_eligible(self, tmp_path: Path) -> None:
-        """无断言 → replay_eligible=False（即使应用身份合法），仍不注入兜底断言。"""
+    def test_dc_script_without_assertions_is_still_runnable(self, tmp_path: Path) -> None:
+        """无断言只降置信度：脚本照样可执行（acceptance），仍不注入兜底断言。"""
         artifacts = ArtifactStore(tmp_path / "runs")
         generator = DcHypiumGenerator(artifacts)
         invocations = [_invocation(DcToolName.CLICK, {"x": 100, "y": 200})]
@@ -271,18 +271,17 @@ class TestDcHypiumGenerator:
             main_ability="MainAbility",
         )
 
-        assert result.replay_eligible is False
+        assert result.replay_eligible is True
+        assert result.confidence == "medium"
+        assert result.confidence_factors == ["no explicit assert_* tool call was recorded"]
         assert result.explicit_assertions == 0
         assert "check_component_exist" not in result.python_text
-        assert any("no explicit assert_*" in warning for warning in result.warnings)
-        assert _config(result)["purpose"] == "dc_recording"
+        config = _config(result)
+        assert config["purpose"] == "acceptance"
+        assert config["confidence"] == "medium"
 
     def test_dc_script_placeholder_identity_is_not_replay_eligible(self, tmp_path: Path) -> None:
-        """占位 bundle/ability：即使有断言也不得作为验收脚本（防误用 com.example.app）。
-
-        ``EntryAbility`` 与 ``com.example.app`` 同为默认占位值，必须显式提供真实身份
-        才允许晋级为 acceptance 脚本；警告文案说明未通过的原因。
-        """
+        """占位 bundle：即使有断言也物理上跑不到目标应用 ⇒ 不可执行（runnable blocker）。"""
         artifacts = ArtifactStore(tmp_path / "runs")
         generator = DcHypiumGenerator(artifacts)
         invocations = [_assertion(DcToolName.ASSERT_VISIBLE, "搜索")]
@@ -293,10 +292,14 @@ class TestDcHypiumGenerator:
         )
 
         assert result.replay_eligible is False
-        assert any("placeholder" in warning for warning in result.warnings)
+        assert result.runnable_blockers == ["app identity is a placeholder (com.example.app/EntryAbility)"]
 
-    def test_dc_script_rejects_default_entry_ability_placeholder(self, tmp_path: Path) -> None:
-        """仅 bundle 合法、ability 仍为 EntryAbility 时同样不视为验收脚本。"""
+    def test_dc_script_accepts_default_entry_ability_as_real_identity(self, tmp_path: Path) -> None:
+        """``EntryAbility`` 是鸿蒙工程的默认且常见的真实 ability 名，不构成占位。
+
+        计划的 G3 原文把它当占位哨兵，但那会让真实运行
+        （``com.github.zhuoyi233.zhplus / EntryAbility``）永远不可执行，违背 G1。
+        """
         artifacts = ArtifactStore(tmp_path / "runs")
         generator = DcHypiumGenerator(artifacts)
         result = generator.generate(
@@ -307,11 +310,12 @@ class TestDcHypiumGenerator:
             main_ability="EntryAbility",
         )
 
-        assert result.replay_eligible is False
-        assert any("placeholder" in warning for warning in result.warnings)
+        assert result.replay_eligible is True
+        assert result.runnable_blockers == []
+        assert _config(result)["purpose"] == "acceptance"
 
     def test_dc_script_purpose_acceptance_vs_recording(self, tmp_path: Path) -> None:
-        """purpose 随 replay_eligible 变化：acceptance ↔ dc_recording。"""
+        """purpose 随可执行性变化：真实身份 → acceptance；占位身份 → dc_recording。"""
         artifacts = ArtifactStore(tmp_path / "runs")
         generator = DcHypiumGenerator(artifacts)
         eligible = generator.generate(
@@ -325,15 +329,15 @@ class TestDcHypiumGenerator:
             session_id="dc-test-purpose-ko",
             device_id="d",
             invocations=[_invocation(DcToolName.BACK, {})],
-            bundle_name="com.demo.app",
+            bundle_name="com.example.app",
             main_ability="MainAbility",
         )
 
         assert _config(eligible)["purpose"] == "acceptance"
         assert _config(recording)["purpose"] == "dc_recording"
 
-    def test_failed_assertion_does_not_make_script_replay_eligible(self, tmp_path: Path) -> None:
-        """失败的断言不算 explicit_assertions：不能靠失败断言换取验收资格。"""
+    def test_failed_assertion_does_not_count_as_explicit_assertion(self, tmp_path: Path) -> None:
+        """失败的断言不算 explicit_assertions：不能让置信度被误判成 high。"""
         artifacts = ArtifactStore(tmp_path / "runs")
         generator = DcHypiumGenerator(artifacts)
         invocations = [
@@ -348,8 +352,10 @@ class TestDcHypiumGenerator:
             main_ability="MainAbility",
         )
 
-        assert result.replay_eligible is False
         assert result.explicit_assertions == 0
+        # 仍有一条可回放动作（BACK → go_back）且身份真实 ⇒ 可执行，只是置信度为 medium。
+        assert result.replay_eligible is True
+        assert result.confidence == "medium"
 
     # ------------------------------------------------------------------
     # 改动 A：resolved_element → 结构化选择器；改动 C2：swipe 警告聚合

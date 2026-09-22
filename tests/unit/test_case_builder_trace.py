@@ -360,8 +360,10 @@ def test_unsupported_replay_tool_omit_reason_is_byte_identical() -> None:
     result = CaseBuilder().from_trace(trace, profile())
 
     assert omit_reason(result, "legacy") == "unsupported replay tool: future_tool"
-    assert "source trace contains unsupported replay actions" in result.incomplete_reasons
-    assert result.replay_eligible is False
+    assert "source trace contains unsupported replay actions" in result.confidence_factors
+    # 不支持的动作只降置信度（medium），不再阻断执行：脚本里的其余动作照样可回放。
+    assert result.replay_eligible is True
+    assert result.confidence == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -436,10 +438,12 @@ def test_dynamic_key_without_stable_evidence_keeps_exact_value_and_feeds_incompl
     assert locator.match == MatchMode.EQUALS
     assert "unvalidated dynamic key 'feed_card_20240101' retained as an exact diagnostic selector" in result.warnings
     assert "source trace contains a dynamic locator without stable unique-prefix evidence" in (
-        result.incomplete_reasons
+        result.confidence_factors
     )
-    assert result.replay_eligible is False
-    assert result.purpose == "diagnostic"
+    # 未验证动态定位器只把置信度降到 medium：脚本立即可执行，风险以质量提示的形式保留。
+    assert result.replay_eligible is True
+    assert result.purpose == "acceptance"
+    assert result.confidence == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -881,9 +885,10 @@ def test_fallback_assertion_injection_adds_check_step_and_two_warnings() -> None
     assert fallback.checkpoints[0].message_zh == FALLBACK_CHECKPOINT_MESSAGE
     assert "source trace has no successful explicit assertion" in result.warnings
     assert "generated a fallback assertion from an observed stable locator" in result.warnings
-    # 兜底断言是生成物，不能把「无显式断言」的用例洗成可回放。
-    assert result.replay_eligible is False
-    assert "source trace has no successful explicit assertion" in result.incomplete_reasons
+    # 兜底断言是生成物，不能把「无显式断言」的用例置信度洗成 high；脚本本身仍可执行。
+    assert result.replay_eligible is True
+    assert result.confidence == "medium"
+    assert "source trace has no successful explicit assertion" in result.confidence_factors
 
 
 def test_fallback_assertion_is_not_injected_when_an_explicit_assertion_exists() -> None:
@@ -904,9 +909,10 @@ def test_fallback_assertion_injection_can_be_disabled() -> None:
     assert result.counts["generated_assertions"] == 0
     # 没有兜底断言时脚本体为空，IR 不变式仍要求至少一步（空注释步骤 → emitter 发裸 pass）。
     assert [step.action for step in result.spec.steps] == [StepAction.NOOP_COMMENT]
-    # 不可回放的判定不受影响：仍缺显式断言。
-    assert "source trace has no successful explicit assertion" in result.incomplete_reasons
+    # 没有可回放动作 ⇒ 命中 G3 的第一条物理必要条件，不可执行。
+    assert "source trace has no successful explicit assertion" in result.confidence_factors
     assert result.replay_eligible is False
+    assert result.runnable_blockers == ["script has no replayable action"]
 
 
 # ---------------------------------------------------------------------------
@@ -935,6 +941,9 @@ def test_counts_and_replay_eligible_match_hypium_generator(tmp_path: Path, facto
     assert built.replay_eligible == via_generator.replay_eligible
     assert built.purpose == via_generator.purpose
     assert built.incomplete_reasons == via_generator.incomplete_reasons
+    assert built.confidence == via_generator.confidence
+    assert built.confidence_factors == via_generator.confidence_factors
+    assert built.promotion_eligible == via_generator.promotion_eligible
     assert built.omitted_actions == via_generator.omitted_actions
 
 
@@ -949,35 +958,47 @@ def test_hypium_generator_build_goes_through_the_case_ir(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# incomplete_reasons 文案
+# confidence / 晋级资格
 # ---------------------------------------------------------------------------
 
 
-def test_incomplete_reasons_keep_historical_strings() -> None:
+def test_confidence_factors_keep_historical_strings() -> None:
     result = CaseBuilder().from_trace(diagnostic_trace(), profile())
 
-    assert "source agent outcome is failed" in result.incomplete_reasons
-    assert "source trace contains failed actions" in result.incomplete_reasons
-    assert "source trace does not end with a successful FINISH action" in result.incomplete_reasons
-    assert "source agent error: None" not in result.incomplete_reasons
+    assert "source agent outcome is failed" in result.confidence_factors
+    assert "source trace contains failed actions" in result.confidence_factors
+    assert "source trace does not end with a successful FINISH action" in result.confidence_factors
+    assert "source agent error: None" not in result.confidence_factors
+    # 兼容别名与 confidence_factors 同值。
+    assert result.incomplete_reasons == result.confidence_factors
 
 
-def test_incomplete_reasons_report_agent_error_and_provisional_trace() -> None:
+def test_confidence_factors_report_agent_error_and_provisional_goes_to_promotion() -> None:
     trace = diagnostic_trace()
     trace.agent_error = "model request failed"
     trace.provisional = True
 
     result = CaseBuilder().from_trace(trace, profile())
 
-    assert "source agent error: model request failed" in result.incomplete_reasons
-    assert "provisional trace cannot qualify for acceptance replay" in result.incomplete_reasons
-    assert result.replay_eligible is False
+    assert "source agent error: model request failed" in result.confidence_factors
+    assert result.confidence == "low"
+    # provisional 不再进质量层：它只决定能否作为 Profile 晋级证据。
+    assert "provisional trace cannot qualify for acceptance replay" not in result.confidence_factors
+    assert "provisional trace is not Profile-promotion evidence" in result.promotion_blockers
+    assert result.promotion_eligible is False
+    # 这条轨迹同时没有任何可回放动作（两条动作都被 omit），因此不可执行；
+    # 晋级资格与可执行性是两个独立判定，见 test_promotion_decoupling.py。
+    assert result.runnable_blockers == ["script has no replayable action"]
 
 
 def test_fully_successful_trace_has_no_incomplete_reasons() -> None:
     result = CaseBuilder().from_trace(core_flow_trace(), profile())
 
     assert result.incomplete_reasons == []
+    assert result.confidence_factors == []
+    assert result.confidence == "high"
     assert result.replay_eligible is True
+    assert result.runnable_blockers == []
+    assert result.promotion_eligible is True
     assert result.purpose == "acceptance"
     assert result.source_agent_outcome == "completed"

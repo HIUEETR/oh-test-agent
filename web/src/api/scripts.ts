@@ -15,7 +15,15 @@ export interface ScriptCatalogEntry {
   bundle_name?: string | null;
   main_ability?: string | null;
   purpose?: string | null;
+  /** 脚本是否**可执行**（缺可回放动作或身份占位时为 false）；≠ 质量是否合格 */
   replay_eligible: boolean;
+  /** 质量分档：只影响徽章与排序，不阻断执行 */
+  confidence?: "high" | "medium" | "low" | null;
+  confidence_factors?: string[];
+  /** 能否作为 Profile 晋级证据 */
+  promotion_eligible?: boolean;
+  /** 不可执行的原因（replay_eligible=false 时非空） */
+  runnable_blockers?: string[];
   included_actions?: number | null;
   omitted_actions?: number | null;
   warnings: string[];

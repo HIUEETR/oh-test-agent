@@ -73,6 +73,10 @@ class HypiumGenerator:
         warnings = built.warnings
         omitted_actions = built.omitted_actions
         explicit_assertions = built.explicit_assertions
+        confidence = built.confidence
+        confidence_factors = built.confidence_factors
+        promotion_eligible = built.promotion_eligible
+        runnable_blockers = built.runnable_blockers
 
         python_path.write_text(rendered.python_text, encoding="utf-8")
         config: dict[str, Any] = {
@@ -90,6 +94,10 @@ class HypiumGenerator:
             "generated_from_run_id": trace.run_id,
             "purpose": purpose,
             "replay_eligible": replay_eligible,
+            "confidence": confidence,
+            "confidence_factors": confidence_factors,
+            "promotion_eligible": promotion_eligible,
+            "runnable_blockers": runnable_blockers,
             "warnings": warnings,
             "application_assertion_count": explicit_assertions,
             "validated_resolutions": profile.device_compatibility.validated_resolutions,
@@ -106,12 +114,18 @@ class HypiumGenerator:
             "config_sha256": self._sha256(config_path),
             "purpose": purpose,
             "replay_eligible": replay_eligible,
+            "confidence": confidence,
+            "confidence_factors": confidence_factors,
+            "promotion_eligible": promotion_eligible,
+            "promotion_blockers": built.promotion_blockers,
+            "runnable_blockers": runnable_blockers,
             "source_agent_outcome": outcome,
             "source_action_count": len(trace.actions),
             "included_action_count": counts["generated_actions"] + counts["generated_assertions"],
             "omitted_action_count": len(omitted_actions),
             "counts": counts,
             "omitted_actions": omitted_actions,
+            # 兼容键：值与 confidence_factors 相同（script_catalog.py 仍解析该键）。
             "incomplete_reasons": incomplete_reasons,
             "warnings": warnings,
             "application_assertion_count": explicit_assertions,
@@ -138,6 +152,11 @@ class HypiumGenerator:
             counts=counts,
             incomplete_reasons=incomplete_reasons,
             warnings=warnings,
+            confidence=confidence,
+            confidence_factors=confidence_factors,
+            promotion_eligible=promotion_eligible,
+            promotion_blockers=built.promotion_blockers,
+            runnable_blockers=runnable_blockers,
             case_spec_path=case_spec_path.resolve(),
             case_id=built.spec.case_id,
         )

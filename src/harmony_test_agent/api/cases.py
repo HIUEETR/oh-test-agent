@@ -88,7 +88,7 @@ def create_cases_router(
             if not force:
                 raise HTTPException(
                     status_code=422,
-                    detail="run does not qualify as a reusable case; retry with ?force=true to store it as a draft",
+                    detail="run has no runnable script; retry with ?force=true to store it as a draft",
                 )
             built = await asyncio.to_thread(builder.from_trace, trace, trace.profile_snapshot)
             built.spec.status = "draft"
@@ -96,7 +96,11 @@ def create_cases_router(
         return record
 
     @router.post("/api/cases/from-dc/{session_id}", response_model=CaseRecord, status_code=status.HTTP_201_CREATED)
-    async def from_dc(session_id: str, body: dict[str, str] | None = None) -> CaseRecord:
+    async def from_dc(
+        session_id: str,
+        body: dict[str, str] | None = None,
+        force: bool = Query(default=False),
+    ) -> CaseRecord:
         snapshot = _load_dc_snapshot(dc_manager, session_id)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="dc session snapshot not found")
@@ -109,7 +113,22 @@ def create_cases_router(
             raise HTTPException(status_code=422, detail="a real bundle_name is required to save a case")
         record = await asyncio.to_thread(library.build_from_dc, snapshot, bundle_name, main_ability)
         if record is None:
-            raise HTTPException(status_code=422, detail="dc session does not qualify as a reusable case")
+            # 只有「物理上跑不起来」（缺可回放动作 / 身份占位）才会走到这里；
+            # force=true 使错误路径与 from-run 对齐：降级为 draft 强制入库。
+            if not force:
+                raise HTTPException(status_code=422, detail="dc session does not qualify as a reusable case")
+            builder_result = await asyncio.to_thread(
+                builder.from_dc_invocations,
+                session_id,
+                str(getattr(snapshot, "device_id", "") or ""),
+                list(getattr(snapshot, "invocations", None) or []),
+                bundle_name=bundle_name,
+                main_ability=main_ability,
+            )
+            builder_result.spec.status = "draft"
+            record = await asyncio.to_thread(
+                library.save_built, builder_result, device_sn=str(getattr(snapshot, "device_id", "") or "")
+            )
         return record
 
     @router.post("/api/cases/bug-repro", response_model=CaseRecord, status_code=status.HTTP_201_CREATED)

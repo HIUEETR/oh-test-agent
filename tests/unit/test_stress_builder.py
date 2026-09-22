@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from harmony_test_agent.cases.builder import CaseBuilder
+from harmony_test_agent.cases.builder import PLACEHOLDER_ABILITY, CaseBuilder
 from harmony_test_agent.cases.spec import (
     CaseProvenance,
     CheckpointKind,
@@ -549,10 +549,14 @@ def test_page_enter_exit_anchors_ignore_other_pages() -> None:
 
 def test_page_enter_exit_without_anchors_is_a_draft() -> None:
     result = _build(StressKind.PAGE_ENTER_EXIT, profile=_profile(locators=[]))
+
     assert result.spec.stress.per_iteration_checkpoints == []
     assert result.spec.status == "draft"
-    assert result.replay_eligible is False
-    assert result.purpose == "diagnostic"
+    # 无硬检查点只降置信度（status=draft 不变），循环体本身仍可执行。
+    assert result.replay_eligible is True
+    assert result.purpose == "acceptance"
+    assert result.confidence == "medium"
+    assert result.confidence_factors == ["stress case has no non-soft checkpoint"]
     assert any("stable_locator_inventory" in warning for warning in result.warnings)
 
 
@@ -789,11 +793,15 @@ def test_request_metadata_is_carried_into_the_spec() -> None:
 
 def test_missing_profile_falls_back_to_placeholder_identity() -> None:
     result = _build(StressKind.CONTINUOUS_SWIPE, profile=None)
+
     assert result.spec.bundle_name == PLACEHOLDER_BUNDLE
     assert result.spec.status == "active"
+    # 占位身份是物理必要条件，仍然阻断执行（质量层不参与这个判定）。
     assert result.replay_eligible is False
     assert result.purpose == "diagnostic"
-    assert result.incomplete_reasons
+    assert result.runnable_blockers == [f"app identity is a placeholder ({PLACEHOLDER_BUNDLE}/{PLACEHOLDER_ABILITY})"]
+    assert result.confidence_factors == []
+    assert result.confidence == "high"
     assert any("占位身份" in warning for warning in result.warnings)
 
 

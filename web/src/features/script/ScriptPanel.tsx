@@ -1,5 +1,7 @@
 // Hypium 脚本库：统一列出 Live 运行与直流会话生成的脚本，选中即展示源码，
-// 并可按来源启动：Live 可回放脚本走验收回放，直流脚本走设备诊断执行。
+// 并可按来源启动：Live 走验收回放，直流脚本走设备诊断执行。
+// 「立即可用」：按钮默认可用，质量顾虑只作提示（confidence_factors），
+// 只有物理上不可执行（runnable_blockers 非空）时才用 role="alert" 说明原因。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink, FileCode2, Play, RefreshCw } from "lucide-react";
@@ -12,7 +14,7 @@ import type { ScriptCatalogEntry, ScriptDetail } from "../../api/scripts";
 import type { ReplayResult, RunTrace } from "../../api/types";
 import { useConsole } from "../../stores/console";
 import { artifactUrl } from "../../utils/artifact";
-import { evidenceLabel, formatDuration, replayStatus, statusLabel } from "../../utils/format";
+import { evidenceLabel, confidenceLabel, confidenceTone, formatDuration, replayStatus, statusLabel } from "../../utils/format";
 
 /** 验收回放结果（含轮询到的 trace） */
 type ReplayOutcome = { kind: "run"; runId: string; attempts: number; replays: ReplayResult[] };
@@ -91,8 +93,14 @@ export function ScriptPanel() {
   }, [selectedId]);
 
   const entry = detail?.entry;
+  // 「立即可用」：Live 脚本只要物理上可执行（replay_eligible）按钮就可用，质量顾虑只做提示；
+  // 直流脚本走「诊断启动」这条显式不计入验收结论的执行路径，因此始终可启动。
   const launchable = Boolean(entry) && (entry!.source === "dc" || entry!.replay_eligible);
-  const blockers = useMemo(() => entry?.incomplete_reasons ?? [], [entry]);
+  const qualityNotes = useMemo(
+    () => entry?.confidence_factors ?? entry?.incomplete_reasons ?? [],
+    [entry],
+  );
+  const runnableBlockers = entry?.runnable_blockers ?? [];
 
   const handleCopy = () => {
     if (detail?.python) void navigator.clipboard.writeText(detail.python);
@@ -178,7 +186,8 @@ export function ScriptPanel() {
               <span className="script-item-top">
                 <strong title={item.case_id ?? item.filename}>{item.case_id ?? item.filename}</strong>
                 <Badge tone={item.source === "dc" ? "brand" : "neutral"}>{item.source === "dc" ? "直流" : "Live"}</Badge>
-                <Badge tone={item.replay_eligible ? "ok" : "warn"}>{item.replay_eligible ? "可回放" : "诊断"}</Badge>
+                <Badge tone={confidenceTone(item.confidence)}>{confidenceLabel(item.confidence)}</Badge>
+                {!item.replay_eligible && <Badge tone="danger">不可执行</Badge>}
               </span>
               <small>
                 {item.run_id}
@@ -212,8 +221,8 @@ export function ScriptPanel() {
                   <Badge tone={entry.source === "dc" ? "brand" : "neutral"}>
                     {entry.source === "dc" ? "直流录制" : "Live 运行"}
                   </Badge>
-                  <Badge tone={entry.replay_eligible ? "ok" : "warn"}>
-                    {entry.replay_eligible ? "验收可回放" : "诊断脚本"}
+                  <Badge tone={entry.replay_eligible ? "ok" : "danger"}>
+                    {entry.replay_eligible ? `可执行 · ${confidenceLabel(entry.confidence)}` : "不可执行"}
                   </Badge>
                 </div>
               </div>
@@ -249,7 +258,7 @@ export function ScriptPanel() {
                       ? entry.source === "dc"
                         ? "在设备上诊断执行该直流录制脚本（不计入验收结论）"
                         : `对该运行执行验收回放 ${attemptCount} 次`
-                      : "诊断脚本或不合格脚本不能用于验收回放"
+                      : "脚本缺少可回放动作或使用了占位应用身份"
                   }
                 >
                   <Play size={14} />
@@ -261,10 +270,16 @@ export function ScriptPanel() {
                 </button>
               </div>
 
-              {!launchable && (
+              {qualityNotes.length > 0 && (
+                <div className="warning-list" role="note">
+                  <p>质量提示（不影响执行）：置信度 {confidenceLabel(entry.confidence)}</p>
+                  {qualityNotes.map((reason) => <p key={reason}>{reason}</p>)}
+                </div>
+              )}
+              {!entry.replay_eligible && (
                 <div className="warning-list" role="alert">
-                  <p>该脚本为诊断产物（replay_eligible=false），不参与正式 Hypium 验收回放。</p>
-                  {blockers.map((reason) => <p key={reason}>{reason}</p>)}
+                  <p>该脚本当前不可执行：</p>
+                  {runnableBlockers.map((blocker) => <p key={blocker}>{blocker}</p>)}
                 </div>
               )}
               {entry.warnings.length > 0 && (

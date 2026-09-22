@@ -179,9 +179,15 @@ export interface DcScriptArtifact {
   generated_at: string;
   included_operations: number;
   omitted_operations: Array<{ invocation_id: string; tool: string; reason: string }>;
-  /** 脚本是否含显式断言且应用身份非占位值；旧脚本无此字段时按 false 处理 */
+  /** 脚本是否**可执行**（缺可回放动作或身份占位时为 false）；旧脚本无此字段时按 false 处理 */
   replay_eligible?: boolean;
-  /** 成功执行的 assert_* 调用数（replay_eligible 的判定依据之一） */
+  /** 质量分档：只影响徽章与提示，不阻断执行 */
+  confidence?: "high" | "medium" | "low";
+  confidence_factors?: string[];
+  /** 能否作为 Profile 晋级证据 */
+  promotion_eligible?: boolean;
+  runnable_blockers?: string[];
+  /** 成功执行的 assert_* 调用数（缺断言只把 confidence 降为 medium，不再阻断执行） */
   explicit_assertions?: number;
 }
 

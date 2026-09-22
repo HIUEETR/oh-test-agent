@@ -75,8 +75,10 @@ export function DcScriptPreview({ open, onClose }: { open: boolean; onClose: () 
           <strong>生成的 Hypium 脚本</strong>
           <small>
             {script.replay_eligible
-              ? `可作为验收脚本执行 · 断言 ${script.explicit_assertions ?? 0} 条`
-              : "诊断回放专用 · 未包含断言"}
+              ? `可立即执行 · 断言 ${script.explicit_assertions ?? 0} 条${
+                  (script.explicit_assertions ?? 0) === 0 ? "（无检查点，建议补充断言）" : ""
+                }`
+              : "不可执行 · 缺少可回放动作或身份为占位值"}
           </small>
           <button type="button" className="secondary compact" onClick={closeDialog} aria-label="关闭">
             <X size={14} />

@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     完整探索通过 ``POST /api/profiles/{id}/verify``（bootstrap_only=True）显式触发。
     显式打开可恢复「同一次运行先探索晋级再执行任务」的旧行为。"""
 
+    auto_execute_on_first_run: bool = False
+    """首次运行（provisional / live_mode，磁盘无 verified Profile）是否自动回放刚生成的脚本。
+
+    默认 False：自动回放失败会把整个 run 判为 ``FAILED_SCRIPT``，首次运行不应因自动回放
+    而失败；脚本本身现在**立即可执行**，手动点一次「验收回放」即可。显式打开可恢复
+    「生成即自动验收」的旧行为。"""
+
     bootstrap_max_pages: int = Field(default=8, ge=1, le=20)
     bootstrap_max_actions_per_page: int = Field(default=6, ge=1, le=8)
     bootstrap_max_duration_seconds: int = Field(default=300, ge=30, le=900)

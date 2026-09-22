@@ -132,7 +132,7 @@ def test_generator_converts_spatial_and_vlm_elements_to_coordinates(tmp_path: Pa
     assert any("runtime element 'ui-back' uses coordinate (108, 201)" in item for item in generated.warnings)
 
 
-def test_generator_filters_desktop_app_icon_and_marks_incomplete_trace_diagnostic(tmp_path: Path) -> None:
+def test_generator_filters_desktop_app_icon_and_flags_no_replayable_action(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path / "runs")
     snapshot = ScreenSnapshot(
         snapshot_id="desktop",
@@ -167,10 +167,14 @@ def test_generator_filters_desktop_app_icon_and_marks_incomplete_trace_diagnosti
     metadata = json.loads(generated.metadata_path.read_text(encoding="utf-8"))
 
     assert generated.purpose == "diagnostic"
+    assert generated.confidence == "low"
+    # 两条动作都被 omit（桌面图标点击 + 失败动作）⇒ 命中 G3 第一条：没有可回放动作。
     assert generated.replay_eligible is False
-    assert "source trace contains failed actions" in generated.incomplete_reasons
+    assert generated.runnable_blockers == ["script has no replayable action"]
+    assert "source trace contains failed actions" in generated.confidence_factors
     assert "target-icon" not in source
     assert metadata["omitted_action_count"] == 2
+    assert metadata["confidence"] == "low"
     assert any("desktop AppIcon" in item["reason"] for item in metadata["omitted_actions"])
 
 
@@ -207,7 +211,7 @@ def test_page_node_falls_back_to_screen_filename_for_external_legacy_path(tmp_pa
     assert node.artifact_path == Path("screens/legacy.png")
 
 
-def test_generator_keeps_finished_trace_without_explicit_assertion_diagnostic(tmp_path: Path) -> None:
+def test_generator_keeps_finished_trace_without_explicit_assertion_at_medium_confidence(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path / "runs")
     snapshot = ScreenSnapshot(
         snapshot_id="stable",
@@ -232,9 +236,11 @@ def test_generator_keeps_finished_trace_without_explicit_assertion_diagnostic(tm
     generated = HypiumGenerator(store).generate(trace, profile())
     source = generated.python_path.read_text(encoding="utf-8")
 
-    assert generated.purpose == "diagnostic"
-    assert generated.replay_eligible is False
-    assert "source trace has no successful explicit assertion" in generated.incomplete_reasons
+    assert generated.purpose == "acceptance"
+    assert generated.confidence == "medium"
+    # 兜底断言提供了可回放动作 ⇒ 可执行；只是「无显式断言」把置信度压到 medium。
+    assert generated.replay_eligible is True
+    assert "source trace has no successful explicit assertion" in generated.confidence_factors
     assert "driver.check_component_exist(BY.key('stable_title'), expect_exist=True)" in source
 
 

@@ -472,6 +472,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=409,
                 detail="no generated Hypium script recorded for this Profile; run the pipeline first",
             )
+        # 晋级证据只能来自 Profile 验证脚本（orchestrator._profile_validation_trace 产物），
+        # 不得用任意任务脚本替代——这是「执行门禁放开」后晋级链唯一的护栏。
+        if not Path(script_path).name.startswith(("test_", "dc_test_")):
+            raise HTTPException(status_code=409, detail="profile has no valid validation script")
 
         lock = manager.profile_replay_locks.setdefault(target_app_id, asyncio.Lock())
         if lock.locked():
@@ -715,6 +719,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "purpose": trace.generated.purpose,
             "diagnostic": trace.generated.purpose == "diagnostic",
             "acceptance_replay_enabled": trace.generated.replay_eligible,
+            "confidence": trace.generated.confidence,
+            "confidence_factors": trace.generated.confidence_factors,
+            "promotion_eligible": trace.generated.promotion_eligible,
+            "promotion_blockers": trace.generated.promotion_blockers,
+            "runnable_blockers": trace.generated.runnable_blockers,
             "source_agent_outcome": trace.generated.source_agent_outcome,
             "source_action_count": trace.generated.source_action_count,
             "included_action_count": trace.generated.included_action_count,
@@ -742,21 +751,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         trace = _trace_or_404(manager, run_id)
         if not trace.generated:
             raise HTTPException(status_code=409, detail="generate the Hypium script first")
-        if trace.provisional or trace.live_mode:
-            raise HTTPException(
-                status_code=409,
-                detail="provisional or live-mode runs cannot execute formal Hypium regression cases",
-            )
         if manager.replay_running(run_id):
             raise HTTPException(status_code=409, detail="Hypium replay is already running")
         if trace.replay_status == "pending":
             manager.recover_stale_replay(trace)
         if not trace.generated.replay_eligible:
+            # 只剩「物理上跑不起来」两条：缺可回放动作 / 应用身份为占位。
+            # provisional / live_mode 只是**质量**信号（confidence），不再阻断执行。
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "message": "diagnostic script is not eligible for acceptance replay",
-                    "incomplete_reasons": trace.generated.incomplete_reasons,
+                    "message": "script is not runnable",
+                    "runnable_blockers": list(trace.generated.runnable_blockers),
                 },
             )
         try:

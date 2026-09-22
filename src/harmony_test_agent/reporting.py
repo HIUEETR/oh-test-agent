@@ -65,14 +65,26 @@ class ReportBuilder:
         generated = trace.generated
         if generated is None:
             return '<section class="summary"><h2>脚本覆盖范围</h2><p>未生成 Hypium 脚本。</p></section>'
-        reasons = "".join(f"<li>{html.escape(reason)}</li>" for reason in generated.incomplete_reasons)
+        reasons = "".join(f"<li>{html.escape(reason)}</li>" for reason in generated.confidence_factors)
+        # 质量提示：不阻断执行，只用黄色与「置信度」一格表达可信程度。
+        quality = (
+            f"<p>质量提示（不影响执行）：</p><ul class='warn'>{reasons}</ul>"
+            if reasons
+            else "<p>质量提示（不影响执行）：无</p>"
+        )
+        confidence_label = {"high": "高", "medium": "中", "low": "低"}.get(generated.confidence, "低")
+        promotion = ""
+        if not generated.promotion_eligible and generated.promotion_blockers:
+            blockers = "；".join(html.escape(item) for item in generated.promotion_blockers)
+            promotion = f"<p><small>不作为 Profile 晋级证据（{blockers}）。</small></p>"
         return f"""<section class="summary"><h2>脚本覆盖范围</h2><div class="grid">
 <div class="metric">用途<br><b>{html.escape(generated.purpose)}</b></div>
-<div class="metric">可回放<br><b>{"是" if generated.replay_eligible else "否"}</b></div>
+<div class="metric">可执行<br><b>{"是" if generated.replay_eligible else "否"}</b></div>
+<div class="metric">置信度<br><b>{confidence_label}</b></div>
 <div class="metric">源动作<br><b>{generated.source_action_count}</b></div>
 <div class="metric">纳入脚本<br><b>{generated.included_action_count}</b></div>
 <div class="metric">省略动作<br><b>{generated.omitted_action_count}</b></div></div>
-{"<ul class='bad'>" + reasons + "</ul>" if reasons else ""}</section>"""
+{quality}{promotion}</section>"""
 
     @staticmethod
     def _replay_markup(trace: RunTrace) -> str:
@@ -187,6 +199,8 @@ h1 { color: #0b48c4; } h2 { font-size: 17px; }
 img { display: block; max-width: 420px; max-height: 620px; object-fit: contain; border-radius: 12px;
   border: 1px solid #d7e2ee; background: #f7fafd; margin-top: 12px; }
 .ok { color: #0c7a48; } .bad { color: #b53539; }
+/* 质量提示用黄色：与 .bad（红色，真正的阻断/失败）区分开。 */
+.warn { color: #9a6400; }
 code { color: #0b48c4; background: rgba(10, 89, 247, 0.08); padding: 1px 6px; border-radius: 5px; }
 table { width: 100%; border-collapse: collapse; margin-top: 12px; }
 th, td { border-bottom: 1px solid #e3ecf5; padding: 10px; text-align: left; }

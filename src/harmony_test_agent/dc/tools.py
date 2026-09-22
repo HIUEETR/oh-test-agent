@@ -841,9 +841,9 @@ async def _run_assertion(
     """断言工具公共路径：必要时自动采集帧 → 在 recorder chokepoint 内评估断言。
 
     断言必须作为一条 ``DcToolInvocation`` 落账（``tool=assert_*``）：DC 脚本生成器
-    据此统计 ``explicit_assertions`` 并决定 ``replay_eligible``，Profile 蒸馏也据此
-    提取应用级断言证据。断言失败时设备调用函数抛错，账本记为 failed、``success=False``，
-    工具向模型返回错误摘要而不是静默通过。
+    据此统计 ``explicit_assertions``（缺断言只把 ``confidence`` 降为 medium，不阻断执行），
+    Profile 蒸馏也据此提取应用级断言证据。断言失败时设备调用函数抛错，账本记为 failed、
+    ``success=False``，工具向模型返回错误摘要而不是静默通过。
     """
     deps = ctx.deps
     if deps.snapshot_holder.latest is None:

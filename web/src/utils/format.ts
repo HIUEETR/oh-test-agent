@@ -18,13 +18,32 @@ const STATUS_LABELS: Record<string, string> = {
   passed: "通过",
   failed: "失败",
   timed_out: "超时",
-  ineligible: "不合格",
+  ineligible: "不可执行",
   invalid_result: "结果无效",
 };
 
 /** 回放状态的中文文案。 */
 export function statusLabel(status: string): string {
   return STATUS_LABELS[status] ?? status;
+}
+
+/** 脚本质量分档的中文文案（不阻断执行，只做提示与排序）。 */
+const CONFIDENCE_LABELS: Record<string, string> = {
+  high: "高置信",
+  medium: "中置信",
+  low: "低置信",
+};
+
+/** 质量分档 → 徽章文案；缺失时按最低档展示。 */
+export function confidenceLabel(confidence?: string | null): string {
+  return CONFIDENCE_LABELS[confidence ?? ""] ?? "低置信";
+}
+
+/** 质量分档 → 徽章色阶。 */
+export function confidenceTone(confidence?: string | null): "ok" | "warn" | "danger" {
+  if (confidence === "high") return "ok";
+  if (confidence === "medium") return "warn";
+  return "danger";
 }
 
 /** 从证据路径中提取文件名用于链接文案。 */
