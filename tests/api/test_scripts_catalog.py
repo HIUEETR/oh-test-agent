@@ -85,6 +85,80 @@ class TestScriptCatalog:
         assert dc.warnings == ["swipe direction inferred as LEFT"]
         assert dc.size_bytes > 0
 
+    def test_case_persisted_is_parsed_from_config_and_defaults_to_none(self, tmp_path: Path) -> None:
+        """DC config 的 case_persisted 决定 case_id 是否是真实用例身份；缺键为 None。"""
+        runtime_dir = tmp_path / "runs"
+        write_script(
+            runtime_dir,
+            "dc-persisted",
+            "dc_test_dc.py",
+            config={"case_id": "dc_case", "case_persisted": True, "replay_eligible": True},
+        )
+        write_script(
+            runtime_dir,
+            "dc-unsaved",
+            "dc_test_dc_unsaved.py",
+            config={
+                "case_persisted": False,
+                "case_persist_hint": "POST /api/cases/from-dc/{session_id} 可把本次录制保存为可复用用例",
+                "replay_eligible": True,
+            },
+        )
+        # 旧产物：config 里完全没有 case_persisted 键。
+        write_script(
+            runtime_dir,
+            "dc-legacy",
+            "dc_test_dc_legacy.py",
+            config={"case_id": "dc_legacy_case", "replay_eligible": True},
+        )
+        # Live 运行：语义不变，config 只有 case_id，没有 case_persisted 键。
+        write_script(
+            runtime_dir,
+            "run-20260101T000000Z-aaaa1111",
+            "test_run.py",
+            config={"case_id": "run_case", "replay_eligible": True},
+        )
+
+        by_id = {entry.script_id: entry for entry in ScriptCatalog(runtime_dir).list_entries()}
+
+        persisted = by_id["dc-persisted/generated/dc_test_dc.py"]
+        assert persisted.case_persisted is True
+        assert persisted.case_id == "dc_case"
+
+        unsaved = by_id["dc-unsaved/generated/dc_test_dc_unsaved.py"]
+        assert unsaved.case_persisted is False
+        assert unsaved.case_id is None
+
+        legacy = by_id["dc-legacy/generated/dc_test_dc_legacy.py"]
+        assert legacy.case_persisted is None
+        assert legacy.case_id == "dc_legacy_case"
+
+        live = by_id["run-20260101T000000Z-aaaa1111/generated/test_run.py"]
+        assert live.case_persisted is None
+        assert live.case_id == "run_case"
+
+    def test_case_persisted_falls_back_to_metadata_and_rejects_non_bool(self, tmp_path: Path) -> None:
+        """config 缺键时回退 metadata；非布尔值视为未知（None）。"""
+        runtime_dir = tmp_path / "runs"
+        write_script(
+            runtime_dir,
+            "dc-metadata",
+            "dc_test_dc_meta.py",
+            config={"case_id": "dc_case"},
+            metadata={"case_persisted": True},
+        )
+        write_script(
+            runtime_dir,
+            "dc-non-bool",
+            "dc_test_dc_str.py",
+            config={"case_id": "dc_case", "case_persisted": "true"},
+        )
+
+        by_id = {entry.script_id: entry for entry in ScriptCatalog(runtime_dir).list_entries()}
+
+        assert by_id["dc-metadata/generated/dc_test_dc_meta.py"].case_persisted is True
+        assert by_id["dc-non-bool/generated/dc_test_dc_str.py"].case_persisted is None
+
     def test_skips_non_python_and_private_files(self, tmp_path: Path) -> None:
         runtime_dir = tmp_path / "runs"
         script = write_script(runtime_dir, "run-1", "test_a.py")

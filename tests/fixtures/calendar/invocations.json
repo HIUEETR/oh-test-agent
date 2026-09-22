@@ -1,0 +1,228 @@
+[
+  {
+    "invocation_id": "inv-5a71f663ff",
+    "turn_id": "turn-e9c86677",
+    "tool": "click",
+    "tier": 1,
+    "args": {
+      "x": 835,
+      "y": 657
+    },
+    "success": true,
+    "status": "succeeded",
+    "duration_ms": 1347,
+    "effect_status": "confirmed",
+    "command_id": "cmd-inv-5a71f663ff",
+    "phase": "finished",
+    "result_summary": "ok: No Error",
+    "cancellable": true,
+    "error_code": null,
+    "command": {
+      "command": "D:\\Work\\Code\\Harmony\\devecostudio\\sdk\\default\\openharmony\\toolchains\\hdc.exe -t 127.0.0.1:5555 shell uitest uiInput click 835 657",
+      "args": [
+        "D:\\Work\\Code\\Harmony\\devecostudio\\sdk\\default\\openharmony\\toolchains\\hdc.exe",
+        "-t",
+        "127.0.0.1:5555",
+        "shell",
+        "uitest",
+        "uiInput",
+        "click",
+        "835",
+        "657"
+      ],
+      "returncode": 0,
+      "stdout": "No Error\n",
+      "stderr": "",
+      "timed_out": false,
+      "duration_ms": 1346
+    },
+    "before_snapshot_id": "snap-b62d2403ae4c",
+    "after_snapshot_id": "snap-0b833d1a5401",
+    "resolved_element": {
+      "element_id": "ui-33d33402e174",
+      "content": "1_国庆节__廿一_休",
+      "type": "Stack",
+      "bbox": {
+        "left": 748,
+        "top": 573,
+        "right": 923,
+        "bottom": 741
+      },
+      "key": "1_国庆节__廿一_休",
+      "id": "1_国庆节__廿一_休",
+      "description": "",
+      "clickable": true,
+      "editable": false,
+      "scrollable": false,
+      "enabled": true,
+      "selected": true,
+      "score": 1.0,
+      "source": "hdc_uitest_dumpLayout",
+      "locator_candidates": [
+        {
+          "kind": "key",
+          "value": "1_国庆节__廿一_休",
+          "score": 1.0
+        }
+      ],
+      "metadata": {
+        "page_path": "",
+        "hierarchy": "ROOT243,0,0,1,0,1,0,1,0,0,0,0,0,0,0,4,0,0,0,0,1,0,0,0,0,1,1,4"
+      }
+    },
+    "page_path": "pages/EntryPage",
+    "error": null
+  },
+  {
+    "invocation_id": "inv-5c2eaa6bd8",
+    "turn_id": "turn-e9c86677",
+    "tool": "input_text",
+    "tier": 1,
+    "args": {
+      "text": "生日",
+      "coordinate": [
+        660,
+        585
+      ]
+    },
+    "success": true,
+    "status": "succeeded",
+    "duration_ms": 3513,
+    "effect_status": "confirmed",
+    "command_id": "cmd-inv-5c2eaa6bd8",
+    "phase": "finished",
+    "result_summary": "ok: No Error",
+    "cancellable": true,
+    "error_code": null,
+    "command": {
+      "command": "D:\\Work\\Code\\Harmony\\devecostudio\\sdk\\default\\openharmony\\toolchains\\hdc.exe -t 127.0.0.1:5555 shell uitest uiInput inputText 660 585 生日",
+      "args": [
+        "D:\\Work\\Code\\Harmony\\devecostudio\\sdk\\default\\openharmony\\toolchains\\hdc.exe",
+        "-t",
+        "127.0.0.1:5555",
+        "shell",
+        "uitest",
+        "uiInput",
+        "inputText",
+        "660",
+        "585",
+        "生日"
+      ],
+      "returncode": 0,
+      "stdout": "No Error\n",
+      "stderr": "",
+      "timed_out": false,
+      "duration_ms": 3512
+    },
+    "before_snapshot_id": "snap-842a18aa288d",
+    "after_snapshot_id": "snap-786944fbf188",
+    "resolved_element": {
+      "element_id": "ui-1caa38197e32",
+      "content": "add_agenda_title-1790078405913",
+      "type": "TextArea",
+      "bbox": {
+        "left": 60,
+        "top": 557,
+        "right": 1260,
+        "bottom": 613
+      },
+      "key": "add_agenda_title-1790078405913",
+      "id": "add_agenda_title-1790078405913",
+      "description": "",
+      "clickable": true,
+      "editable": true,
+      "scrollable": false,
+      "enabled": true,
+      "selected": false,
+      "score": 1.0,
+      "source": "hdc_uitest_dumpLayout",
+      "locator_candidates": [
+        {
+          "kind": "key",
+          "value": "add_agenda_title-1790078405913",
+          "score": 1.0
+        }
+      ],
+      "metadata": {
+        "page_path": "",
+        "hierarchy": "ROOT243,1,0,2,0,0,0,1,0,1,0,0,2,0,0,0"
+      }
+    },
+    "page_path": "pages/EntryPage",
+    "error": null
+  },
+  {
+    "invocation_id": "inv-812b833c6f",
+    "turn_id": "turn-e9c86677",
+    "tool": "click",
+    "tier": 1,
+    "args": {
+      "x": 660,
+      "y": 1020
+    },
+    "success": true,
+    "status": "succeeded",
+    "duration_ms": 3156,
+    "effect_status": "confirmed",
+    "command_id": "cmd-inv-812b833c6f",
+    "phase": "finished",
+    "result_summary": "ok: No Error",
+    "cancellable": true,
+    "error_code": null,
+    "command": {
+      "command": "D:\\Work\\Code\\Harmony\\devecostudio\\sdk\\default\\openharmony\\toolchains\\hdc.exe -t 127.0.0.1:5555 shell uitest uiInput click 660 1020",
+      "args": [
+        "D:\\Work\\Code\\Harmony\\devecostudio\\sdk\\default\\openharmony\\toolchains\\hdc.exe",
+        "-t",
+        "127.0.0.1:5555",
+        "shell",
+        "uitest",
+        "uiInput",
+        "click",
+        "660",
+        "1020"
+      ],
+      "returncode": 0,
+      "stdout": "No Error\n",
+      "stderr": "",
+      "timed_out": false,
+      "duration_ms": 3154
+    },
+    "before_snapshot_id": "snap-786944fbf188",
+    "after_snapshot_id": "snap-6c8bed384547",
+    "resolved_element": {
+      "element_id": "ui-aeb1295aa184",
+      "content": "add_agenda_start_time",
+      "type": "Row",
+      "bbox": {
+        "left": 60,
+        "top": 948,
+        "right": 1260,
+        "bottom": 1092
+      },
+      "key": "add_agenda_start_time",
+      "id": "add_agenda_start_time",
+      "description": "",
+      "clickable": true,
+      "editable": false,
+      "scrollable": false,
+      "enabled": true,
+      "selected": false,
+      "score": 1.0,
+      "source": "hdc_uitest_dumpLayout",
+      "locator_candidates": [
+        {
+          "kind": "key",
+          "value": "add_agenda_start_time",
+          "score": 1.0
+        }
+      ],
+      "metadata": {
+        "page_path": "",
+        "hierarchy": "ROOT243,1,0,2,0,0,0,1,0,1,0,0,2,0,6"
+      }
+    },
+    "page_path": "pages/EntryPage",
+    "error": null
+  }
+]

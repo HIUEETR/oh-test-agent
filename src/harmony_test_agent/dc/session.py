@@ -19,7 +19,7 @@ from ..cases.builder import NON_REPLAYABLE_DC_TOOLS
 from ..config import Settings
 from ..devices.harmony import HarmonyDeviceAdapter
 from ..discovery import ProfileVerifier
-from ..models import AnomalyFinding, ResolvedTarget, ScreenSnapshot, StableLocator, utc_now
+from ..models import AnomalyFinding, ResolvedTarget, ScreenSnapshot, StableLocator, TargetAppProfile, utc_now
 from ..profiles import ProfileRegistry, ProfileRegistryError
 from ..runner import make_hypium_runner
 from ..storage.artifacts import ArtifactStore
@@ -935,6 +935,22 @@ class DcSession:
         """会话内采集过的帧（有界历史）；DC 蒸馏据此重建可回放核心流。"""
         return self.snapshot_holder.history
 
+    def _associated_profile(self) -> TargetAppProfile | None:
+        """返回当前会话关联的 Profile；无 registry/Profile 时返回 ``None``。
+
+        关联键是最近一次 ``foreground_app`` 观测到的 bundle name。脚本生成把它传进
+        ``CaseBuilder``，让动态内容 key 能享受跨轮定位器证据泛化（DC 会话本身没有「轮」，
+        但已蒸馏过 Profile 的应用有）。
+        """
+        registry = self.profile_registry
+        bundle_name = self.last_foreground_app
+        if registry is None or not bundle_name:
+            return None
+        try:
+            return registry.get_any(bundle_name=bundle_name)
+        except ProfileRegistryError:
+            return None
+
     def _linked_stable_locators(self) -> list[StableLocator]:
         """返回当前会话关联 Profile 的稳定定位器；无 registry/Profile 时为空列表。
 
@@ -942,17 +958,8 @@ class DcSession:
         应用时无从判断关联 Profile，此时断言语义退化为模糊文本匹配（与 Live Mode
         在没有稳定定位器时的行为一致）。
         """
-        registry = self.profile_registry
-        bundle_name = self.last_foreground_app
-        if registry is None or not bundle_name:
-            return []
-        try:
-            profile = registry.get_any(bundle_name=bundle_name)
-        except ProfileRegistryError:
-            return []
-        if profile is None:
-            return []
-        return list(profile.stable_locator_inventory)
+        profile = self._associated_profile()
+        return list(profile.stable_locator_inventory) if profile is not None else []
 
     def generate_script(
         self,
@@ -970,7 +977,12 @@ class DcSession:
         identity = explicit or self.suggested_identity or infer_session_identity(self)
         resolved_bundle, resolved_ability = identity or ("com.example.app", "EntryAbility")
         generator = DcHypiumGenerator(self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds)
-        snapshots = [self.snapshot_holder.latest] if self.snapshot_holder.latest else []
+        # 把本会话**已采集的全部帧**交给构建器（不再只给最新一帧）：时间戳实例 key 的
+        # 前缀唯一性验证与语法窗口都只读这些帧，零设备零磁盘成本（真机复盘
+        # dc-20260922T115708Z-f2acffa4 的 add_agenda_title-<epoch_ms> 正是靠它们泛化）。
+        snapshots = list(self.snapshot_holder.history)
+        if not snapshots and self.snapshot_holder.latest is not None:
+            snapshots = [self.snapshot_holder.latest]
         self.script = generator.generate(
             session_id=self.session_id,
             device_id=self.device_id,
@@ -978,6 +990,7 @@ class DcSession:
             snapshots=snapshots,
             bundle_name=resolved_bundle,
             main_ability=resolved_ability,
+            profile=self._associated_profile(),
         )
         self._emit(
             DcEventType.SCRIPT_GENERATED,

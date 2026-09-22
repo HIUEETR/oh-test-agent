@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import subprocess
@@ -158,6 +159,56 @@ class TestAnalysisSection:
         assert analysis["log_coverage"] == "partial"
         assert analysis["findings"][0]["kind"] == "white_screen"
         assert analysis["findings"][0]["evidence"]["image_relative"] == ATTEMPT_RELATIVE
+
+    def test_locator_stale_row_renders_selector_and_line(self, tmp_path: Path) -> None:
+        """``LOCATOR_STALE`` 的证据渲染成可读的选择器 / 出错行，而不是 300 字符 JSON 摘录。"""
+        selector = "BY.key('add_agenda_title-1790078405913')"
+        source_line = f"driver.input_text({selector}, '生日')"
+        finding = make_finding(
+            kind=AnomalyKind.LOCATOR_STALE,
+            severity="critical",
+            summary_zh=f"脚本定位器在设备上已失效：{selector}",
+            detail=f"第 57 行：{source_line}",
+            evidence={
+                "selector": selector,
+                "script_line": 57,
+                "source_line": source_line,
+                "matched_in": "generated_result",
+                "exception": "HypiumComponentNotFoundError",
+            },
+            source="stdout",
+            phase="replay",
+        )
+
+        document, _ = build_report(tmp_path, make_analysis(findings=[finding]))
+
+        assert "失效选择器：" in document
+        assert f"<code>{html.escape(selector)}</code>" in document
+        assert "出错位置：第 57 行" in document
+        assert f"<small><code>{html.escape(source_line)}</code></small>" in document
+        # 不再是原始 JSON 摘录。
+        assert '{"selector"' not in document
+
+    def test_locator_stale_row_escapes_interpolated_values(self, tmp_path: Path) -> None:
+        finding = make_finding(
+            kind=AnomalyKind.LOCATOR_STALE,
+            severity="critical",
+            summary_zh="脚本定位器在设备上已失效",
+            evidence={
+                "selector": "<img src=x onerror=alert(1)>",
+                "script_line": 12,
+                "source_line": "<script>alert('x')</script>",
+            },
+            source="stdout",
+            phase="replay",
+        )
+
+        document, _ = build_report(tmp_path, make_analysis(findings=[finding]))
+
+        assert "<img src=x" not in document
+        assert "<script>" not in document
+        assert "&lt;img src=x onerror=alert(1)&gt;" in document
+        assert "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;" in document
 
 
 PASSING_SCRIPT = """\

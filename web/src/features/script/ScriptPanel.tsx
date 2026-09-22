@@ -22,6 +22,15 @@ type ReplayOutcome = { kind: "run"; runId: string; attempts: number; replays: Re
 type DiagnosticOutcome = { kind: "dc"; sessionId: string; results: ReplayResult[] };
 type Outcome = ReplayOutcome | DiagnosticOutcome;
 
+/** 目录项展示身份：DC 未入库脚本不能用悬空的 case_id 冒充用例身份。 */
+function displayName(entry: ScriptCatalogEntry): string {
+  if (entry.source === "dc" && entry.case_persisted !== true) return entry.filename;
+  return entry.case_id ?? entry.filename;
+}
+
+/** DC 录制尚未入库时的提示（对应 POST /api/cases/from-dc/{session_id}）。 */
+const CASE_PERSIST_HINT = "本次录制尚未保存为可复用用例，可用 POST /api/cases/from-dc/{session_id} 入库。";
+
 export function ScriptPanel() {
   const runId = useConsole((state) => state.runId);
   const generate = useConsole((state) => state.generate);
@@ -184,7 +193,7 @@ export function ScriptPanel() {
               onClick={() => setSelectedId(item.script_id)}
             >
               <span className="script-item-top">
-                <strong title={item.case_id ?? item.filename}>{item.case_id ?? item.filename}</strong>
+                <strong title={displayName(item)}>{displayName(item)}</strong>
                 <Badge tone={item.source === "dc" ? "brand" : "neutral"}>{item.source === "dc" ? "直流" : "Live"}</Badge>
                 <Badge tone={confidenceTone(item.confidence)}>{confidenceLabel(item.confidence)}</Badge>
                 {!item.replay_eligible && <Badge tone="danger">不可执行</Badge>}
@@ -214,8 +223,11 @@ export function ScriptPanel() {
             <>
               <div className="script-detail-head">
                 <div>
-                  <strong>{entry.case_id ?? entry.filename}</strong>
+                  <strong>{displayName(entry)}</strong>
                   <small>{entry.script_id}</small>
+                  {entry.case_persisted === true && (
+                    <small>用例 ID：<code>{entry.case_id}</code></small>
+                  )}
                 </div>
                 <div className="script-detail-badges">
                   <Badge tone={entry.source === "dc" ? "brand" : "neutral"}>
@@ -274,6 +286,11 @@ export function ScriptPanel() {
                 <div className="warning-list" role="note">
                   <p>质量提示（不影响执行）：置信度 {confidenceLabel(entry.confidence)}</p>
                   {qualityNotes.map((reason) => <p key={reason}>{reason}</p>)}
+                </div>
+              )}
+              {entry.source === "dc" && entry.case_persisted === false && (
+                <div className="warning-list" role="note">
+                  <p>{CASE_PERSIST_HINT}</p>
                 </div>
               )}
               {!entry.replay_eligible && (
