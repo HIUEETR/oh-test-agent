@@ -70,6 +70,24 @@ def build_parser() -> argparse.ArgumentParser:
     execute = sub.add_parser("execute", help="execute a generated Hypium case")
     execute.add_argument("--run-id", required=True)
     execute.add_argument("--attempts", type=int, choices=[1, 2, 3], default=3)
+
+    defects = sub.add_parser("defects", help="list, show, reproduce or dismiss application defects")
+    defect_sub = defects.add_subparsers(dest="defect_command", required=True)
+    defect_list = defect_sub.add_parser("list")
+    defect_list.add_argument("--bundle", dest="bundle_name")
+    defect_list.add_argument("--kind")
+    defect_list.add_argument("--severity")
+    defect_list.add_argument("--status")
+    defect_list.add_argument("--limit", type=int, default=100)
+    defect_show = defect_sub.add_parser("show")
+    defect_show.add_argument("defect_id")
+    defect_repro = defect_sub.add_parser("repro", help="turn a defect into a bug reproduction case")
+    defect_repro.add_argument("defect_id")
+    defect_repro.add_argument("--execute", action="store_true", help="run the generated case immediately")
+    defect_dismiss = defect_sub.add_parser("dismiss")
+    defect_dismiss.add_argument("defect_id")
+    defect_dismiss.add_argument("--notes", default="", help="why this defect is a false positive")
+
     serve = sub.add_parser("serve", help="start only the FastAPI server")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
@@ -131,19 +149,44 @@ def _make_run_request(data: dict[str, Any]):
 
 def _execution_analyzer(settings: Any) -> Any | None:
     """构造执行结果分析器（与 api/app.py 同一实现口径）；不可用时返回 None。"""
-    if not settings.case_analysis_enabled:
+    from .runner import build_execution_analyzer
+
+    return build_execution_analyzer(settings)
+
+
+def _defect_repository(settings: Any) -> Any | None:
+    """构造缺陷仓库（与 api/app.py 同一实现口径）；不可用时返回 None。"""
+    try:
+        from .storage.defect_repository import DefectRepository
+
+        return DefectRepository(settings.resolved_database_path)
+    except Exception:  # noqa: BLE001 - 缺陷落库是可选能力
+        return None
+
+
+def _defect_recorder(settings: Any) -> Any | None:
+    """构造缺陷记录器；关闭分析或仓库不可用时返回 None（行为与历史完全一致）。"""
+    if not getattr(settings, "case_analysis_enabled", True):
+        return None
+    repository = _defect_repository(settings)
+    if repository is None:
         return None
     try:
-        from .analysis.service import ExecutionAnalyzer
-        from .devices.harmony import HarmonyDeviceAdapter
+        from .analysis.defects import DefectRecorder
 
-        return ExecutionAnalyzer(
-            device_factory=lambda device_id: HarmonyDeviceAdapter(
-                device_id, settings.hdc_path, settings.agent_action_timeout
-            )
-        )
-    except Exception:  # noqa: BLE001 - 分析能力缺失只降级为「不分析」
+        return DefectRecorder(repository)
+    except Exception:  # noqa: BLE001
         return None
+
+
+def _trace_bundle_name(trace: Any) -> str:
+    """从冻结 Profile / 解析目标里取被测 bundle（CLI execute 的分析归属判定）。"""
+    for profile in (trace.profile_snapshot, getattr(trace.resolved_target, "profile_snapshot", None)):
+        bundle = getattr(profile, "bundle_name", "") if profile is not None else ""
+        if bundle:
+            return str(bundle)
+    resolved = getattr(trace, "resolved_target", None)
+    return str(getattr(resolved, "bundle_name", "") or "")
 
 
 def _case_library(settings: Any) -> Any | None:
@@ -178,7 +221,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     raw_args = list(sys.argv[1:] if argv is None else argv)
-    commands = {"dev", "preflight", "run", "profiles", "generate", "execute", "serve"}
+    commands = {"dev", "preflight", "run", "profiles", "generate", "execute", "defects", "serve"}
     if raw_args and raw_args[0] not in commands and raw_args[0] not in {"-h", "--help"}:
         raw_args.insert(0, "dev")
     args = build_parser().parse_args(raw_args)
@@ -225,6 +268,7 @@ def main(argv: list[str] | None = None) -> None:
             settings,
             case_library=_case_library(settings),
             analyzer=_execution_analyzer(settings),
+            defect_recorder=_defect_recorder(settings),
         )
 
         async def execute_run():
@@ -325,6 +369,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
 
+    if command == "defects":
+        raise SystemExit(_run_defects_command(args, settings))
+
     if command == "generate":
         from .generation import HypiumGenerator
         from .reporting import ReportBuilder
@@ -341,12 +388,20 @@ def main(argv: list[str] | None = None) -> None:
     if command == "execute":
         from .models import RunState
         from .reporting import ReportBuilder
-        from .runner import HypiumRunner
+        from .runner import make_hypium_runner
 
         trace = repository.get_trace(args.run_id) or artifacts.load_trace(args.run_id)
         if not trace.generated:
             raise SystemExit("run has no generated Hypium artifact; use generate first")
-        trace.replays = HypiumRunner(settings.resolved_runtime_home).execute_repeated(trace.generated, args.attempts)
+        analyzer = _execution_analyzer(settings) if settings.analysis_on_replay_endpoints else None
+        runner = make_hypium_runner(
+            settings,
+            analyzer=analyzer,
+            analyze=bool(settings.analysis_on_replay_endpoints),
+            bundle_resolver=lambda: _trace_bundle_name(trace),
+            device_id=trace.device_id,
+        )
+        trace.replays = runner.execute_repeated(trace.generated, args.attempts)
         trace.state = RunState.COMPLETED if all(item.passed for item in trace.replays) else RunState.FAILED_SCRIPT
         repository.save_trace(trace)
         artifacts.save_trace(trace)
@@ -359,6 +414,122 @@ def main(argv: list[str] | None = None) -> None:
         uvicorn.run(
             "harmony_test_agent.api.app:create_app", factory=True, host=args.host, port=args.port, reload=args.reload
         )
+
+
+def _run_defects_command(args: argparse.Namespace, settings: Any) -> int:
+    """``defects list / show / repro / dismiss`` 子命令实现（Phase 4.4）。
+
+    直接读写缺陷仓库，不经 HTTP：CLI 与 API 共用同一条 :class:`DefectRepository`。
+    """
+    repository = _defect_repository(settings)
+    if repository is None:
+        print("error: defect repository is unavailable", file=sys.stderr)
+        return 2
+    from .analysis.defects import DefectStatus
+
+    command = args.defect_command
+    if command == "list":
+        summaries = repository.list(
+            bundle_name=args.bundle_name,
+            kind=args.kind,
+            severity=args.severity,
+            status=args.status,
+            limit=max(1, int(args.limit)),
+        )
+        print(json.dumps([item.model_dump(mode="json") for item in summaries], ensure_ascii=False, indent=2))
+        return 0
+    if command == "show":
+        record = repository.get(args.defect_id)
+        if record is None:
+            print(f"error: defect {args.defect_id} not found", file=sys.stderr)
+            return 1
+        print(record.model_dump_json(indent=2))
+        return 0
+    if command == "repro":
+        return _run_defect_repro(args, settings, repository=repository)
+    if command == "dismiss":
+        updated = repository.patch(args.defect_id, status=DefectStatus.DISMISSED, notes=args.notes)
+        if updated is None:
+            print(f"error: defect {args.defect_id} not found", file=sys.stderr)
+            return 1
+        print(updated.model_dump_json(indent=2))
+        return 0
+    print(f"error: unknown defects subcommand: {command}", file=sys.stderr)
+    return 2
+
+
+def _run_defect_repro(args: argparse.Namespace, settings: Any, *, repository: Any) -> int:
+    """把一条缺陷转成复现用例（``--execute`` 时立即重跑一次）。
+
+    刻意**复用 API 的 bug-repro 实现**（``api/cases.py::build_and_save_bug_repro_case``），
+    而不是在 CLI 里重写一遍构建逻辑：两处实现必然漂移，而「缺陷 → 复现用例」的产物结构
+    必须与 API 完全一致。调度回调在这里是 ``None``：CLI 的 ``--execute`` 直接同步跑，
+    不需要 HTTP 层的后台任务。
+    """
+    import asyncio as _asyncio
+
+    from .analysis.defects import defect_to_bug_repro_request
+    from .api.cases import build_and_save_bug_repro_case
+    from .cases.library import CaseLibrary
+    from .models import TargetQuery
+    from .profiles import ProfileRegistry
+    from .runner import make_hypium_runner
+    from .storage.case_repository import CaseRepository
+    from .storage.repository import RunRepository
+
+    record = repository.get(args.defect_id)
+    if record is None:
+        print(f"error: defect {args.defect_id} not found", file=sys.stderr)
+        return 1
+    trace = None
+    try:
+        if record.run_id:
+            trace = RunRepository(settings.resolved_database_path).get_trace(record.run_id)
+    except Exception:  # noqa: BLE001 - 没有 trace 时复现步骤退化为兜底文案
+        trace = None
+    request = defect_to_bug_repro_request(record, trace=trace)
+    if not request.target and record.bundle_name:
+        request.target = TargetQuery(bundle_name=record.bundle_name)
+    registry = ProfileRegistry(
+        settings.resolved_profiles_dir,
+        promotion_replay_attempts=settings.hypium_replay_attempts,
+        min_evidence_rounds=settings.profile_verification_rounds,
+    )
+    case_repository = CaseRepository(settings.resolved_database_path)
+    library = CaseLibrary(
+        case_repository,
+        settings.resolved_cases_dir,
+        min_observed_rounds=settings.profile_verification_rounds,
+        runner_factory=lambda root, timeout: make_hypium_runner(settings, timeout=timeout, analyze=False),
+        analyzer=_execution_analyzer(settings),
+        defect_repository=repository,
+    )
+    try:
+        case_record, _execution_id = _asyncio.run(
+            build_and_save_bug_repro_case(
+                settings=settings,
+                library=library,
+                repository=case_repository,
+                registry=registry,
+                request=request,
+                auto_execute=False,
+                defect_id=record.defect_id,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - 如实报告失败原因
+        print(f"error: cannot build repro case: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if case_record is None:
+        print("error: bug reproduction pipeline returned no case", file=sys.stderr)
+        return 1
+    repository.attach_repro_case(record.defect_id, case_id=case_record.case_id)
+    print(case_record.model_dump_json(indent=2))
+    if not args.execute:
+        return 0
+    execution = library.execute(case_record.case_id, engine="hypium_standalone")
+    repository.patch(record.defect_id, repro_execution_id=execution.execution_id)
+    print(execution.model_dump_json(indent=2))
+    return 0 if execution.status == "passed" else 1
 
 
 if __name__ == "__main__":

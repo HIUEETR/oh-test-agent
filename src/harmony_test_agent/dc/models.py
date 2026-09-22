@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..models import CommandResult, UIElement, utc_now
+from ..models import AnomalyFinding, CommandResult, UIElement, utc_now
 
 # ---------------------------------------------------------------------------
 # 工具层级与名称
@@ -407,6 +407,7 @@ class DcEventType(StrEnum):
     PROFILE_DISTILL_FAILED = "profile_distill_failed"
     TIER_CHANGED = "tier_changed"
     NEEDS_ATTENTION = "needs_attention"
+    ANOMALY_DETECTED = "anomaly_detected"  # 运行中即时发现应用异常（Phase 2，缺口 2）
     ERROR = "error"
 
 
@@ -629,6 +630,8 @@ class DcSessionSnapshot(BaseModel):
     continuation: DcContinuationContext | None = None
     # 会话内累计 token 用量；旧快照缺该字段时按 None 处理（schema_version 不变）
     token_usage: DcTokenUsage | None = None
+    defects: list[AnomalyFinding] = Field(default_factory=list)
+    """运行中即时发现的异常（Phase 2，additive）；旧快照缺该字段时为空列表。"""
 
     def summary(self, *, active: bool) -> DcSessionSummary:
         """投影为列表项。"""

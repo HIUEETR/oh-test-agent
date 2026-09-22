@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..analysis.in_run import MUTATING_TOOLS
 from ..config import Settings
 from ..devices import DeviceAdapter, DeviceError, HarmonyDeviceAdapter
 from ..discovery import (
@@ -58,6 +59,7 @@ from ..models import (
     ToolDecision,
     ToolName,
     VisionObservation,
+    WorkaroundRecord,
     utc_now,
 )
 from ..perception import PerceptionService
@@ -72,7 +74,7 @@ from ..profiles.admission import (
     pick_first_failure,
 )
 from ..reporting import ReportBuilder
-from ..runner import HypiumRunner
+from ..runner import make_hypium_runner
 from ..runtime import LaunchSpec, RunEventEmitter, SafetyError, SafetyPolicy, ToolExecutionError, ToolExecutor
 from ..storage import ArtifactStore, RunRepository
 from ..targets import ForegroundApp, TargetAmbiguousError, TargetNotFoundError, TargetResolver
@@ -106,6 +108,24 @@ def _is_transient_model_error(exc: Exception) -> bool:
     return any(token in text for token in _TRANSIENT_MODEL_ERROR_TOKENS)
 
 
+def _default_in_run_detector_factory(settings: Settings) -> Callable[[DeviceAdapter, str], Any] | None:
+    """按配置构造运行中检测器工厂；总开关关闭时返回 ``None``（行为与今天完全一致）。"""
+    if not getattr(settings, "analysis_in_run_detection", True):
+        return None
+    from ..analysis.in_run import InRunDetector, InRunThresholds
+
+    thresholds = InRunThresholds(
+        escalate_count=int(getattr(settings, "unresponsive_escalate_count", 2)),
+        probe_enabled=bool(getattr(settings, "analysis_in_run_probe", True)),
+        screen_scan_enabled=bool(getattr(settings, "analysis_in_run_screen_scan", True)),
+    )
+
+    def factory(device: DeviceAdapter, bundle_name: str) -> InRunDetector:
+        return InRunDetector(device, bundle_name=bundle_name, thresholds=thresholds)
+
+    return factory
+
+
 @dataclass(frozen=True, slots=True)
 class HarvestedLocator:
     """任务期回收的一条定位器证据：候选 + 其出现页面的结构身份 + 证据帧。"""
@@ -131,6 +151,8 @@ class AgentOrchestrator:
         launch_settle_seconds: float = 3.0,
         case_library: Any | None = None,
         analyzer: Any | None = None,
+        in_run_detector_factory: Callable[[DeviceAdapter, str], Any] | None = None,
+        defect_recorder: Any | None = None,
     ):
         self.settings = settings
         self.provider = provider or create_provider(settings)
@@ -140,10 +162,12 @@ class AgentOrchestrator:
         self.event_callback = event_callback
         self.settle_seconds = settle_seconds
         self.launch_settle_seconds = launch_settle_seconds
-        # 用例库与执行分析均为可选注入：不注入时行为与今天完全一致，
-        # 单测因此不会把产物写进仓库 artifacts/。
+        # 用例库、执行分析与运行中检测均为可选注入：不注入时行为与今天完全一致，
+        # 单测因此不会把产物写进仓库 artifacts/，也不会多发设备调用。
         self.case_library = case_library
         self.analyzer = analyzer
+        self.in_run_detector_factory = in_run_detector_factory or _default_in_run_detector_factory(settings)
+        self.defect_recorder = defect_recorder
         self._stop_requested: set[str] = set()
         self._target_selections: dict[str, str] = {}
         self._target_selection_events: dict[str, asyncio.Event] = {}
@@ -250,6 +274,7 @@ class AgentOrchestrator:
         current_snapshot: ScreenSnapshot | None = None
         current_node = None
         unchanged_count = 0
+        in_run_detector: Any | None = None
 
         emitter.emit(EventType.RUN_STARTED, "运行任务已创建", {"mode": request.mode, "model": self.provider.name})
         try:
@@ -294,6 +319,14 @@ class AgentOrchestrator:
             )
             executor.safety.validate_task(request.task)
             trace.phase = "task"
+            # 运行中即时检测（缺口 2）：设备已连接、身份已确定，构造检测器。
+            # 未注入工厂（单测默认 / 总开关关闭）时为 None，行为与今天完全一致。
+            if self.in_run_detector_factory is not None:
+                try:
+                    in_run_detector = self.in_run_detector_factory(device, launch.bundle_name)
+                    in_run_detector.run_dir = self.artifacts.run_dir(trace.run_id)
+                except Exception as exc:  # noqa: BLE001 - 检测是 advisory，构造失败只降级
+                    logger.warning("in-run detector unavailable: %s: %s", type(exc).__name__, exc)
             emitter.emit(EventType.ORIGINAL_TASK_STARTED, "开始执行用户原始测试任务", {"task": request.task})
 
             trace.state = RunState.PLANNING
@@ -382,6 +415,11 @@ class AgentOrchestrator:
                     edge = graph.add_edge(current_node, after_node, decision.tool, decision.target or "")
                     if edge:
                         emitter.emit(EventType.EDGE_CREATED, "已记录页面跳转", edge.model_dump(mode="json"))
+
+                if before and decision.tool in MUTATING_TOOLS and in_run_detector is not None:
+                    await self._detect_in_run_anomalies(
+                        trace, emitter, in_run_detector, result, step, before, after, decision
+                    )
 
                 if before and decision.tool in {
                     ToolName.OPEN_APP,
@@ -869,7 +907,12 @@ class AgentOrchestrator:
         if self._should_stop(trace.run_id):
             raise asyncio.CancelledError
         trace.state = RunState.SCRIPT_EXECUTING
-        runner = HypiumRunner(self.settings.resolved_runtime_home)
+        runner = make_hypium_runner(
+            self.settings,
+            analyzer=self.analyzer,
+            bundle_name=candidate.bundle_name,
+            device_id=trace.device_id,
+        )
         trace.profile_validation_replays = await self._run_replays(
             runner, trace.profile_validation_generated, trace.run_id, self.settings.hypium_replay_attempts, emitter
         )
@@ -1428,6 +1471,8 @@ class AgentOrchestrator:
         """
         feedback: str | None = None
         last_error: ToolExecutionError | None = None
+        last_decision: ToolDecision | None = None
+        last_failed_action: ActionResult | None = None
         for attempt in range(self.settings.agent_step_recovery_limit + 1):
             decision, snapshot = await self._resolve_decision(trace, emitter, perception, step, snapshot, feedback)
             decision = self._constrain_finish_decision(step, decision)
@@ -1443,12 +1488,14 @@ class AgentOrchestrator:
                 self._record_failed_action(trace, emitter, step, decision, snapshot, action_started_at, exc)
                 raise
             except ToolExecutionError as exc:
-                self._record_failed_action(trace, emitter, step, decision, snapshot, action_started_at, exc)
+                failed = self._record_failed_action(trace, emitter, step, decision, snapshot, action_started_at, exc)
                 if exc.state not in {RunState.FAILED_ELEMENT, RunState.FAILED_ASSERTION}:
                     raise
                 if attempt >= self.settings.agent_step_recovery_limit:
                     raise
                 last_error = exc
+                last_decision = decision
+                last_failed_action = failed
                 feedback = (
                     f"attempt {attempt + 1} failed: {exc}. The attached elements and screenshot are the latest "
                     "state; you may first perform corrective actions (for example an anchored swipe inside a wheel "
@@ -1460,6 +1507,9 @@ class AgentOrchestrator:
                 )
                 continue
             if self._step_completed(step, decision, result):
+                # 绕路留痕（设计 6 / G4）：恢复循环的能力保留不动，但必须**可见**。
+                if attempt > 0:
+                    self._record_workaround(trace, result, attempt, step, last_decision, last_failed_action)
                 return decision, result, snapshot
             # 纠正动作成功但断言类步骤尚未重新完成：继续消耗恢复预算。
             feedback = (
@@ -1567,7 +1617,7 @@ class AgentOrchestrator:
         snapshot: ScreenSnapshot | None,
         started_at,
         error: Exception,
-    ) -> None:
+    ) -> ActionResult:
         failed = ActionResult(
             step_id=step.step_id,
             tool=decision.tool,
@@ -1585,6 +1635,32 @@ class AgentOrchestrator:
             f"步骤失败：{step.instruction}",
             failed.model_dump(mode="json"),
         )
+        return failed
+
+    @staticmethod
+    def _record_workaround(
+        trace: RunTrace,
+        result: ActionResult,
+        attempt: int,
+        step: PlannedStep,
+        last_decision: ToolDecision | None,
+        last_failed_action: ActionResult | None,
+    ) -> None:
+        """记录一次「靠恢复循环绕路完成」（设计 6 / G4）。
+
+        行为完全不变（绕路能力是有价值的），只是让它可见：步骤卡片渲染失败原因与绕路标记，
+        报告汇总「N 步靠绕路完成」。绝不改变 ``success`` / ``state``。
+        """
+        result.recovery_attempts = attempt
+        result.workaround = WorkaroundRecord(
+            original_step_id=step.step_id,
+            original_instruction=step.instruction,
+            original_error=(last_failed_action.error if last_failed_action and last_failed_action.error else "")
+            or f"attempt {attempt} required recovery",
+            corrective_tool=str(last_decision.tool) if last_decision else "",
+            corrective_target=(last_decision.target or "") if last_decision else "",
+        )
+        trace.workaround_count += 1
 
     @staticmethod
     def _step_completed(step: PlannedStep, decision: ToolDecision, result: ActionResult) -> bool:
@@ -1905,21 +1981,106 @@ class AgentOrchestrator:
             {"case_id": record.case_id, "version": record.version, "scenario": str(record.scenario)},
         )
 
+    async def _detect_in_run_anomalies(
+        self,
+        trace: RunTrace,
+        emitter: Any,
+        detector: Any,
+        result: ActionResult,
+        step: PlannedStep,
+        before: ScreenSnapshot,
+        after: ScreenSnapshot,
+        decision: ToolDecision,
+    ) -> None:
+        """运行中检测一个变更类动作（缺口 2）。
+
+        设计红线：检测是 **advisory** —— 命中只挂到 ``ActionResult.anomaly``、写进
+        ``trace.defects`` 并发 ``ANOMALY_DETECTED`` 事件，**绝不**改变 ``result.success``、
+        ``trace.state`` 或任何 assert 结论。最后的硬中止守卫仍然独立生效。
+        """
+        try:
+            observation = await asyncio.to_thread(
+                detector.observe,
+                action_id=step.step_id,
+                before=before,
+                after=after,
+                tool=decision.tool,
+                target=decision.target or "",
+            )
+        except Exception as exc:  # noqa: BLE001 - 检测失败不得打断任务
+            logger.warning("in-run detection failed for %s: %s: %s", step.step_id, type(exc).__name__, exc)
+            return
+        if observation is None or observation.finding is None:
+            return
+        finding = observation.finding
+        result.anomaly = finding
+        trace.defects.append(finding)
+        payload = finding.model_dump(mode="json")
+        payload["action_id"] = step.step_id
+        payload["evidence_paths"] = list(observation.evidence_paths)
+        emitter.emit(EventType.ANOMALY_DETECTED, finding.summary_zh, payload)
+
+    @staticmethod
+    def _analysis_bundle(trace: RunTrace) -> str:
+        """分析 hook 的 bundle 归属来源：冻结 Profile → 解析目标 → 合成 Profile。"""
+        for profile in (trace.profile_snapshot, getattr(trace.resolved_target, "profile_snapshot", None)):
+            bundle = getattr(profile, "bundle_name", "") if profile is not None else ""
+            if bundle:
+                return str(bundle)
+        synthetic = AgentOrchestrator._synthetic_profile(trace)
+        return str(getattr(synthetic, "bundle_name", "") or "")
+
     def _attach_analysis(self, trace: RunTrace, emitter: Any) -> None:
-        """对本次运行做执行结果分析；分析永不翻转 passed，异常一律降级。"""
-        if self.analyzer is None:
+        """对本次运行做执行结果分析，并把缺陷记为一等产物。
+
+        分析永不翻转 passed（红线）。三步：
+
+        1. ``analyze_run`` 做事后分析（失败只记日志）；
+        2. ``trace.defects``（运行中）与 ``analysis.findings``（事后）**按 defect_id 合并去重**；
+        3. 把合并后的 finding 交给可选的 :class:`DefectRecorder` 落库并发 ``DEFECT_RECORDED``。
+        """
+        analysis = None
+        if self.analyzer is not None:
+            try:
+                analysis = self.analyzer.analyze_run(trace, self.artifacts.run_dir(trace.run_id))
+            except Exception as exc:  # noqa: BLE001 - 分析是附加信息，失败只记日志
+                logger.warning("execution analysis failed for %s: %s", trace.run_id, exc)
+                analysis = None
+            if analysis is not None:
+                trace.analysis = analysis
+                emitter.emit(
+                    EventType.RESULT_ANALYSIS_FINISHED,
+                    "执行结果分析完成" if analysis.healthy else f"执行结果分析发现 {len(analysis.findings)} 项异常",
+                    analysis.model_dump(mode="json"),
+                )
+        self._record_defects(trace, emitter, analysis)
+
+    def _record_defects(self, trace: RunTrace, emitter: Any, analysis: Any | None) -> None:
+        """把运行中 + 事后发现的 finding 交给 recorder 归并落库（缺口 5 的核心）。
+
+        ``DefectRecorder`` 按 ``(bundle, kind, page_path, action_target)`` 归并，因此
+        「运行中发现的 finding」与「事后分析发现的同一问题」会并成同一条缺陷
+        （``occurrences`` 累加），不需要额外的映射表。未注入 recorder 时只发事件、不落库。
+        """
+        candidates = [*trace.defects, *(analysis.findings if analysis is not None else [])]
+        if self.defect_recorder is None or not candidates:
             return
         try:
-            analysis = self.analyzer.analyze_run(trace, self.artifacts.run_dir(trace.run_id))
-        except Exception as exc:  # noqa: BLE001 - 分析是附加信息，失败只记日志
-            logger.warning("execution analysis failed for %s: %s", trace.run_id, exc)
+            records = self.defect_recorder.record_from_findings(
+                findings=candidates,
+                bundle_name=self._analysis_bundle(trace),
+                run_id=trace.run_id,
+                device_id=trace.device_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - 缺陷落库失败不得影响运行结论
+            logger.warning("defect recording failed for %s: %s: %s", trace.run_id, type(exc).__name__, exc)
             return
-        trace.analysis = analysis
-        emitter.emit(
-            EventType.RESULT_ANALYSIS_FINISHED,
-            "执行结果分析完成" if analysis.healthy else f"执行结果分析发现 {len(analysis.findings)} 项异常",
-            analysis.model_dump(mode="json"),
-        )
+        for record in records:
+            emitter.emit(
+                EventType.DEFECT_RECORDED,
+                f"疑似应用缺陷：{record.title_zh}",
+                record.model_dump(mode="json"),
+            )
 
     # ------------------------------------------------------------------
     # 运行收尾：成功与失败路径共用，保证任何有成功动作的运行都留下产物
@@ -1957,7 +2118,13 @@ class AgentOrchestrator:
                 raise ToolExecutionError("cannot execute before generating a script", RunState.FAILED_SCRIPT)
             trace.state = RunState.SCRIPT_EXECUTING
             emitter.emit(EventType.EXECUTION_STARTED, "开始执行生成的 Hypium 用例")
-            runner = HypiumRunner(self.settings.resolved_runtime_home)
+            runner = make_hypium_runner(
+                self.settings,
+                analyzer=self.analyzer,
+                bundle_resolver=lambda: self._analysis_bundle(trace),
+                device_id=trace.device_id,
+                symptom_kind=("functional" if trace.scenario == ScenarioKind.BUG_REPRODUCTION else None),
+            )
             trace.replays = await self._run_replays(
                 runner, trace.generated, trace.run_id, self.settings.hypium_replay_attempts, emitter
             )

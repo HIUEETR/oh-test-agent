@@ -3,11 +3,11 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import {
-  BrainCircuit, CheckCircle2, CircleAlert, Crosshair, Eye, ListChecks, ScanEye,
+  AlertTriangle, BrainCircuit, CheckCircle2, CircleAlert, Crosshair, Eye, ListChecks, ScanEye,
   MapPinned, Sparkles, XCircle,
 } from "lucide-react";
 import clsx from "clsx";
-import { EmptyState, Markdown, RetryImage } from "../../components/ui/primitives";
+import { Badge, EmptyState, Markdown, RetryImage } from "../../components/ui/primitives";
 import { useConsole } from "../../stores/console";
 import { artifactUrl } from "../../utils/artifact";
 import { formatDuration, timeLabel } from "../../utils/format";
@@ -84,6 +84,8 @@ function BlockTitle({ block }: { block: ThoughtBlock }) {
     assertion: block.kind === "assertion" && block.passed ? <CheckCircle2 size={13} /> : <XCircle size={13} />,
     advisor: <BrainCircuit size={13} />,
     page: <MapPinned size={13} />,
+    // Phase 2/3：运行中发现的异常用警示三角，critical 时整块走 fail 相位（红色）。
+    anomaly: <AlertTriangle size={13} />,
     notice: block.kind === "notice" && block.phase === "fail" ? <CircleAlert size={13} /> : <Sparkles size={13} />,
   }[block.kind];
   return (
@@ -189,6 +191,16 @@ function BlockBody({ block, runId }: { block: ThoughtBlock; runId: string }) {
               <small>STATE {block.order}</small>
             </a>
           )}
+        </div>
+      );
+    case "anomaly":
+      return (
+        <div className="thought-body anomaly-body">
+          <p>
+            <Badge tone={block.severity === "critical" ? "danger" : "warn"}>{block.severity}</Badge>
+            <strong> {block.kindLabel}</strong>
+            {block.detail ? <> · {block.detail}</> : null}
+          </p>
         </div>
       );
     case "notice":

@@ -285,7 +285,7 @@ def _stub_device_pipeline(monkeypatch, session_id: str, registry: ProfileRegistr
 
     monkeypatch.setattr("harmony_test_agent.discovery.verification.ProfileVerifier.verify", fake_verify)
     monkeypatch.setattr(DcProfileDistiller, "_candidate_from_verification", fake_candidate)
-    monkeypatch.setattr("harmony_test_agent.api.app.HypiumRunner.execute", fake_execute)
+    monkeypatch.setattr("harmony_test_agent.runner.hypium.HypiumRunner.execute", fake_execute)
 
 
 def test_distill_endpoint_requires_recorded_operations(tmp_path: Path) -> None:

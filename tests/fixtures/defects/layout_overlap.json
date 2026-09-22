@@ -1,0 +1,38 @@
+{
+  "attributes": {
+    "pagePath": "pages/Feed",
+    "type": "Root",
+    "visible": "true",
+    "bounds": "[0,0][1320,2232]"
+  },
+  "children": [
+    {
+      "attributes": {
+        "key": "p2_feed_card",
+        "type": "Column",
+        "visible": "true",
+        "bounds": "[60,400][1260,1100]"
+      },
+      "children": [
+        {
+          "attributes": {
+            "key": "overlap_title_a",
+            "type": "Text",
+            "text": "重叠标题 A",
+            "visible": "true",
+            "bounds": "[100,500][1100,900]"
+          }
+        },
+        {
+          "attributes": {
+            "key": "overlap_title_b",
+            "type": "Text",
+            "text": "重叠标题 B",
+            "visible": "true",
+            "bounds": "[140,540][1140,940]"
+          }
+        }
+      ]
+    }
+  ]
+}

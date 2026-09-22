@@ -147,6 +147,8 @@ class EventType(StrEnum):
     RUN_FAILED = "run_failed"
     RUN_FINISHED = "run_finished"
     RESULT_ANALYSIS_FINISHED = "result_analysis_finished"
+    ANOMALY_DETECTED = "anomaly_detected"
+    DEFECT_RECORDED = "defect_recorded"
     CASE_SAVED = "case_saved"
 
 
@@ -220,6 +222,51 @@ class AnomalyFinding(BaseModel):
     detail: str = ""
     evidence: dict[str, Any] = Field(default_factory=dict)
     source: Literal["hilog", "faultlog", "screenshot", "ui_dump", "stdout", "stress_stats"]
+
+    # --- Phase 2/3 追加字段（全部 additive，带默认值） -----------------
+    defect_id: str = ""
+    """跨 finding 归并同一缺陷的稳定标识（见 ``analysis/defects.py``）。"""
+
+    action_id: str = ""
+    """Live: ``ActionResult.step_id``；DC: ``DcToolInvocation.invocation_id``。"""
+
+    page_path: str = ""
+    screenshot: str = ""
+    """Run 内相对截图路径，报告直接建链接。"""
+
+    detected_at: datetime | None = None
+    phase: Literal["post_hoc", "in_run", "exploration", "replay"] = "post_hoc"
+    """区分「事后分析发现」与「运行中即时发现」；报告与 API 据此分区展示。"""
+
+    repro_hint: str = ""
+    """人类可读的复现提示（由 ``defect_to_bug_repro_request`` 生成）。"""
+
+
+class InRunObservation(BaseModel):
+    """一次运行中检测的观测结果（廉价门的判定 + 可选的昂贵取证结论）。
+
+    ``finding`` 为 ``None`` 表示「有像素/结构信号、但不构成异常」
+    （例如仅像素相同而结构变了 —— 动画、光标、时钟跳动）。
+    """
+
+    action_id: str
+    pixel_same: bool
+    struct_same: bool
+    foreground_lost: bool = False
+    foreground_bundle: str = ""
+    finding: AnomalyFinding | None = None
+    evidence_paths: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkaroundRecord(BaseModel):
+    """一次「绕路完成」的留痕：原步骤失败、改用什么动作达成（G4，不掩盖）。"""
+
+    original_step_id: str
+    original_instruction: str = ""
+    original_error: str = ""
+    corrective_tool: str = ""
+    corrective_target: str = ""
 
 
 class ExecutionAnalysis(BaseModel):
@@ -627,6 +674,15 @@ class ActionResult(BaseModel):
     locator: LocatorCandidate | None = None
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    # --- Phase 2/3 追加字段（additive） -------------------------------
+    anomaly: AnomalyFinding | None = None
+    """运行中即时发现的异常（``phase="in_run"``）；None 表示本步无可疑。"""
+
+    recovery_attempts: int = 0
+    """本步为达成目标所做的重决策 / 重试次数（0 表示一次成功）。"""
+
+    workaround: WorkaroundRecord | None = None
+    """``recovery_attempts > 0`` 且最终成功时的绕路留痕（G4）。"""
 
 
 class PageNode(BaseModel):
@@ -802,6 +858,13 @@ class RunTrace(BaseModel):
     events: list[RunEvent] = Field(default_factory=list)
     generated: GeneratedArtifact | None = None
     replays: list[ReplayResult] = Field(default_factory=list)
+    # --- Phase 2/3 追加字段（additive） -------------------------------
+    defects: list[AnomalyFinding] = Field(default_factory=list)
+    """运行中即时发现（``phase="in_run"``）；与 ``analysis.findings`` 在收尾时对账合并。"""
+
+    workaround_count: int = 0
+    """靠恢复循环绕路完成的步骤数（G4：不掩盖）。"""
+
     agent_outcome: Literal["completed", "failed", "stopped", "unknown"] = "unknown"
     agent_error: str | None = None
     replay_status: Literal["not_requested", "not_eligible", "pending", "passed", "failed", "partial"] = "not_requested"

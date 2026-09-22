@@ -168,6 +168,11 @@ class CaseBuildResult:
     promotion_eligible: bool = False
     promotion_blockers: list[str] = field(default_factory=list)
     runnable_blockers: list[str] = field(default_factory=list)
+    source_failures: list[dict[str, str]] = field(default_factory=list)
+    """录制期间失败的 invocation（缺口 5 末条）。
+
+    失败的 invocation 仍然**不进脚本**（脚本里确实不该有失败动作），但「这个用例的录制
+    过程中有过失败」必须可追溯，因此单独留痕并写进 case 的 config JSON。"""
 
 
 def new_case_id() -> str:
@@ -233,6 +238,7 @@ class CaseBuilder:
         """把 Live 轨迹构建为用例 IR（逐分支复刻 ``HypiumGenerator._render_actions``）。"""
         warnings: list[str] = []
         omitted: list[dict[str, str]] = []
+        source_failures: list[dict[str, str]] = []
         steps: list[TestStepSpec] = []
         generated_actions = 0
         generated_assertions = 0
@@ -264,6 +270,17 @@ class CaseBuilder:
         for action in trace.actions:
             if not action.success:
                 omit(action, action.error or "source action failed")
+                # 失败动作不进脚本，但必须留痕（缺口 5 末条）。
+                source_failures.append(
+                    {
+                        "step_id": action.step_id,
+                        "tool": str(action.tool),
+                        "status": "failed",
+                        "page_path": str(action.params.get("page_path") or ""),
+                        "args": format_args(action.params),
+                        "error": (action.error or "")[:500],
+                    }
+                )
                 continue
             tool = action.tool
             if tool == ToolName.OPEN_APP:
@@ -477,6 +494,7 @@ class CaseBuilder:
             purpose="acceptance" if replay_eligible else "diagnostic",
             explicit_assertions=explicit_assertions,
             source_agent_outcome=outcome,  # type: ignore[arg-type]
+            source_failures=source_failures,
         )
 
     # ------------------------------------------------------------------
@@ -507,6 +525,7 @@ class CaseBuilder:
 
         warnings: list[str] = []
         omitted: list[dict[str, str]] = []
+        source_failures: list[dict[str, str]] = []
         steps: list[TestStepSpec] = []
         swipe_inferred: dict[str, int] = {}
         included_count = 0
@@ -537,6 +556,19 @@ class CaseBuilder:
                         "invocation_id": invocation.invocation_id,
                         "tool": invocation.tool.value,
                         "reason": "invocation failed",
+                    }
+                )
+                # 失败动作不进脚本，但必须留痕：否则「录制期间有过失败」在产物层面被抹掉。
+                source_failures.append(
+                    {
+                        "invocation_id": invocation.invocation_id,
+                        "tool": invocation.tool.value,
+                        "status": invocation.status.value
+                        if hasattr(invocation.status, "value")
+                        else str(invocation.status),
+                        "page_path": invocation.page_path,
+                        "args": format_args(invocation.args),
+                        "error": (invocation.error or invocation.result_summary or "")[:500],
                     }
                 )
                 continue
@@ -654,6 +686,7 @@ class CaseBuilder:
             promotion_blockers=[],
             purpose="acceptance" if replay_eligible else "diagnostic",
             explicit_assertions=explicit_assertions,
+            source_failures=source_failures,
         )
 
     def _dc_step(

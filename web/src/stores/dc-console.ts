@@ -11,11 +11,13 @@ import {
   generateDcScript,
   getDcSession,
   listDcSessions,
+  resolveSession,
   resumeDcSession,
   sendDcMessage,
   setDcTier,
   stopDcTurn,
 } from "../api/dc-client";
+import type { ResolveAction } from "../api/dc-client";
 import type {
   DcActivityKind,
   DcActivitySnapshot,
@@ -152,6 +154,7 @@ interface DcState {
   generateScript: (bundleName?: string, mainAbility?: string) => Promise<void>;
   distillProfile: (bundleName?: string, mainAbility?: string) => Promise<DcDistillResult | null>;
   closeSession: () => Promise<void>;
+  resolveAttention: (action: ResolveAction) => Promise<void>;
   appendEvent: (event: DcEvent) => void;
   setConnection: (connection: DcLiveConnection) => void;
   setError: (message: string) => void;
@@ -436,6 +439,25 @@ export const useDcConsole = create<DcState>()((set, get) => ({
   },
 
   setConnection: (connection: DcLiveConnection) => set({ connection }),
+
+  /** 处置 ``needs_attention``（reobserve / confirm_effect / retry / terminate）。
+   *
+   *  历史缺口：后端 ``POST /api/dc/sessions/{id}/resolve`` 早已实现，前端从未调用，
+   *  四个处置选项只是纯文本，用户无法解除阻塞。这里把它接上。
+   */
+  resolveAttention: async (action: ResolveAction) => {
+    const { activeSessionId } = get();
+    if (!activeSessionId) return;
+    try {
+      const view = await resolveSession(activeSessionId, action);
+      sessionEpoch += 1;
+      set({ session: view });
+      // 处置后重新拉一次会话投影：阻塞是否解除以后端为准（前端不猜）。
+      await get().refreshSession(true);
+    } catch (cause) {
+      set({ error: apiError("处置未确认副作用失败", cause) });
+    }
+  },
 
   appendEvent: (event: DcEvent) => {
     // 旧会话迟到的回调：直接丢弃，避免污染新会话状态

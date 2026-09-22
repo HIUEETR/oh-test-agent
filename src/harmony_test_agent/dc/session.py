@@ -19,9 +19,9 @@ from ..cases.builder import NON_REPLAYABLE_DC_TOOLS
 from ..config import Settings
 from ..devices.harmony import HarmonyDeviceAdapter
 from ..discovery import ProfileVerifier
-from ..models import ResolvedTarget, ScreenSnapshot, StableLocator, utc_now
+from ..models import AnomalyFinding, ResolvedTarget, ScreenSnapshot, StableLocator, utc_now
 from ..profiles import ProfileRegistry, ProfileRegistryError
-from ..runner import HypiumRunner
+from ..runner import make_hypium_runner
 from ..storage.artifacts import ArtifactStore
 from ..targets.catalog import parse_foreground_hierarchy
 from .distill import DcProfileDistiller, infer_session_identity
@@ -258,6 +258,8 @@ class DcSession:
         self.pending_attention: DcToolInvocation | None = None
         # 会话内累计 token 用量（来自 provider 真实响应；前端输入框下方展示）
         self.token_usage = DcTokenUsage()
+        # 运行中即时发现的应用异常（Phase 2）：由工具上下文写回，收尾落进 dc_session.json。
+        self.defects: list[AnomalyFinding] = []
         self.cancel_requested = False
         self._last_checkpoint = 0.0
         self._context_version = 0
@@ -497,6 +499,8 @@ class DcSession:
                 action_timeout=self.settings.agent_action_timeout,
                 progress_interval=self.settings.dc_progress_interval,
                 stable_locators=self._linked_stable_locators(),
+                bundle_name=self.last_foreground_app or "",
+                defects=self.defects,
             )
 
             # 构造工具列表
@@ -1001,7 +1005,13 @@ class DcSession:
                     self.profile_registry,
                     self.settings,
                     verifier_factory=self._profile_verifier,
-                    runner=HypiumRunner(self.settings.resolved_runtime_home),
+                    runner=make_hypium_runner(
+                        self.settings,
+                        bundle_name=bundle_name,
+                        device_id=self.device_id,
+                        subject="dc_script",
+                        session_id=self.session_id,
+                    ),
                 )
                 result = await distiller.distill(self, bundle_name, main_ability)
         except Exception as exc:
@@ -1093,6 +1103,7 @@ class DcSession:
             history_kind="model_messages" if history else "none",
             continuation=self._synced_continuation(),
             token_usage=self.token_usage,
+            defects=self.defects,
         )
 
     def _synced_continuation(self) -> DcContinuationContext | None:
@@ -1135,6 +1146,7 @@ class DcSession:
         self.script = snapshot.script
         self.continuation = snapshot.continuation
         self.token_usage = snapshot.token_usage or DcTokenUsage()
+        self.defects = list(snapshot.defects)
         self._context_version = snapshot.continuation.context_version if snapshot.continuation else 0
         self.history = self._restore_history(snapshot)
         self._restored = True

@@ -134,3 +134,50 @@ describe("aggregateThoughts", () => {
     expect(blocks[1].kind).toBe("notice");
   });
 });
+
+describe("运行中异常块（Phase 2/3）", () => {
+  it("把 anomaly_detected 聚合为醒目的异常块", () => {
+    const blocks = aggregateThoughts([
+      makeEvent(
+        "anomaly_detected",
+        { kind: "cppcrash", severity: "critical", page_path: "pages/Feed", action_id: "step-2" },
+        "hilog 中出现 C++ 崩溃",
+      ),
+    ]);
+
+    expect(blocks).toHaveLength(1);
+    const block = blocks[0];
+    expect(block.kind).toBe("anomaly");
+    // critical 走 fail 相位（红色）
+    expect(block.phase).toBe("fail");
+    if (block.kind === "anomaly") {
+      expect(block.severity).toBe("critical");
+      expect(block.kindLabel).toBe("C++ 崩溃");
+      expect(block.detail).toContain("pages/Feed");
+    }
+  });
+
+  it("warning 级异常走 gate 相位而不是 fail", () => {
+    const blocks = aggregateThoughts([
+      makeEvent("anomaly_detected", { kind: "page_unresponsive", severity: "warning" }, "疑似无响应控件"),
+    ]);
+
+    expect(blocks[0].kind).toBe("anomaly");
+    expect(blocks[0].phase).toBe("gate");
+  });
+
+  it("defect_recorded 同样进入思考流（不只是普通通知）", () => {
+    const blocks = aggregateThoughts([
+      makeEvent("defect_recorded", { kind: "appfreeze", severity: "critical" }, "疑似应用缺陷：应用冻屏"),
+    ]);
+
+    expect(blocks[0].kind).toBe("anomaly");
+    if (blocks[0].kind === "anomaly") expect(blocks[0].kindLabel).toBe("应用冻屏");
+  });
+
+  it("未知类别回退到事件类型而不是空标签", () => {
+    const blocks = aggregateThoughts([makeEvent("anomaly_detected", { kind: "brand_new_kind" }, "新异常")]);
+
+    if (blocks[0].kind === "anomaly") expect(blocks[0].kindLabel).toBe("brand_new_kind");
+  });
+});

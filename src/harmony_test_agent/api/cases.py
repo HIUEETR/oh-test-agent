@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse
 
 from ..cases.builder import CaseBuilder
-from ..cases.library import CaseLibrary
+from ..cases.library import DEFECT_TAG_PREFIX, CaseLibrary
 from ..cases.safety import validate_case_spec
 from ..cases.spec import (
     CaseExecutionRecord,
@@ -33,7 +34,7 @@ from ..models import BugReproRequest, TargetAppProfile, TargetQuery, utc_now
 from ..storage.case_repository import CaseRepository
 from ..storage.repository import RunRepository
 
-__all__ = ["StressRequest", "create_cases_router"]
+__all__ = ["StressRequest", "build_and_save_bug_repro_case", "create_cases_router"]
 
 
 def create_cases_router(
@@ -44,7 +45,7 @@ def create_cases_router(
     run_repository: RunRepository,
     registry: Any | None = None,
     dc_manager: Any | None = None,
-) -> APIRouter:
+) -> tuple[APIRouter, dict[str, Any]]:
     """装配用例库路由。
 
     Args:
@@ -54,10 +55,67 @@ def create_cases_router(
         run_repository: 读取 Live 运行 trace。
         registry: Profile Registry；用于把目标查询解析成 Profile 证据。
         dc_manager: DC 会话管理器；用于读取已持久化的会话快照。
+
+    Returns:
+        ``(router, hooks)``。``hooks`` 暴露 ``bug_repro_factory`` 与
+        ``bug_repro_execution_callback``，供 ``api/defects.py`` 复用同一条 bug-repro 路径
+        （避免两处重复实现，Phase 4）。
     """
     router = APIRouter()
     execution_locks: dict[str, asyncio.Lock] = {}
     builder = CaseBuilder(min_observed_rounds=settings.profile_verification_rounds)
+
+    # ------------------------------------------------------------------
+    # 可复用的 bug-repro 创建路径（Phase 4：/api/defects/{id}/to-bug-repro 复用）
+    # ------------------------------------------------------------------
+
+    async def create_bug_repro_record(
+        *,
+        request: BugReproRequest,
+        auto_execute: bool | None = None,
+        defect_id: str | None = None,
+    ) -> tuple[CaseRecord | None, str | None]:
+        return await build_and_save_bug_repro_case(
+            settings=settings,
+            library=library,
+            repository=repository,
+            registry=registry,
+            request=request,
+            auto_execute=auto_execute,
+            defect_id=defect_id,
+            schedule=lambda record: _schedule_execution(
+                execution_locks, library, repository, record, CaseExecutionRequest()
+            ),
+        )
+
+    async def bug_repro_factory(
+        *,
+        record: Any,
+        request: BugReproRequest,
+        trace: Any = None,
+        auto_execute: bool | None = None,
+    ) -> dict[str, Any]:
+        """``api/defects.py`` 注入用的适配器：返回可 JSON 序列化的结果字典。"""
+        del trace
+        defect_id = str(getattr(record, "defect_id", "") or "") or None
+        created, execution_id = await create_bug_repro_record(
+            request=request, auto_execute=auto_execute, defect_id=defect_id
+        )
+        if created is None:
+            raise RuntimeError("bug reproduction pipeline returned no case")
+        return {
+            "case": created.model_dump(mode="json"),
+            "case_id": created.case_id,
+            "execution_id": execution_id,
+        }
+
+    async def bug_repro_execution_callback(*, case_id: str, request: BugReproRequest) -> str | None:
+        """``api/defects.py`` 注入用的执行回调：按 case_id 补排一次重跑。"""
+        del request
+        stored = library.get(case_id)
+        if stored is None:
+            return None
+        return _schedule_execution(execution_locks, library, repository, stored, CaseExecutionRequest())
 
     # ------------------------------------------------------------------
     # 执行记录（必须早于 /{case_id}）
@@ -133,19 +191,13 @@ def create_cases_router(
 
     @router.post("/api/cases/bug-repro", response_model=CaseRecord, status_code=status.HTTP_201_CREATED)
     async def bug_repro(request: BugReproRequest) -> CaseRecord:
-        profile = _profile_for(registry, request.target)
-        provider = _provider(settings)
-        plan = await _plan_bug_repro(provider, request, profile)
-        if plan is None:
-            raise HTTPException(status_code=503, detail="no provider is available to plan the bug reproduction")
         try:
-            built = await asyncio.to_thread(builder.from_bug_repro, plan, request, profile)
+            record, _execution_id = await create_bug_repro_record(request=request)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
             # 计划里的检查点草案无法映射为合法 IR（例如 white_screen 哨兵缺少可用锚点）。
             raise HTTPException(status_code=422, detail=f"bug repro plan is not satisfiable: {exc}") from exc
-        record = await asyncio.to_thread(library.save_built, built, device_sn=request.device_id)
-        if request.auto_execute:
-            _schedule_execution(execution_locks, library, repository, record, CaseExecutionRequest())
         return record
 
     @router.post("/api/cases/stress", response_model=CaseRecord, status_code=status.HTTP_201_CREATED)
@@ -242,7 +294,11 @@ def create_cases_router(
     async def profile_cases(profile_id: str) -> list[CaseSummary]:
         return library.list(target_app_id=profile_id, limit=200)
 
-    return router
+    hooks = {
+        "bug_repro_factory": bug_repro_factory,
+        "bug_repro_execution_callback": bug_repro_execution_callback,
+    }
+    return router, hooks
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +364,42 @@ def _load_dc_snapshot(dc_manager: Any, session_id: str) -> Any | None:
             return snapshot
     session = dc_manager.get(session_id) if hasattr(dc_manager, "get") else None
     return session.snapshot() if session is not None else None
+
+
+async def build_and_save_bug_repro_case(
+    *,
+    settings: Settings,
+    library: CaseLibrary,
+    repository: CaseRepository,
+    registry: Any | None,
+    request: BugReproRequest,
+    auto_execute: bool | None = None,
+    defect_id: str | None = None,
+    schedule: Callable[[CaseRecord], str] | None = None,
+) -> tuple[CaseRecord | None, str | None]:
+    """按一条 :class:`BugReproRequest` 生成并保存复现用例（**API 与 CLI 共用**）。
+
+    返回 ``(记录, 执行标识)``。计划无法映射为合法 IR 时抛 ``ValueError``；
+    provider 不可用时抛 ``RuntimeError``；两者由调用方决定映射成 422 / 503 还是 502。
+
+    ``defect_id`` 给定时在用例标签里记 ``defect:<id>``：重跑完成后
+    ``cases/library.py`` 据此把 ``symptom_reproduced`` 回写成缺陷状态（Phase 4）。
+    ``schedule`` 由调用方提供「排一次重跑」的实现（HTTP 层与 CLI 的调度方式不同）。
+    """
+    profile = _profile_for(registry, request.target)
+    provider = _provider(settings)
+    plan = await _plan_bug_repro(provider, request, profile)
+    if plan is None:
+        raise RuntimeError("no provider is available to plan the bug reproduction")
+    builder = CaseBuilder(min_observed_rounds=settings.profile_verification_rounds)
+    built = await asyncio.to_thread(builder.from_bug_repro, plan, request, profile)
+    if defect_id and f"{DEFECT_TAG_PREFIX}{defect_id}" not in built.spec.tags:
+        built.spec.tags = [*built.spec.tags, f"{DEFECT_TAG_PREFIX}{defect_id}"]
+    record = await asyncio.to_thread(library.save_built, built, device_sn=request.device_id)
+    execution_id = None
+    if (auto_execute if auto_execute is not None else request.auto_execute) and schedule is not None:
+        execution_id = schedule(record)
+    return record, execution_id
 
 
 def _session_identity(snapshot: Any, bundle_name: str, main_ability: str) -> tuple[str, str]:

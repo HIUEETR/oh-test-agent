@@ -412,7 +412,9 @@ def test_stress_memory_within_threshold_is_ignored(tmp_path):
         ("unresponsive", False),
         ("layout", False),
         ("functional", True),
-        ("other", None),
+        # ``other`` 现在映射到 MEMORY_GROWTH（缺口 5 补齐）：本次回放没有内存增长 finding，
+        # 因此结论是明确的「未复现」而不是「无法判定」。
+        ("other", False),
     ],
 )
 def test_symptom_kind_mapping(tmp_path, symptom_kind, expected):

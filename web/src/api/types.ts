@@ -292,6 +292,10 @@ export type RunTrace = {
     incomplete_reasons?: string[];
   };
   replays: ReplayResult[];
+  // Phase 2/3：运行中即时发现的异常，以及靠恢复循环绕路完成的步骤数（additive）。
+  defects?: AnomalyFinding[];
+  workaround_count?: number;
+  analysis?: ExecutionAnalysisView | null;
   agent_outcome?: "completed" | "failed" | "stopped" | "unknown";
   agent_error?: string;
   replay_status?: "not_requested" | "not_eligible" | "pending" | "passed" | "failed" | "partial";
@@ -350,6 +354,8 @@ export const RUN_EVENT_TYPES = [
   "original_task_started", "preflight_passed", "screen_captured", "elements_detected", "plan_created",
   "action_started", "action_finished", "assertion_passed", "assertion_failed", "page_discovered",
   "edge_created", "script_generated", "execution_started", "execution_finished", "run_failed", "run_finished",
+  // Phase 2/3：运行中异常与缺陷一等产物（后端 EventType.ANOMALY_DETECTED / DEFECT_RECORDED）。
+  "anomaly_detected", "defect_recorded",
 ] as const;
 
 /** 终态集合：与后端 TERMINAL_STATES 保持一致。 */
@@ -358,3 +364,111 @@ export const TERMINAL_STATES = new Set([
   "failed_assertion", "failed_script", "failed_target_resolution", "failed_target_probe",
   "failed_discovery", "failed_profile_verification", "failed_profile_promotion", "stopped_by_user",
 ]);
+
+// ---------------------------------------------------------------------------
+// 执行结果分析 / 缺陷（Phase 2/3）：与后端 AnomalyFinding / DefectRecord 对齐
+// ---------------------------------------------------------------------------
+
+/** 异常类别：与后端 ``AnomalyKind`` 逐一对应。 */
+export type AnomalyKind =
+  | "cppcrash" | "jscrash" | "appfreeze" | "anr"
+  | "white_screen" | "page_unresponsive" | "layout_anomaly" | "memory_growth";
+
+export type AnomalySeverity = "info" | "warning" | "critical";
+
+/** 发现阶段：区分「事后分析」与「运行中即时发现」。 */
+export type AnomalyPhase = "post_hoc" | "in_run" | "exploration" | "replay";
+
+/** 单条异常发现；仅作附加信息，永不翻转用例的 passed。 */
+export type AnomalyFinding = {
+  kind: AnomalyKind;
+  severity: AnomalySeverity;
+  summary_zh: string;
+  detail?: string;
+  evidence?: Record<string, unknown>;
+  source: string;
+  defect_id?: string;
+  action_id?: string;
+  page_path?: string;
+  screenshot?: string;
+  detected_at?: string;
+  phase?: AnomalyPhase;
+  repro_hint?: string;
+};
+
+/** 缺陷生命周期状态：与后端 ``DefectStatus`` 逐一对应。 */
+export type DefectStatus = "suspected" | "confirmed" | "not_reproduced" | "dismissed";
+
+/** 列表投影（不含完整 findings）。 */
+export type DefectSummary = {
+  defect_id: string;
+  bundle_name: string;
+  kind: AnomalyKind;
+  severity: AnomalySeverity;
+  status: DefectStatus;
+  title_zh: string;
+  summary_zh?: string;
+  page_path?: string;
+  action_id?: string;
+  occurrences: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  run_id?: string;
+  session_id?: string;
+  case_id?: string;
+  repro_case_id?: string | null;
+  finding_count?: number;
+};
+
+/** 完整缺陷记录。 */
+export type DefectRecord = DefectSummary & {
+  schema_version?: number;
+  findings?: AnomalyFinding[];
+  evidence_paths?: string[];
+  device_id?: string;
+  app_version?: string;
+  repro_execution_id?: string | null;
+  notes?: string;
+};
+
+/** ``GET /api/defects`` / ``/api/runs/{id}/defects`` 的响应。 */
+export type DefectListResponse = {
+  total: number;
+  defects: DefectSummary[];
+};
+
+/** ``POST /api/defects/{id}/to-bug-repro`` 的响应。 */
+export type DefectReproResponse = {
+  defect_id: string;
+  case_id?: string | null;
+  execution_id?: string | null;
+  symptom_kind?: string;
+  case?: unknown;
+};
+
+/** 执行结果分析（后端 ``ExecutionAnalysis``）。 */
+export type ExecutionAnalysisView = {
+  schema_version?: number;
+  subject: string;
+  subject_id: string;
+  bundle_name?: string;
+  device_id?: string;
+  healthy: boolean;
+  findings: AnomalyFinding[];
+  symptom_reproduced?: boolean | null;
+  metrics?: Record<string, unknown>;
+  log_coverage?: "full" | "partial" | "unavailable";
+  analyzed_at?: string;
+};
+
+/** 缺陷列表查询条件（全部可选）。 */
+export type DefectQuery = {
+  bundle_name?: string;
+  kind?: AnomalyKind;
+  severity?: AnomalySeverity;
+  status?: DefectStatus;
+  run_id?: string;
+  session_id?: string;
+  case_id?: string;
+  limit?: number;
+};

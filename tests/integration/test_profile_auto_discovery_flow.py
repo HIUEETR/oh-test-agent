@@ -795,8 +795,9 @@ async def test_replay_events_stream_per_attempt(tmp_path: Path, monkeypatch, att
     device = FlowDevice(tmp_path)
     orchestrator = _orchestrator(tmp_path, device, attempts=attempts)
     _patch_discovery(monkeypatch, verification_passed=True)
+    # Phase 1：统一构造点迁移到 runner/factory.py，直接 patch 类方法本体。
     monkeypatch.setattr(
-        "harmony_test_agent.agents.orchestrator.HypiumRunner.execute",
+        "harmony_test_agent.runner.hypium.HypiumRunner.execute",
         lambda self, generated, attempt: _replays(True)[0].model_copy(update={"attempt": attempt}),
     )
     trace = await orchestrator.run(

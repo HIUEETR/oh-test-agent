@@ -23,7 +23,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..config import Settings
 from ..discovery import BoundedExplorer, DiscoveryResult, ExplorationAction, ExplorationPolicy, ProfileVerifier
@@ -43,7 +43,7 @@ from ..models import (
     TargetAppProfile,
 )
 from ..profiles import ProfileRegistry
-from ..runner import HypiumRunner
+from ..runner import HypiumRunner, make_hypium_runner
 from ..storage import ArtifactStore
 from ..targets import ForegroundApp
 from .models import (
@@ -51,6 +51,7 @@ from .models import (
     DcError,
     DcToolInvocation,
     DcToolName,
+    DcToolStatus,
     is_system_foreground_bundle,
 )
 
@@ -248,6 +249,14 @@ class DcProfileDistiller:
         if not discovery.pages:
             raise DcError("DC session has no replayable core flow; record at least 3 replayable actions first")
 
+        # 失败的断言必须留痕（缺口 5 末条）：Profile 只能用成功证据，但「我测出了一个 bug」
+        # 不能在产物层面被彻底抹掉。
+        failed_assertions = self._failed_assertion_observations(session.recorder.invocations)
+        for entry in failed_assertions:
+            warnings.append(
+                f"失败断言（未进 Profile，仅记录）：{entry['tool']} target={entry['target']!r} error={entry['error']!r}"
+            )
+
         draft = self._draft_profile(
             session=session,
             target=target,
@@ -255,6 +264,28 @@ class DcProfileDistiller:
             page_paths=page_paths,
             warnings=warnings,
         )
+        if failed_assertions:
+            draft = draft.model_copy(
+                update={
+                    "known_limitations": [
+                        *draft.known_limitations,
+                        *(
+                            f"录制期间失败的断言：{entry['tool']} {entry['target']}（{entry['error']}）"
+                            for entry in failed_assertions
+                        ),
+                    ],
+                    "provenance": draft.provenance.model_copy(
+                        update={
+                            "evidence": {
+                                **draft.provenance.evidence,
+                                "failed_assertions": failed_assertions,
+                            }
+                        },
+                        deep=True,
+                    ),
+                },
+                deep=True,
+            )
         return DistillPreparation(
             run_id=run_id,
             target=target,
@@ -264,6 +295,29 @@ class DcProfileDistiller:
             page_paths=page_paths,
             warnings=warnings,
         )
+
+    def _failed_assertion_observations(self, invocations: list[DcToolInvocation]) -> list[dict[str, Any]]:
+        """收集**失败**的 ``assert_*`` 调用，供 ``known_limitations`` 与 provenance 留痕。
+
+        Profile 只允许成功证据（``invocations`` 过滤 ``inv.success`` 保留不动），
+        但失败断言原本被丢掉两次：``case/builder.py`` omit + 这里只看 ``inv.success``。
+        """
+        entries: list[dict[str, Any]] = []
+        for inv in invocations:
+            if inv.tool not in _ASSERT_TOOLS or inv.success:
+                continue
+            target = str(inv.args.get("target") or inv.args.get("text") or "")
+            entries.append(
+                {
+                    "invocation_id": inv.invocation_id,
+                    "tool": inv.tool.value,
+                    "target": target,
+                    "page_path": inv.page_path,
+                    "status": inv.status.value if hasattr(inv.status, "value") else str(inv.status),
+                    "error": (inv.error or inv.result_summary or "")[:500],
+                }
+            )
+        return entries
 
     def _locator_observations(self, invocations: list[DcToolInvocation]) -> list[LocatorObservation]:
         """从 ``resolved_element`` 提取定位器证据（单轮，round_number=1）。"""
@@ -290,7 +344,12 @@ class DcProfileDistiller:
         return observations
 
     def _assertion_observations(self, invocations: list[DcToolInvocation]) -> list[AssertionObservation]:
-        """从成功的 ``assert_*`` 调用提取应用级断言证据（单轮）。"""
+        """从成功的 ``assert_*`` 调用提取应用级断言证据（单轮）。
+
+        ``passed`` 必须是**真实结果**（缺口 5 末条的 bug 修复）：历史实现硬编码
+        ``passed=True``，加上调用方已按 ``inv.success`` 过滤，所有进 Profile 的断言证据
+        因此都被标成通过 —— 连 ``inv.status == FAILED`` 的记录也不例外。
+        """
         observations: list[AssertionObservation] = []
         for inv in invocations:
             if inv.tool not in _ASSERT_TOOLS:
@@ -304,7 +363,7 @@ class DcProfileDistiller:
                     page_signature=inv.page_path or "unknown",
                     kind=inv.tool.value,
                     target=target,
-                    passed=True,
+                    passed=bool(inv.success) and inv.status == DcToolStatus.SUCCEEDED,
                     app_level=True,
                 )
             )
@@ -637,7 +696,12 @@ class DcProfileDistiller:
         )
         self.registry.save_candidate(updated)
 
-        runner = self.runner or HypiumRunner(self.settings.resolved_runtime_home)
+        # 准入回放也产出执行结果分析（缺口 1）：分析是 advisory，不影响晋级门禁读的 passed。
+        runner = self.runner or make_hypium_runner(
+            self.settings,
+            bundle_name=candidate.bundle_name,
+            device_id=getattr(self, "device_id", "") or self.settings.harmony_device,
+        )
         return await asyncio.to_thread(runner.execute, generated, 1)
 
     def _write_json(self, session: DcSession, relative: str, payload) -> None:

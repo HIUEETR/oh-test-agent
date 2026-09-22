@@ -1,0 +1,5 @@
+02-10 11:00:00.101  4321  4321 I C01310/com.zhihu.hmos/ArkUI: pageIndex 1 pagePath pages/Search
+02-10 11:00:01.220  4321  4321 I C01310/com.zhihu.hmos/Network: request finished in 213ms
+02-10 11:00:02.330  4321  4789 I C01310/com.zhihu.hmos/ImageLoader: decode success
+02-10 11:00:03.440  4321  4321 I C01310/com.zhihu.hmos/ArkUI: [Engine Log] onPageHide pages/Search
+02-10 11:00:04.550  9001  9001 I C01310/com.other.app/Service: keep alive heartbeat

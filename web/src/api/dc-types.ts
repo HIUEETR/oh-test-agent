@@ -120,7 +120,9 @@ export type DcEventType =
   | "screenshot_captured" | "ui_tree_captured"
   | "assistant_message" | "thinking" | "agent_text" | "message_delta"
   | "token_usage_updated"
-  | "script_generated" | "case_suggested" | "tier_changed" | "needs_attention" | "error";
+  | "script_generated" | "case_suggested" | "tier_changed" | "needs_attention" | "error"
+  // Phase 2：运行中即时发现的应用异常（后端 DcEventType.ANOMALY_DETECTED）。
+  | "anomaly_detected";
 
 /**
  * `message_delta` 事件 payload 契约（token 级流式增量）：
@@ -150,6 +152,8 @@ export const DC_EVENT_TYPES: DcEventType[] = [
   "assistant_message", "thinking", "agent_text", "message_delta",
   "token_usage_updated",
   "script_generated", "case_suggested", "tier_changed", "needs_attention", "error",
+  // Phase 2：运行中即时发现的应用异常。
+  "anomaly_detected",
 ];
 
 /** DC 事件 */

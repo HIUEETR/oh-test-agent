@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import re
 import shutil
 import uuid
@@ -118,6 +119,8 @@ _EXECUTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SLUG_FALLBACK_RE = re.compile(r"case-[0-9a-f]{6}")
 """``CaseBuilder.slugify`` 对纯中文标题的随机兜底形态 ``case-<uuid4 hex6>``。"""
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # 模块级工具
@@ -184,6 +187,19 @@ def scenario_for_trace(trace: Any) -> ScenarioKind:
 def _new_execution_id() -> str:
     """生成 ``exec-<UTC 时间戳>-<6 位十六进制>`` 形式的执行 ID（对齐 ``run-``/``dc-`` 习惯）。"""
     return f"exec-{utc_now():%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+
+
+DEFECT_TAG_PREFIX = "defect:"
+"""复现用例与缺陷的关联标签前缀。
+
+放在 ``TestCaseSpec.tags`` 里而不是给 IR 加新字段：``tags`` 本就是自由标注，
+``GET /api/cases?tag=defect:<id>`` 因此可以直接反查「由某缺陷生成的用例」。
+"""
+
+
+def _defect_ids_from_spec(spec: TestCaseSpec) -> list[str]:
+    """从用例标签里取出关联的缺陷 id（重跑结果据此回写缺陷状态）。"""
+    return [tag[len(DEFECT_TAG_PREFIX) :] for tag in spec.tags if str(tag).startswith(DEFECT_TAG_PREFIX)]
 
 
 def _canonical_spec_json(spec: TestCaseSpec) -> str:
@@ -304,6 +320,7 @@ class CaseLibrary:
         runner_factory: Callable[[Path, float], HypiumRunner] | None = None,
         xdevice_runner_factory: Callable[[Path, float], XDeviceRunner] | None = None,
         analyzer: ExecutionAnalyzer | None = None,
+        defect_repository: Any | None = None,
     ) -> None:
         self.repository = repository
         self.cases_root = Path(cases_root).resolve()
@@ -313,6 +330,9 @@ class CaseLibrary:
         self.runner_factory = runner_factory
         self.xdevice_runner_factory = xdevice_runner_factory
         self.analyzer = analyzer
+        # 缺陷仓库（可选注入，Phase 3/4）：注入后重跑发现的异常会落库，
+        # 且复现用例的 symptom_reproduced 会回写缺陷状态。
+        self.defect_repository = defect_repository
 
     # ------------------------------------------------------------------
     # 路径
@@ -456,6 +476,8 @@ class CaseLibrary:
             "warnings": list(built.warnings),
             "counts": dict(built.counts),
             "omitted_actions": list(built.omitted_actions),
+            # 录制期间失败的 invocation：失败动作不进脚本，但必须可追溯（缺口 5 末条）。
+            "source_failures": list(built.source_failures),
             "safety_violations": list(violations),
             # 与历史脚本配置同义的证据目录：HypiumRunner 会写 <vN>/hypium/attempt-XX/。
             "report_dir": str((directory / HYPIUM_DIRNAME).resolve()),
@@ -767,7 +789,52 @@ class CaseLibrary:
         execution.analysis = outcome.analysis
         self._write_execution_evidence(directory, execution)
         self.repository.record_execution(execution)
+        # 缺陷对账（Phase 3/4）：把本次重跑发现的异常记入缺陷库，并按 bug-repro
+        # 场景回写「已复现 / 未复现」。分析仍然是 advisory，绝不改写 passed。
+        try:
+            self._record_defects_for_execution(spec=spec, execution=execution)
+        except Exception as exc:  # noqa: BLE001 - 缺陷落库失败不得影响用例执行结论
+            logger.warning("defect recording failed for case %s: %s: %s", spec.case_id, type(exc).__name__, exc)
         return execution
+
+    def _record_defects_for_execution(self, *, spec: TestCaseSpec, execution: CaseExecutionRecord) -> None:
+        """把一次用例重跑的 finding 落库（可选），并处理 bug-repro 的状态回写。"""
+        if self.defect_repository is None:
+            return
+        from ..analysis.defects import DefectRecorder, DefectStatus
+
+        analysis = execution.analysis
+        findings = list(analysis.findings) if analysis is not None else []
+        if findings:
+            DefectRecorder(self.defect_repository).record_from_findings(
+                findings=findings,
+                bundle_name=spec.bundle_name,
+                case_id=spec.case_id,
+                device_id=getattr(execution, "device_id", "") or "",
+            )
+        defect_ids = _defect_ids_from_spec(spec)
+        if not defect_ids:
+            return
+        reproduced = analysis.symptom_reproduced if analysis is not None else None
+        status = {
+            True: DefectStatus.CONFIRMED,
+            False: DefectStatus.NOT_REPRODUCED,
+        }.get(reproduced)
+        for defect_id in defect_ids:
+            if status is None:
+                # 结论未知：保留 suspected，只记录执行标识与一条说明。
+                self.defect_repository.patch(
+                    defect_id,
+                    repro_execution_id=execution.execution_id,
+                    notes=f"重跑完成但症状复现结论未知（status={execution.status}）",
+                )
+                continue
+            self.defect_repository.patch(
+                defect_id,
+                status=status,
+                repro_execution_id=execution.execution_id,
+                notes=f"复现用例 {spec.case_id} 重跑结论：{status.value}",
+            )
 
     def _run_standalone(
         self,

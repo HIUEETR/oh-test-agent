@@ -80,6 +80,11 @@ SYMPTOM_KINDS: dict[str, frozenset[AnomalyKind]] = {
     "anr": frozenset({AnomalyKind.ANR}),
     "page_unresponsive": frozenset({AnomalyKind.PAGE_UNRESPONSIVE}),
     "layout_anomaly": frozenset({AnomalyKind.LAYOUT_ANOMALY}),
+    # 缺口 5 的补齐：每个 AnomalyKind 都必须能进入缺陷复现链路。
+    # ``memory_growth`` 原先不在任何条目里，``defect_to_bug_repro_request`` 因此无法为它
+    # 生成能判出「已复现」的复现用例（Phase 4 反向映射的前置条件）。
+    "memory_growth": frozenset({AnomalyKind.MEMORY_GROWTH}),
+    "other": frozenset({AnomalyKind.MEMORY_GROWTH}),
 }
 
 
@@ -248,6 +253,15 @@ class _AnalysisInput:
     timed_out: bool = False
     screen_size: tuple[int, int] | None = None
     extra_metrics: dict[str, Any] = field(default_factory=dict)
+    in_run_stall: bool = False
+    """Live 运行中由 :class:`~harmony_test_agent.analysis.in_run.InRunDetector` 观测到的
+    结构停滞信号（缺口 3：Live 没有 replay stdout，信号 (a) 必须另有来源）。"""
+
+    in_run_stall_finding: AnomalyFinding | None = None
+    """触发 ``in_run_stall`` 的那条运行中 finding。
+
+    事后分析据此**继承它的 page_path / action_id / target**：否则升级出的 critical finding
+    与它自己归并键不同，同一次前台丢失会在缺陷库里裂成两条，而闭环可能选中没有上下文的那条。"""
 
 
 class ExecutionAnalyzer:
@@ -264,11 +278,17 @@ class ExecutionAnalyzer:
         device_factory: Callable[[str], DeviceAdapter] | None = None,
         thresholds: ScreenThresholds = DEFAULT_SCREEN_THRESHOLDS,
         collect_logs: bool = True,
+        collect_logs_on_success: bool = False,
     ) -> None:
         self.device_factory = device_factory
         self.thresholds = thresholds
         self.collect_logs = collect_logs
+        self.collect_logs_on_success = collect_logs_on_success
         self._devices: dict[str, Any] = {}
+
+    def _needs_logs(self, *, passed: bool) -> bool:
+        """是否采集 hilog 尾部：干净通过默认不采（除非显式打开 ``collect_logs_on_success``）。"""
+        return self.collect_logs_on_success or not passed
 
     # ------------------------------------------------------------------ 公开入口
 
@@ -318,7 +338,7 @@ class ExecutionAnalyzer:
                 hard_checkpoint_failure=_hard_checkpoint_failure(replay),
                 symptom_kind=symptom_kind,
                 since=trace.started_at if trace else None,
-                need_logs=replay.status != "passed",
+                need_logs=self._needs_logs(passed=replay.status == "passed"),
                 timed_out=replay.timed_out or replay.status == "timed_out",
                 screen_size=self._snapshot_size(trace),
             )
@@ -333,6 +353,40 @@ class ExecutionAnalyzer:
                 evidence_dir=self._safe_attempt_dir(replay, run_dir),
             )
 
+    def analyze_dc_script(
+        self,
+        replay: ReplayResult,
+        *,
+        run_dir: Path,
+        bundle_name: str,
+        device_id: str,
+        session_id: str,
+        symptom_kind: str | None = None,
+    ) -> ExecutionAnalysis:
+        """分析一次直流（DC）录制脚本的诊断执行；``subject="dc_script"``。
+
+        实现上委托 :meth:`analyze_replay` 后改写 ``subject`` / ``subject_id``：DC 脚本
+        执行**没有** trace 上下文，因此 ``need_logs`` 独立判定（``replay.status != "passed"``
+        才采 hilog），其余分析步骤（faultlog 索引、白屏、布局、无响应、压测指标）完全复用。
+
+        这是缺口 1 里 "``ExecutionAnalysis.subject`` 声明了 ``dc_script`` 却从未被构造"
+        的修复点。
+        """
+        analysis = self.analyze_replay(
+            replay,
+            run_dir=run_dir,
+            bundle_name=bundle_name,
+            device_id=device_id,
+            trace=None,
+            symptom_kind=symptom_kind,
+        )
+        return analysis.model_copy(
+            update={
+                "subject": "dc_script",
+                "subject_id": f"{session_id or run_dir.name}#attempt-{replay.attempt:02d}",
+            }
+        )
+
     def analyze_run(self, trace: RunTrace, run_dir: Path) -> ExecutionAnalysis:
         """分析一次 Live 运行：合并各 attempt 的 finding，并扫描 Live 截图与布局。"""
         run_dir = Path(run_dir)
@@ -343,7 +397,9 @@ class ExecutionAnalyzer:
             replays = list(trace.replays)
             stdout_text = "\n".join(f"{item.command.stdout}\n{item.command.stderr}" for item in replays)
             generated = next((item.generated_result for item in reversed(replays) if item.generated_result), None)
-            need_logs = bool(trace.agent_error) or trace.replay_status in {"failed", "partial"}
+            need_logs = (
+                bool(trace.agent_error) or trace.replay_status in {"failed", "partial"} or self.collect_logs_on_success
+            )
             analysis_input = _AnalysisInput(
                 subject="live_run",
                 subject_id=trace.run_id,
@@ -363,6 +419,13 @@ class ExecutionAnalyzer:
                 need_logs=need_logs,
                 timed_out=any(item.timed_out for item in replays),
                 screen_size=self._snapshot_size(trace),
+                # 缺口 3：Live 没有 replay stdout，无响应判定的信号 (a) 来自运行中检测。
+                # 同时把触发它的那条 finding 传下去：升级后的 critical finding 必须继承
+                # 它的 page_path / action_id / target，才能与它归并成同一条缺陷。
+                in_run_stall_finding=next(
+                    (item for item in trace.defects if item.kind == AnomalyKind.PAGE_UNRESPONSIVE),
+                    None,
+                ),
             )
             analysis = self._analyze(analysis_input, fetch_layout=self._can_fetch_layout(analysis_input))
             symptom_kind = "functional" if trace.scenario == ScenarioKind.BUG_REPRODUCTION else None
@@ -406,7 +469,7 @@ class ExecutionAnalyzer:
                 hard_checkpoint_failure=(status == "failed" and not passed),
                 symptom_kind=symptom_kind,
                 since=None,
-                need_logs=not passed or status == "timed_out",
+                need_logs=not passed or status == "timed_out" or self.collect_logs_on_success,
                 timed_out=status == "timed_out" or bool(getattr(result, "timed_out", False)),
             )
             return self._analyze(analysis_input, fetch_layout=self._can_fetch_layout(analysis_input))
@@ -428,6 +491,10 @@ class ExecutionAnalyzer:
         if stress_finding is not None:
             findings.append(stress_finding)
         findings = self._escalate_blank_screen(findings)
+        for finding in findings:
+            # 只有 InRunDetector 已经标过 in_run 的才保留；其余都是事后分析发现。
+            if finding.phase != "in_run":
+                finding.phase = "post_hoc"
         healthy = not any(finding.severity in ADVISORY_SEVERITIES for finding in findings)
         metrics: dict[str, Any] = {
             "log": coverage.metrics(),
@@ -629,7 +696,7 @@ class ExecutionAnalyzer:
     def _detect_unresponsive(
         self, analysis_input: _AnalysisInput, tail_run: int, layout_stale: bool
     ) -> list[AnomalyFinding]:
-        """第 3 步：两个独立信号（超时标记 + 帧/树停滞）才判页面无响应。"""
+        """第 3 步：两个独立信号（超时标记 **或** 运行中结构停滞 + 帧/树停滞）才判页面无响应。"""
         try:
             match = TIMEOUT_MARKER_RE.search(analysis_input.stdout_text or "")
         except Exception as exc:  # 文本异常不得中断分析
@@ -639,14 +706,28 @@ class ExecutionAnalyzer:
         stalled = tail_run >= 2 or layout_stale
         if not stalled:
             return []
+        # 继承触发信号的那条运行中 finding 的上下文：升级后的 critical finding 必须与它
+        # 归并成同一条缺陷（否则同一次前台丢失会裂成两条，闭环可能选到没有上下文的那条）。
+        origin = analysis_input.in_run_stall_finding
+        origin_evidence = dict(origin.evidence) if origin is not None and origin.evidence else {}
         evidence: dict[str, Any] = {
             "timeout_marker": bool(match),
             "timeout_match": match.group(0) if match else "",
             "timed_out_status": analysis_input.timed_out,
+            # 缺口 3：Live 运行没有 replay stdout，信号 (a) 由 InRunDetector 的结构停滞观测提供
+            "in_run_stall": analysis_input.in_run_stall or origin is not None,
             "identical_tail_frames": tail_run,
             "layout_stale": layout_stale,
             "stress_context": analysis_input.stress_context,
         }
+        if origin is not None:
+            evidence["in_run_origin"] = origin.summary_zh
+            if origin.action_id:
+                evidence["action_id"] = origin.action_id
+            for key in ("tool", "target"):
+                value = origin_evidence.get(key)
+                if value:
+                    evidence[key] = value
         if marker:
             return [
                 AnomalyFinding(
@@ -655,6 +736,24 @@ class ExecutionAnalyzer:
                     summary_zh="页面无响应：回放等待超时且画面 / UI 树停滞",
                     detail="超时标记与帧（或 UI 树）停滞两个信号同时命中",
                     source="stdout",
+                    phase="replay",
+                    action_id=origin.action_id if origin is not None else "",
+                    page_path=origin.page_path if origin is not None else "",
+                    evidence=evidence,
+                )
+            ]
+        if evidence["in_run_stall"]:
+            return [
+                AnomalyFinding(
+                    kind=AnomalyKind.PAGE_UNRESPONSIVE,
+                    severity="critical",
+                    summary_zh="页面无响应：多个动作后页面结构持续无变化",
+                    detail="运行中检测（InRunDetector）观测到结构停滞，且帧或 UI 树停滞",
+                    source="screenshot",
+                    phase="in_run",
+                    action_id=origin.action_id if origin is not None else "",
+                    page_path=origin.page_path if origin is not None else "",
+                    screenshot=origin.screenshot if origin is not None else "",
                     evidence=evidence,
                 )
             ]

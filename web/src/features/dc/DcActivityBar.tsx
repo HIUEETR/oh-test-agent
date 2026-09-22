@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { useDcConsole } from "../../stores/dc-console";
+import type { ResolveAction } from "../../api/dc-client";
 import type { DcActivityState, DcContinuationContext } from "../../api/dc-types";
 
 /** 本地每秒 tick：让「已耗时」「剩余时间」在没有 SSE 事件时也持续走时。 */
@@ -89,6 +90,14 @@ export function continuationHint(continuation: DcContinuationContext | null): st
   return goal ? `${prefix}，原始目标已保留：${goal}` : `${prefix}，上下文已保留，可继续`;
 }
 
+/** ``needs_attention`` 四个处置动作的展示标签与说明（与后端 ResolveAttentionRequest 一致）。 */
+export const RESOLVE_ACTIONS: Array<{ action: ResolveAction; label: string; hint: string }> = [
+  { action: "reobserve", label: "重新观测", hint: "重新采集截图与 UI 层级确认设备状态" },
+  { action: "confirm_effect", label: "确认已生效", hint: "人工确认副作用已经发生，可继续" },
+  { action: "retry", label: "重试", hint: "副作用未发生，重放该动作" },
+  { action: "terminate", label: "终止轮次", hint: "停止本轮并保留现场" },
+];
+
 export function DcActivityBar() {
   const activity = useDcConsole((state) => state.activity);
   const cancelStatus = useDcConsole((state) => state.cancelStatus);
@@ -96,6 +105,9 @@ export function DcActivityBar() {
   const attentionReason = useDcConsole((state) => state.attentionReason);
   const attentionOptions = useDcConsole((state) => state.attentionOptions);
   const continuation = useDcConsole((state) => state.continuation);
+  const resolveAttention = useDcConsole((state) => state.resolveAttention);
+  const activeSessionId = useDcConsole((state) => state.activeSessionId);
+  const [resolving, setResolving] = useState<string>("");
 
   const active = activity.kind !== "idle" || cancelStatus !== "idle" || busy;
   const now = useNowTicker(active, `${activity.epoch}|${activity.kind}|${activity.operationId}`);
@@ -107,6 +119,19 @@ export function DcActivityBar() {
   const elapsed = activityElapsedMs(activity, now);
   const status = activityStatusText(activity, now);
   const label = activity.phaseLabel || (busy ? "正在等待模型" : "已结束");
+  const attention = activity.kind === "attention";
+  const canResolve = attention && Boolean(activeSessionId) && Boolean(resolveAttention);
+
+  /** 处置按钮：真正发请求（历史实现只把这四个选项渲染成纯文本，无法解除阻塞）。 */
+  const onResolve = async (action: ResolveAction) => {
+    if (!canResolve || resolving) return;
+    setResolving(action);
+    try {
+      await resolveAttention(action);
+    } finally {
+      setResolving("");
+    }
+  };
 
   return (
     <div
@@ -116,7 +141,7 @@ export function DcActivityBar() {
     >
       <div className="dc-activity-main">
         <span className="dc-activity-spinner" aria-hidden="true">
-          {activity.kind === "attention"
+          {attention
             ? <AlertTriangle size={13} />
             : active && activity.kind !== "idle"
               ? <Loader2 size={13} className="dc-activity-spin" />
@@ -135,12 +160,28 @@ export function DcActivityBar() {
         <span>最后进度 {lastProgressText(activity)}</span>
         {cancelStatus === "confirming" && <span className="dc-activity-cancel">正在确认设备状态</span>}
       </div>
-      {activity.kind === "attention" && (attentionReason || attentionOptions.length > 0) && (
+      {attention && (attentionReason || attentionOptions.length > 0) && (
         <div className="dc-activity-attention">
           {attentionReason && <span>{attentionReason}</span>}
           {attentionOptions.length > 0 && (
             <span className="dc-activity-options">{attentionOptions.join(" / ")}</span>
           )}
+        </div>
+      )}
+      {attention && (
+        <div className="dc-activity-resolve" role="group" aria-label="处置未确认的设备副作用">
+          {RESOLVE_ACTIONS.map((item) => (
+            <button
+              key={item.action}
+              type="button"
+              className="dc-resolve-btn"
+              title={item.hint}
+              disabled={!canResolve || Boolean(resolving)}
+              onClick={() => void onResolve(item.action)}
+            >
+              {resolving === item.action ? "处理中…" : item.label}
+            </button>
+          ))}
         </div>
       )}
       {!active && hint && <div className="dc-activity-continuation">{hint}</div>}
