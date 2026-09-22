@@ -162,7 +162,10 @@ class StandaloneEmitter:
                     lines.append(f"        # {step.comment}")
                 continue
             lines.append(f"        # 步骤 {number}：{step.title_zh}")
-            lines += self._render_action(step)
+            if _is_optional_click(step):
+                lines += _render_optional_click(step)
+            else:
+                lines += self._render_action(step)
             for checkpoint in step.checkpoints:
                 lines += render_standalone_checkpoint(checkpoint, indent=DEFAULT_INDENT)
         return lines
@@ -298,6 +301,37 @@ def _numbered_steps(steps: list[TestStepSpec], start: int = 1) -> list[tuple[int
 def _coordinate_comment(step: TestStepSpec) -> str:
     label = (step.locator.target_label if step.locator is not None else "") or ""
     return f"  # coordinate fallback for {label!r}" if label else "  # coordinate fallback"
+
+
+#: 条件步骤的探测变量名（脚本内局部变量，避免与模板其它变量冲突）。
+OPTIONAL_TARGET_VAR = "_conditional_target"
+
+
+def _is_optional_click(step: TestStepSpec) -> bool:
+    """条件点击步骤：``optional`` 只对「有点击动作 + 有选择器」的步骤生效。
+
+    坐标兜底的点击没有可探测的选择器，因此不参与降级（它本来也不会因控件缺失而失败）。
+    """
+    return bool(step.optional and step.action == StepAction.CLICK and step.locator is not None)
+
+
+def _render_optional_click(step: TestStepSpec) -> list[str]:
+    """渲染条件点击：先探测控件，命中才点，未命中记入产物而不是判失败。
+
+    真机复盘 dc-20260922T171655Z-6fff3547：``p2_search_clear`` 只在搜索框有输入时渲染，
+    而脚本 setup 是冷启动 ⇒ 录制时的「先清空再输入」在回放时第一步就
+    ``Can't find component``。这类控件的正确语义是「有就清掉、没有本来就已经干净」。
+    """
+    selector = _selector_or_point(step)
+    label = step.text or (step.locator.value if step.locator is not None else "")
+    return [
+        "        # 条件步骤：控件状态条件存在（真机复盘 dc-20260922T171655Z-6fff3547）",
+        f"        {OPTIONAL_TARGET_VAR} = driver.find_component({selector})",
+        f"        if {OPTIONAL_TARGET_VAR} is not None:",
+        f"            driver.touch({OPTIONAL_TARGET_VAR})",
+        "        else:",
+        f"            result.setdefault('skipped_conditional_steps', []).append({label!r})",
+    ]
 
 
 def _selector_or_point(step: TestStepSpec) -> str:

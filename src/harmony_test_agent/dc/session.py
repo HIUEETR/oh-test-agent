@@ -905,7 +905,7 @@ class DcSession:
         return jpeg_bytes, ui_tree_digest
 
     def _observe_foreground_identity(self, hierarchy: Any) -> None:
-        """从刚采到的 UI 层级里记住「目标应用身份」``(bundle, ability)``。
+        """从刚采到的 UI 层级里记住「最近一次非系统前台应用身份」``(bundle, ability)``。
 
         设备对 ``foreground_app`` 的 ability 常报 ``unknown``（桌面尤其如此），而脚本生成与
         Profile 蒸馏都需要真实 bundle+ability 才能产出可回放资产。focused 窗口的
@@ -913,11 +913,11 @@ class DcSession:
         不依赖模型主动调用工具（30e 复盘：模型只在任务开始时调了一次 foreground_app，
         那一次记到的是桌面 + ability=unknown，导致整条身份链失效）。
 
-        只认第一次命中的非系统界面：会话中途可能回到桌面、弹出输入法，它们不应改写会话身份。
-        观测失败静默跳过，绝不影响上下文采集主流程。
+        **最近一次观测胜出**，但系统界面（桌面 / 输入法 / 最近任务）永不改写：会话开始时前台
+        往往还是**上一个任务遗留的应用**（真机复盘 dc-20260922T171655Z-6fff3547：开始时前台是
+        网易云音乐，录制动作却全在会话中途启动的知乎++），「首次命中即锁死」会把脚本 setup
+        写成遗留应用、脚本体写成目标应用。观测失败静默跳过，绝不影响上下文采集主流程。
         """
-        if self.observed_identity is not None:
-            return
         try:
             foreground = parse_foreground_hierarchy(hierarchy)
         except Exception:  # noqa: BLE001 - 观测是尽力而为，失败不影响采集
@@ -971,10 +971,16 @@ class DcSession:
         应用身份缺省（或只给了一半）时按会话录制推断，与蒸馏端点共用同一推断器；
         推断不出则回退占位身份 ``com.example.app`` / ``EntryAbility``——脚本仍会生成，
         但只作为诊断脚本（占位警告保留，行为与改动前一致）。
+
+        **身份一致性**：显式传入的 bundle 与会话录制推断出的 bundle 不一致时，仍然按显式值
+        生成（用户可能确实想换目标），但会把矛盾写进 ``warnings``，并如实记录推断来源 ——
+        否则「脚本 setup 驱动 A、脚本体录制自 B」这种产物会静默流到回放（真机复盘
+        dc-20260922T171655Z-6fff3547）。
         """
         explicit = (bundle_name, main_ability) if (bundle_name and main_ability) else None
         # 计划 7：优先用轮次结束自动推断出的身份，其次现场推断，最后才是占位身份。
-        identity = explicit or self.suggested_identity or infer_session_identity(self)
+        recorded = infer_session_identity(self)
+        identity = explicit or self.suggested_identity or recorded
         resolved_bundle, resolved_ability = identity or ("com.example.app", "EntryAbility")
         generator = DcHypiumGenerator(self.artifacts, min_observed_rounds=self.settings.profile_verification_rounds)
         # 把本会话**已采集的全部帧**交给构建器（不再只给最新一帧）：时间戳实例 key 的
@@ -992,10 +998,23 @@ class DcSession:
             main_ability=resolved_ability,
             profile=self._associated_profile(),
         )
+        if explicit is not None and recorded is not None and explicit[0] != recorded[0]:
+            self.script.warnings.append(
+                f"explicit target {explicit[0]} contradicts the recorded session identity {recorded[0]}; "
+                "the script setup will drive the explicit target while its steps were recorded on the other app"
+            )
         self._emit(
             DcEventType.SCRIPT_GENERATED,
             "已生成 Hypium 脚本",
-            {"included": self.script.included_operations, "omitted": len(self.script.omitted_operations)},
+            {
+                "included": self.script.included_operations,
+                "omitted": len(self.script.omitted_operations),
+                "bundle_name": resolved_bundle,
+                "identity_source": "explicit"
+                if explicit is not None
+                else ("suggested" if self.suggested_identity else "recorded"),
+                "recorded_bundle_name": recorded[0] if recorded else "",
+            },
         )
         self.save_state()
         return self.script

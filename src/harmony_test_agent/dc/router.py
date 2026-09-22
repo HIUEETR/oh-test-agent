@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,7 +21,7 @@ from ..config import Settings
 from ..devices.base import DeviceError
 from ..profiles import ProfileTransitionError
 from ..runner import make_hypium_runner
-from .distill import resolve_distill_identity
+from .distill import infer_identity_from_records, infer_session_identity, resolve_distill_identity
 from .models import (
     SIDE_EFFECT_TOOLS,
     TOOL_TIER,
@@ -36,6 +38,8 @@ from .models import (
 )
 from .session import DcSession, DcSessionManager
 from .tools import _TOOL_REGISTRY
+
+logger = logging.getLogger(__name__)
 
 # 断言工具清单（决定 confidence 是否降为 medium 的同一集合；供 GET /api/dc/tools 投影）。
 ASSERTION_TOOL_NAMES: tuple[DcToolName, ...] = (
@@ -117,8 +121,18 @@ def _format_sse(event: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter:
-    """创建并返回 DC 模式 APIRouter（prefix=/api/dc）。"""
+def create_dc_router(
+    settings: Settings,
+    manager: DcSessionManager,
+    *,
+    defect_recorder: Any | None = None,
+) -> APIRouter:
+    """创建并返回 DC 模式 APIRouter（prefix=/api/dc）。
+
+    ``defect_recorder`` 可选：注入后，DC 脚本诊断执行产出的 ``analysis.findings`` 会落进
+    缺陷库并写回会话 ``defects``（缺口：DC 脚本执行历史上「发现了却没记录」，真机复盘
+    dc-20260922T171655Z-6fff3547 的 ``locator_stale`` 只存在于 attempt 的 analysis.json）。
+    """
     router = APIRouter(prefix="/api/dc", tags=["dc"])
 
     # ------------------------------------------------------------------
@@ -459,9 +473,21 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
         lock = script_locks.setdefault(key, asyncio.Lock())
         if lock.locked():
             raise HTTPException(status_code=409, detail="script is already running")
-        # 缺口 1 的修复点：DC 脚本执行历史上零分析。身份从会话快照 / 会话内记录的前台应用读。
+        # 缺口 1 的修复点：DC 脚本执行历史上零分析。身份从会话录制证据推断（最近一次胜出）。
         session_id = relative.parts[0]
         bundle_name, device_id = _dc_script_identity(settings, manager, session_id)
+        # 一致性门禁：脚本头部写死的 BUNDLE_NAME 是脚本实际驱动的应用；它与会话录制身份不一致
+        # 时拒绝执行 —— 否则会得到一个「驱动 A、步骤录制自 B」的运行，失败信息（找不到控件）
+        # 完全指不到真正的原因（真机复盘 dc-20260922T171655Z-6fff3547）。
+        script_bundle = _script_bundle_name(candidate)
+        if script_bundle and bundle_name and script_bundle != bundle_name:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"script targets {script_bundle} but the recording was made on {bundle_name}; "
+                    "regenerate the script from the session instead of running it"
+                ),
+            )
         if not getattr(settings, "analysis_dc_scripts", True):
             runner = make_hypium_runner(settings, analyze=False)
         else:
@@ -473,14 +499,25 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
                 session_id=session_id,
             )
         results = []
+        defect_ids: list[str] = []
         async with lock:
             for attempt in range(1, body.attempts + 1):
                 result = await asyncio.to_thread(runner.execute_diagnostic, candidate, attempt)
                 results.append(result)
+                defect_ids += _record_script_findings(
+                    settings=settings,
+                    manager=manager,
+                    defect_recorder=defect_recorder,
+                    session_id=session_id,
+                    bundle_name=bundle_name or script_bundle,
+                    device_id=device_id,
+                    result=result,
+                )
         return {
             "script_id": body.script_id,
             "session_id": relative.parts[0],
             "bundle_name": bundle_name,
+            "defect_ids": list(dict.fromkeys(defect_ids)),
             "results": [result.model_dump(mode="json") for result in results],
         }
 
@@ -490,32 +527,105 @@ def create_dc_router(settings: Settings, manager: DcSessionManager) -> APIRouter
 def _dc_script_identity(settings: Settings, manager: DcSessionManager, session_id: str) -> tuple[str, str]:
     """解析 DC 脚本执行所需的应用身份与设备序列号。
 
-    顺序：内存会话（前台应用 / 上一次确认目标）→ 会话快照 ``dc_session.json`` 的
-    ``continuation.last_foreground_app`` → 空串（此时分析仍会跑，但没有归属信号，
-    finding 会按 hilog 的降级规则处理）。
+    顺序：内存会话的录制证据推断（与脚本生成同一个推断器，最近一次观测胜出）→
+    磁盘会话快照的录制证据推断 → 快照 ``continuation.last_foreground_app`` →
+    空串（此时分析仍会跑，但没有归属信号，finding 会按 hilog 的降级规则处理）。
     """
     device_id = settings.harmony_device
     bundle_name = ""
-    session = None
     try:
         session = manager.get(session_id)
     except Exception:  # noqa: BLE001 - 历史会话不在内存里属正常情况
         session = None
     if session is not None:
         device_id = getattr(session, "device_id", None) or device_id
+        identity = infer_session_identity(session)
+        if identity is not None:
+            return identity[0], device_id
         bundle_name = str(getattr(session, "last_foreground_app", "") or "")
         if not bundle_name:
             bundle_name = _continuation_bundle(getattr(session, "continuation", None))
-        if not bundle_name:
-            suggested = getattr(session, "suggested_identity", None)
-            if suggested:
-                bundle_name = str(suggested[0] or "")
     else:
         snapshot = manager.store.load(session_id)
         if snapshot is not None:
             device_id = str(getattr(snapshot, "device_id", None) or device_id)
+            identity = infer_identity_from_records(list(getattr(snapshot, "invocations", []) or []))
+            if identity is not None:
+                return identity[0], device_id
             bundle_name = _continuation_bundle(getattr(snapshot, "continuation", None))
     return bundle_name, device_id
+
+
+def _script_bundle_name(path: Path) -> str:
+    """从生成的脚本里读回 ``BUNDLE_NAME``（脚本实际驱动的应用）。
+
+    以脚本文本为准而不是配置 JSON：手改过脚本的情况必须按「真正会跑什么」判定。
+    解析失败返回空串（不做拦截）。
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = re.search(r"^BUNDLE_NAME\s*=\s*['\"](?P<bundle>[^'\"]+)['\"]", text, re.M)
+    return match.group("bundle") if match else ""
+
+
+def _record_script_findings(
+    *,
+    settings: Settings,
+    manager: DcSessionManager,
+    defect_recorder: Any | None,
+    session_id: str,
+    bundle_name: str,
+    device_id: str,
+    result: Any,
+) -> list[str]:
+    """把一次 DC 脚本诊断执行的 findings 落进缺陷库与会话 ``defects``。
+
+    DC 脚本执行是「诊断」路径：它不进任何 Run 的 trace/report，但失败原因（例如
+    ``locator_stale``）必须可见 —— 否则 GUI 与 ``GET /api/defects`` 都看不到脚本已经跑不通。
+    任何异常都只记日志，绝不影响执行结果的返回。
+    """
+    analysis = getattr(result, "analysis", None)
+    findings = list(getattr(analysis, "findings", []) or []) if analysis is not None else []
+    if not findings:
+        return []
+    defect_ids: list[str] = []
+    if defect_recorder is not None:
+        try:
+            records = defect_recorder.record_from_findings(
+                findings=findings,
+                bundle_name=bundle_name,
+                session_id=session_id,
+                device_id=device_id,
+            )
+            defect_ids = [record.defect_id for record in records]
+        except Exception as exc:  # noqa: BLE001 - 落库是附加动作
+            logger.warning("cannot record defects for %s: %s: %s", session_id, type(exc).__name__, exc)
+    _attach_findings_to_session(manager, session_id, findings)
+    return defect_ids
+
+
+def _attach_findings_to_session(manager: DcSessionManager, session_id: str, findings: list[Any]) -> None:
+    """把 findings 追加到会话 ``defects`` 并发事件（内存会话与磁盘快照两条路都覆盖）。"""
+    try:
+        session = manager.get(session_id)
+    except Exception:  # noqa: BLE001 - 历史会话不在内存里属正常情况
+        session = None
+    if session is not None:
+        session.defects.extend(findings)
+        for finding in findings:
+            session._emit(DcEventType.ANOMALY_DETECTED, finding.summary_zh, finding.model_dump(mode="json"))
+        session.save_state()
+        return
+    try:
+        snapshot = manager.store.load(session_id)
+        if snapshot is None:
+            return
+        snapshot.defects.extend(findings)
+        manager.store.save(snapshot)
+    except Exception as exc:  # noqa: BLE001 - 写回失败不影响执行结果
+        logger.warning("cannot attach findings to session %s: %s: %s", session_id, type(exc).__name__, exc)
 
 
 def _continuation_bundle(continuation: Any) -> str:

@@ -447,12 +447,12 @@ def test_resolve_identity_prefers_explicit_params_then_infers(tmp_path: Path) ->
 
 
 # ---------------------------------------------------------------------------
-# 会话自观测身份（最高优先级）
+# 会话自观测身份（兜底优先级）
 # ---------------------------------------------------------------------------
 
 
 def test_infer_identity_prefers_session_observed_identity(tmp_path: Path) -> None:
-    """会话自观测到的 (bundle, ability) 优先于任何录制推断。
+    """没有任何工具证据时，会话自观测到的 (bundle, ability) 兜底。
 
     回归背景（30e 复盘）：模型只会在任务开始时调一次 foreground_app，那一次前台是桌面，
     记录到 ``com.ohos.sceneboard / unknown``；而目标应用的 bundle+ability 其实就在每次
@@ -467,10 +467,27 @@ def test_infer_identity_prefers_session_observed_identity(tmp_path: Path) -> Non
     assert infer_session_identity(session) == ("com.huawei.hmos.calendar", "MainAbility")  # type: ignore[arg-type]
 
 
-def test_observed_identity_wins_over_successful_start_app(tmp_path: Path) -> None:
+def test_latest_tool_evidence_wins_over_stale_observed_identity(tmp_path: Path) -> None:
+    """**最近一次**工具证据优先于层级观测（真机复盘 dc-20260922T171655Z-6fff3547）。
+
+    旧实现把「会话开始时的首次层级观测」当作最高优先级且永不更新：那次前台是**上一个任务
+    遗留的网易云音乐**，而录制动作全在会话中途 ``start_app`` 起的知乎++。结果生成的脚本用
+    网易云的 bundle 做 setup、脚本体却是知乎++ 的步骤，回放第一步就 ``Can't find component``。
+    """
     session = _FakeSession(
         tmp_path,
-        [_start_app(BUNDLE, ABILITY)],
+        [_start_app(BUNDLE, ABILITY), _foreground(BUNDLE, ABILITY, invocation_id="inv-latest")],
+        observed_identity=("com.example.neteasymusic", "EntryAbility"),
+    )
+
+    assert infer_session_identity(session) == (BUNDLE, ABILITY)  # type: ignore[arg-type]
+
+
+def test_observed_identity_still_fills_the_gap_for_unknown_ability(tmp_path: Path) -> None:
+    """工具证据的 ability 为 ``unknown`` 时不吃掉层级观测，只是退化到下一优先级。"""
+    session = _FakeSession(
+        tmp_path,
+        [_foreground(BUNDLE, "unknown")],
         observed_identity=("com.huawei.hmos.calendar", "MainAbility"),
     )
 

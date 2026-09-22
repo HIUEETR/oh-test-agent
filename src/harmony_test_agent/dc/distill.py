@@ -92,38 +92,33 @@ _FOREGROUND_RE = re.compile(r"^bundle=(?P<bundle>\S+),\s*ability=(?P<ability>\S+
 _UNKNOWN_ABILITY = "unknown"
 
 
-def infer_session_identity(session: DcSession) -> tuple[str, str] | None:
-    """从会话录制记录推断 ``(bundle_name, main_ability)``。
+def infer_identity_from_records(
+    invocations: list[DcToolInvocation],
+    *,
+    observed_identity: tuple[str, str] | None = None,
+    last_foreground_app: str = "",
+) -> tuple[str, str] | None:
+    """从录制记录推断 ``(bundle_name, main_ability)``（纯函数，会话与快照共用）。
 
     优先级（先命中先返回）：
 
-    1. ``session.observed_identity``：会话每次上下文采集时从 UI 层级解析出的 focused 窗口
-       （bundle 非系统界面/非占位，ability 非空、非 ``unknown``）。设备对
-       ``foreground_app`` 的 ability 常报 ``unknown``，而这条来自层级里的 ``abilityName``，
-       是唯一不依赖模型主动调工具的身份来源；
-    2. 最近一次成功 ``foreground_app`` 的 ``result_summary``：bundle 非占位，
+    1. **最近一次**成功 ``foreground_app`` 的 ``result_summary``：bundle 非占位，
        且 ability 非空、非 ``unknown``（后者是设备未上报 ability 时的兜底值）；
-    3. 最近一次成功 ``start_app`` 的 ``args``：``bundle_name`` / ``ability_name`` 均非占位；
-    4. ``session.last_foreground_app`` 作 bundle，配同 bundle 的任一成功 ``start_app``
+    2. **最近一次**成功 ``start_app`` 的 ``args``：``bundle_name`` / ``ability_name`` 均非占位；
+    3. ``observed_identity``：会话上下文采集时从 UI 层级解析出的 focused 窗口
+       （bundle 非系统界面/非占位，ability 非空、非 ``unknown``）；
+    4. ``last_foreground_app`` 作 bundle，配同 bundle 的任一成功 ``start_app``
        的 ``ability_name``（非占位）；
     5. 均不满足返回 ``None``。
 
+    **为什么工具证据优先于层级观测**（真机复盘 dc-20260922T171655Z-6fff3547）：层级观测在
+    会话开始时就命中了**上一个任务遗留的前台应用**（网易云音乐），而录制动作全部发生在
+    会话中途 ``start_app`` 起的知乎++。旧实现把这条观测当作最高优先级且永不更新，于是生成的
+    脚本用网易云音乐的 bundle 做 setup、脚本体却是知乎++ 的步骤 —— 回放必然找不到控件。
+    「最近一次观测胜出」保证推断结果与录制结束时的事实一致；层级观测降级为兜底。
+
     返回值只做「可推断」判断，占位校验仍由 :meth:`DcProfileDistiller.prepare` 统一负责。
     """
-    observed = getattr(session, "observed_identity", None)
-    if observed is not None:
-        bundle = str(observed[0] or "").strip()
-        ability = str(observed[1] or "").strip()
-        if (
-            ability
-            and ability != _UNKNOWN_ABILITY
-            and bundle not in _PLACEHOLDER_BUNDLES
-            and not is_system_foreground_bundle(bundle)
-        ):
-            return bundle, ability
-
-    invocations = list(session.recorder.invocations)
-
     for invocation in reversed(invocations):
         if invocation.tool != DcToolName.FOREGROUND_APP or not invocation.success:
             continue
@@ -145,7 +140,19 @@ def infer_session_identity(session: DcSession) -> tuple[str, str] | None:
             continue
         return bundle, ability
 
-    bundle = session.last_foreground_app
+    observed = observed_identity
+    if observed is not None:
+        bundle = str(observed[0] or "").strip()
+        ability = str(observed[1] or "").strip()
+        if (
+            ability
+            and ability != _UNKNOWN_ABILITY
+            and bundle not in _PLACEHOLDER_BUNDLES
+            and not is_system_foreground_bundle(bundle)
+        ):
+            return bundle, ability
+
+    bundle = last_foreground_app
     if bundle and bundle not in _PLACEHOLDER_BUNDLES:
         for invocation in reversed(invocations):
             if invocation.tool != DcToolName.START_APP or not invocation.success:
@@ -158,6 +165,18 @@ def infer_session_identity(session: DcSession) -> tuple[str, str] | None:
             return bundle, ability
 
     return None
+
+
+def infer_session_identity(session: DcSession) -> tuple[str, str] | None:
+    """从会话录制记录推断 ``(bundle_name, main_ability)``。
+
+    优先级与 :func:`infer_identity_from_records` 完全一致（本函数只负责取会话字段）。
+    """
+    return infer_identity_from_records(
+        list(session.recorder.invocations),
+        observed_identity=getattr(session, "observed_identity", None),
+        last_foreground_app=str(getattr(session, "last_foreground_app", "") or ""),
+    )
 
 
 def resolve_distill_identity(
@@ -737,6 +756,7 @@ __all__ = [
     "DistillPreparation",
     "DcProfileDistiller",
     "MIN_DISTILL_PAGES",
+    "infer_identity_from_records",
     "infer_session_identity",
     "resolve_distill_identity",
 ]
