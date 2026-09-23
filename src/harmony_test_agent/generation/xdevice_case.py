@@ -222,6 +222,15 @@ def _action_lines(step: TestStepSpec, context: _EmitContext) -> list[str]:
             return [f"# skipped: {action} (no locator or coordinate)"]
         expression, comment = target
         if action == StepAction.CLICK:
+            if step.optional:
+                # 条件步骤：控件状态条件存在（真机复盘 dc-20260922T171655Z-6fff3547），
+                # 命中才点，未命中不算失败。检查点仍然照常硬判。
+                return [
+                    "# 条件步骤：控件状态条件存在，未命中即跳过",
+                    f"_conditional_target = driver.find_component({expression})",
+                    "if _conditional_target is not None:",
+                    f"    driver.touch(_conditional_target){comment}",
+                ]
             return [f"driver.touch({expression}){comment}"]
         if action == StepAction.DOUBLE_CLICK:
             return [f"driver.double_click({expression}){comment}"]

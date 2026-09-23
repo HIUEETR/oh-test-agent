@@ -280,7 +280,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="OpenHarmony Multimodal Test Agent", version="0.2.0", lifespan=lifespan)
     app.state.manager = manager
     app.state.dc_manager = dc_manager
-    app.include_router(create_dc_router(settings, dc_manager))
+    app.include_router(create_dc_router(settings, dc_manager, defect_recorder=manager.defect_recorder))
     from .cases import create_cases_router
     from .defects import create_defects_router
 

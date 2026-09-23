@@ -222,6 +222,14 @@ class TestStepSpec(BaseModel):
     comment: str = ""
     checkpoints: list[CheckpointSpec] = Field(default_factory=list)
     timeout_seconds: float | None = None
+    optional: bool = False
+    """**条件步骤**：控件是「状态条件存在」的（例如搜索框清空按钮），找不到就跳过。
+
+    脚本语义：先 ``find_component`` 探测，命中才执行动作，未命中记入
+    ``generated_result.json`` 的 ``skipped_conditional_steps``，**不判失败**。
+    真机复盘 dc-20260922T171655Z-6fff3547 的 ``p2_search_clear`` 就属于这一类：
+    录制时搜索框里有上一轮遗留的查询词，冷启动回放时输入框为空 ⇒ 该按钮不渲染。
+    普通步骤保持 ``False``：控件不存在必须是一次真实失败。"""
 
     @property
     def hard_checkpoints(self) -> list[CheckpointSpec]:

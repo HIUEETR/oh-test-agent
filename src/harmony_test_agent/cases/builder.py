@@ -167,6 +167,40 @@ VOLATILE_LOCATOR_OMIT_REASON = "volatile locator cannot be replayed"
 #: 输入框专用：没有坐标兜底，单独区分原因，便于诊断「少了输入」而不是「少了点击」。
 VOLATILE_INPUT_OMIT_REASON = "volatile locator on an input target cannot be replayed"
 
+#: **状态条件存在**、且「不存在时跳过」等价于无操作的控件 token。
+#: 只收这类控件，是因为把它们降级为条件步骤不会掩盖真实失败：
+#: ``clear``（搜索框清空按钮只在有输入时渲染）、``dismiss``（可关闭的提示卡）、
+#: ``back_to_top``（滚动后才出现）、``skip``（引导页跳过）。
+#: 刻意**不含** ``close`` / ``cancel``：对话框上的关闭/取消在弹窗存在时必然可见，
+#: 静默跳过只会把「弹窗没出现」这种真实失败藏起来。
+_OPTIONAL_CONTROL_TOKENS: tuple[str, ...] = ("clear", "dismiss", "back_to_top", "skip")
+_OPTIONAL_CONTROL_TEXT: tuple[str, ...] = ("清空", "清除", "不再提示", "忽略", "跳过")
+_OPTIONAL_CONTROL_RE = re.compile(r"(?<![a-z0-9])(?:" + "|".join(_OPTIONAL_CONTROL_TOKENS) + r")(?![a-z0-9])", re.I)
+
+
+def is_optional_control(*values: str) -> bool:
+    """判断一个控件是否是「状态条件存在」的可跳过控件。
+
+    真机复盘 dc-20260922T171655Z-6fff3547：录制的第 2 步点击搜索框的 ``p2_search_clear``，
+    那一刻搜索框里还留着上一轮的查询词；而生成脚本的 setup 是 ``stop_app`` + ``start_app``
+    冷启动 ⇒ 输入框为空 ⇒ 该按钮根本不渲染 ⇒ 回放第一步就
+    ``Can't find component with [BY.key('p2_search_clear')]``。
+
+    这类控件的正确语义是「有就清掉、没有就已经是干净状态」，因此按条件步骤渲染
+    （见 ``generation/standalone.py``）：找不到就跳过并在产物里留痕，而不是判失败。
+    判定只看 key/id/content 里的词元，是**保守的启发式** —— 宁可少降级，不可把真失败藏起来。
+    """
+    for value in values:
+        text = (value or "").strip()
+        if not text:
+            continue
+        if _OPTIONAL_CONTROL_RE.search(text):
+            return True
+        if any(token in text for token in _OPTIONAL_CONTROL_TEXT):
+            return True
+    return False
+
+
 #: ``confidence`` 三档中判为 low 的质量因素前缀。
 #:
 #: 后两条是定位器「注定跑不起来」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
@@ -395,7 +429,13 @@ class CaseBuilder:
                         f"{recovered.kind}:{recovered.value!r} from the recorded frame"
                     )
                     if locator is not None:
-                        add_step(StepAction.CLICK, step_id=action.step_id, locator=locator)
+                        optional = self._optional_fields(locator, str(target or ""))
+                        if optional:
+                            warnings.append(
+                                f"{action.step_id}: conditional control {target!r} "
+                                "is rendered as an optional step (skipped when absent)"
+                            )
+                        add_step(StepAction.CLICK, step_id=action.step_id, locator=locator, **optional)
                     elif coordinate is not None:
                         # 恢复出来的 key 本身不可回放（日期格 / 列表实例）：退回坐标。
                         add_step(
@@ -456,7 +496,13 @@ class CaseBuilder:
                         omit(action, VOLATILE_LOCATOR_OMIT_REASON)
                         continue
                     else:
-                        add_step(StepAction.CLICK, step_id=action.step_id, locator=locator)
+                        optional = self._optional_fields(locator, str(target or ""))
+                        if optional:
+                            warnings.append(
+                                f"{action.step_id}: conditional control {target!r} "
+                                "is rendered as an optional step (skipped when absent)"
+                            )
+                        add_step(StepAction.CLICK, step_id=action.step_id, locator=locator, **optional)
                 generated_actions += 1
             elif tool == ToolName.CLICK_COORDINATE:
                 raw = action.params.get("coordinate")
@@ -859,6 +905,17 @@ class CaseBuilder:
             source_failures=source_failures,
         )
 
+    @staticmethod
+    def _optional_fields(locator: Any, *values: str) -> dict[str, Any]:
+        """条件存在控件 → ``TestStepSpec.optional`` 的构造字段（见 :func:`is_optional_control`）。
+
+        只对**选择器型**定位器生效：坐标点击没有可探测的控件，降级没有意义。
+        """
+        if locator is None or getattr(locator, "kind", None) == LocatorKind.COORDINATE:
+            return {}
+        candidates = [str(getattr(locator, "value", "") or ""), *(value or "" for value in values)]
+        return {"optional": True} if is_optional_control(*candidates) else {}
+
     def _dc_step(
         self,
         invocation: Any,
@@ -900,12 +957,19 @@ class CaseBuilder:
             raw_value = (element.key or element.id) if element is not None else ""
             locator = self._dc_locator(element, str(args.get("target") or "") or None, profile, warnings)
             if locator is not None:
+                optional = self._optional_fields(locator, raw_value, element.content if element is not None else "")
+                if optional:
+                    warnings.append(
+                        f"{invocation.invocation_id}: conditional control {raw_value!r} "
+                        "is rendered as an optional step (skipped when absent)"
+                    )
                 add_step(
                     StepAction.CLICK,
                     step_id=invocation.invocation_id,
                     locator=locator,
                     # 步骤标签保留**录制时的原始 key**（历史行为），前缀泛化只影响选择器。
                     text=raw_value,
+                    **optional,
                 )
             else:
                 # 没有可回放的稳定定位器（无命中 / 易变 key 被拒）→ 坐标兜底。

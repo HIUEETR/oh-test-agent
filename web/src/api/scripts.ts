@@ -46,6 +46,10 @@ export interface ScriptDetail {
 export interface DcScriptRunResponse {
   script_id: string;
   session_id: string;
+  /** 会话录制推断出的目标应用（与会话身份不一致时后端直接 409 拒绝执行）。 */
+  bundle_name?: string;
+  /** 本次执行新记录/命中的缺陷 id（DC 脚本执行发现的异常已落缺陷库）。 */
+  defect_ids?: string[];
   results: ReplayResult[];
 }
 

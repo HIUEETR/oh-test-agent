@@ -61,6 +61,7 @@ def _invocation(
     success: bool = True,
     turn_id: str = "turn-1",
     args: dict[str, object] | None = None,
+    result_summary: str = "",
 ) -> DcToolInvocation:
     return DcToolInvocation(
         invocation_id=invocation_id,
@@ -71,6 +72,7 @@ def _invocation(
         status=DcToolStatus.SUCCEEDED if success else DcToolStatus.FAILED,
         success=success,
         command=CommandResult(command="hdc", returncode=0 if success else 1),
+        result_summary=result_summary,
     )
 
 
@@ -121,6 +123,56 @@ def test_generate_script_uses_the_suggested_identity(tmp_path: Path) -> None:
     script = session.generate_script()
 
     assert BUNDLE in Path(script.python_path).read_text(encoding="utf-8")
+
+
+def test_stale_foreground_app_does_not_hijack_the_generated_script(tmp_path: Path) -> None:
+    """真机复盘 dc-20260922T171655Z-6fff3547：会话开始时的遗留前台不得锁死脚本身份。
+
+    那次会话开始时前台是上一个任务遗留的网易云音乐（层级观测因此记下它），录制动作却全在
+    会话中途 ``start_app`` 起的知乎++。旧实现把首次观测当最高优先级，生成的脚本 setup 驱动
+    网易云、脚本体是知乎++ 的步骤，回放第一步就 ``Can't find component``。
+    """
+    session = _session(tmp_path)
+    session.observed_identity = ("com.example.neteasymusic", "EntryAbility")
+    session.recorder.invocations.append(
+        _invocation(
+            "inv-start",
+            DcToolName.START_APP,
+            args={"bundle_name": BUNDLE, "ability_name": ABILITY},
+        )
+    )
+    session.recorder.invocations.append(
+        _invocation(
+            "inv-fg",
+            DcToolName.FOREGROUND_APP,
+            result_summary=f"bundle={BUNDLE}, ability={ABILITY}",
+        )
+    )
+    session.recorder.invocations.append(_invocation("inv-click", DcToolName.CLICK))
+
+    session._finalize_turn(_turn(), DcTurnStatus.COMPLETED)
+    script = session.generate_script()
+
+    assert session.suggested_identity == (BUNDLE, ABILITY)
+    assert f"BUNDLE_NAME = '{BUNDLE}'" in Path(script.python_path).read_text(encoding="utf-8")
+    assert not any("contradicts" in warning for warning in script.warnings)
+
+
+def test_explicit_identity_that_contradicts_the_recording_is_warned(tmp_path: Path) -> None:
+    """显式指定别的目标应用仍然生成，但必须把矛盾写进 warnings（可审计，不静默）。"""
+    session = _session(tmp_path)
+    session.recorder.invocations.append(
+        _invocation(
+            "inv-fg",
+            DcToolName.FOREGROUND_APP,
+            result_summary=f"bundle={BUNDLE}, ability={ABILITY}",
+        )
+    )
+
+    script = session.generate_script("com.example.other", "EntryAbility")
+
+    assert any("contradicts the recorded session identity" in warning for warning in script.warnings)
+    assert "com.example.other" in Path(script.python_path).read_text(encoding="utf-8")
 
 
 def test_failed_turn_does_not_suggest(tmp_path: Path) -> None:

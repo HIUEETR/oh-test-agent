@@ -298,8 +298,12 @@ class TestObservedForegroundIdentity:
 
         assert session.observed_identity is None
 
-    async def test_first_target_identity_is_sticky(self, tmp_path: Path) -> None:
-        """中途切到别的应用不应改写会话身份（只认第一次命中的目标应用）。"""
+    async def test_latest_target_identity_wins(self, tmp_path: Path) -> None:
+        """最近一次前台观测胜出：会话开始时遗留的**别的**应用不该锁死会话身份。
+
+        真机复盘 dc-20260922T171655Z-6fff3547：会话开始时前台是上一个任务遗留的网易云音乐，
+        录制动作却全在会话中途启动的知乎++；「首次命中即锁死」会把脚本 setup 写成遗留应用。
+        """
         session = make_session(tmp_path)
         session.hdc.screenshot_jpeg = lambda output_dir, label="screen": (
             _write_fake_jpeg(output_dir),
@@ -314,6 +318,27 @@ class TestObservedForegroundIdentity:
 
         session.device.collect_ui_hierarchy = lambda: _hierarchy(  # type: ignore[method-assign]
             ("com.huawei.hmos.settings", "SettingsAbility", True),
+        )
+        await session._capture_context()
+
+        assert session.observed_identity == ("com.huawei.hmos.settings", "SettingsAbility")
+
+    async def test_system_surface_never_overwrites_the_identity(self, tmp_path: Path) -> None:
+        """中途回到桌面 / 弹出输入法不得改写身份（只有非系统界面才更新）。"""
+        session = make_session(tmp_path)
+        session.hdc.screenshot_jpeg = lambda output_dir, label="screen": (
+            _write_fake_jpeg(output_dir),
+            b"fake-jpeg",
+            1080,
+            2232,
+        )
+        session.device.collect_ui_hierarchy = lambda: _hierarchy(  # type: ignore[method-assign]
+            ("com.huawei.hmos.calendar", "MainAbility", True),
+        )
+        await session._capture_context()
+
+        session.device.collect_ui_hierarchy = lambda: _hierarchy(  # type: ignore[method-assign]
+            ("com.ohos.sceneboard", "", True),
         )
         await session._capture_context()
 
