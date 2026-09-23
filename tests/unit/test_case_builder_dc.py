@@ -290,13 +290,98 @@ def test_non_back_key_event_is_omitted_with_exact_reason_and_skipped_comment(art
         {
             "invocation_id": "inv-power",
             "tool": "key_event",
-            "reason": "key_event('power') is not replayable (only Back maps to go_back)",
+            # 有意变更的 omit 文案：Enter 等按键现在也能映射了，旧文案
+            # 「only Back maps to go_back」已不再成立。
+            "reason": "key_event('power') is not replayable (unsupported key)",
         }
     ]
     step = step_by_id(result, "inv-power")
     assert step.action == StepAction.NOOP_COMMENT
     assert step.comment == "skipped: key_event('power')"
     assert result.counts["generated_actions"] == 0
+
+
+@pytest.mark.parametrize("raw", ["Enter", "enter", "ENTER", " Enter "])
+def test_enter_key_event_maps_to_a_key_event_step(artifacts: ArtifactStore, raw: str) -> None:
+    """本案第二个必然失败点：提交搜索的 Enter 此前被无谓丢弃，导致脚本走到搜索页也不提交。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.KEY_EVENT, {"key": raw}, invocation_id="inv-enter")],
+    )
+
+    step = step_by_id(result, "inv-enter")
+    assert step.action == StepAction.KEY_EVENT
+    assert step.key == "Enter"
+    assert result.omitted_actions == []
+    assert result.counts["generated_actions"] == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "canonical"),
+    [
+        ("Home", "Home"),
+        ("home", "Home"),
+        ("Volume Up", "VolumeUp"),
+        ("volume-up", "VolumeUp"),
+        ("volumeUp", "VolumeUp"),
+        ("volume_up", "VolumeUp"),
+        ("VolumeDown", "VolumeDown"),
+        ("volume_down", "VolumeDown"),
+    ],
+)
+def test_whitelisted_key_events_use_the_canonical_spelling(
+    artifacts: ArtifactStore, raw: str, canonical: str
+) -> None:
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.KEY_EVENT, {"key": raw}, invocation_id="inv-key")],
+    )
+
+    step = step_by_id(result, "inv-key")
+    assert step.action == StepAction.KEY_EVENT
+    assert step.key == canonical
+
+
+def test_canonical_key_event_output_passes_the_case_safety_gate(artifacts: ArtifactStore) -> None:
+    """规范拼写必须同时通过 IR 校验（否则用例会被静默降级为 draft）。"""
+    from harmony_test_agent.cases.safety import validate_case_spec
+    from harmony_test_agent.config import Settings
+
+    result = build_dc(
+        artifacts,
+        [
+            invocation(DcToolName.KEY_EVENT, {"key": "enter"}, invocation_id="inv-enter"),
+            invocation(DcToolName.KEY_EVENT, {"key": "Volume Up"}, invocation_id="inv-volume"),
+        ],
+    )
+
+    assert validate_case_spec(result.spec, max_iterations=Settings().stress_max_iterations) == []
+
+
+@pytest.mark.parametrize("raw", ["Power", "power", "Menu", "KEYCODE_ENTER", "return", ""])
+def test_non_whitelisted_key_events_stay_omitted(artifacts: ArtifactStore, raw: str) -> None:
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.KEY_EVENT, {"key": raw}, invocation_id="inv-key")],
+    )
+
+    assert step_by_id(result, "inv-key").action == StepAction.NOOP_COMMENT
+    assert result.omitted_actions[0]["reason"] == f"key_event({raw!r}) is not replayable (unsupported key)"
+
+
+def test_backspace_key_event_maps_to_a_back_step(artifacts: ArtifactStore) -> None:
+    """``backspace`` 与 emitter 层既有归一化一致（``standalone.py`` 也把两者都当 Back）。
+
+    注：这是本次的**可观测行为变更** —— 改前 ``backspace`` 在预过滤里就被当成
+    「非 Back 按键」丢弃；语义上「退格 ≠ 返回」仍是已知遗留问题，见 builder 内注释。
+    """
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.KEY_EVENT, {"key": "backspace"}, invocation_id="inv-backspace")],
+    )
+
+    assert step_by_id(result, "inv-backspace").action == StepAction.BACK
+    assert result.omitted_actions == []
 
 
 def test_back_key_event_maps_to_a_back_step(artifacts: ArtifactStore) -> None:

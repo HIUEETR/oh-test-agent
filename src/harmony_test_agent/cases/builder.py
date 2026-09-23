@@ -36,6 +36,9 @@ from ..perception.volatility import is_unreplayable_locator_key
 # 「脚本定位器不可回放」的判定必须用 ``perception.volatility`` 里**最窄**的那个函数：
 # ``is_volatile_evidence_key`` 会把正在工作的稳定骨架 key 一并判为易变（真机实测误杀 6 个），
 # 详见该模块 docstring 的反例清单。``cases → perception`` 只依赖标准库，无环。
+# ``cases.safety`` 只依赖 ``..models`` / ``..runtime.safety`` / ``.spec``，已实测与
+# 本模块无环（I4）。按键名归一化的唯一真源在那边，避免三份表各写一份归一化规则。
+from .safety import canonical_key_event
 from .spec import (
     NO_REPLAYABLE_COMMENT,
     CaseProvenance,
@@ -940,12 +943,15 @@ class CaseBuilder:
 
             if invocation.tool == DcToolName.KEY_EVENT:
                 key = str(invocation.args.get("key", ""))
-                if key.lower() != "back":
+                # Back/backspace 走 StepAction.BACK（渲染 driver.go_back()）；其余按键只要
+                # 能归一到 ALLOWED_KEY_EVENTS 的规范拼写就映射成 KEY_EVENT（Enter/Home/
+                # 音量键），两个 emitter 已完整支持，此前却在这里被无谓丢弃。
+                if key.strip().lower() not in {"back", "backspace"} and canonical_key_event(key) is None:
                     omitted.append(
                         {
                             "invocation_id": invocation.invocation_id,
                             "tool": invocation.tool.value,
-                            "reason": f"key_event({key!r}) is not replayable (only Back maps to go_back)",
+                            "reason": f"key_event({key!r}) is not replayable (unsupported key)",
                         }
                     )
                     add_step(
@@ -1254,13 +1260,19 @@ class CaseBuilder:
                 )
             # 历史实现里断言也会渲染成一行脚本体，因此同样计入 included_count
             # （``evaluate_runnable`` 的「至少 1 个可回放动作」依赖这个口径）。
-            # 历史实现把 Back 键事件映射到 ToolName.BACK 并渲染 driver.go_back()；
-            # 其他按键由调用方在进入本函数前就 omit 掉了。
             return True, True
 
         if tool == dc_tool_name.KEY_EVENT:
-            if str(args.get("key", "")).lower() == "back":
+            key = str(args.get("key", ""))
+            # 已知遗留（本次不动）：``backspace`` → ``driver.go_back()`` 在语义上是错的
+            # （退格 ≠ 返回）。``generation/standalone.py`` 的归一化表同样这么写，
+            # 改它会牵动既有行为，且与本次两条确定性回放失败无关。
+            if key.strip().lower() in {"back", "backspace"}:
                 add_step(StepAction.BACK, step_id=invocation.invocation_id)
+                return True, True
+            canonical = canonical_key_event(key)
+            if canonical is not None:
+                add_step(StepAction.KEY_EVENT, step_id=invocation.invocation_id, key=canonical)
                 return True, True
             return False, False
 

@@ -603,6 +603,35 @@ def test_ungrounded_assertion_renders_as_a_soft_key_checkpoint_end_to_end() -> N
     assert built.replay_eligible is True
 
 
+def test_key_event_enter_renders_press_key_and_imports_keycode() -> None:
+    """§4.5b：Enter 现在真的进脚本（``driver.press_key(KeyCode.ENTER)``），且自动补 import。"""
+    spec = make_spec(
+        steps=[
+            StepSpec(
+                step_id="s1",
+                index=1,
+                action=StepAction.INPUT_TEXT,
+                title_zh="输入关键词",
+                locator=key("p2_search_input", "搜索输入框"),
+                text="星宇",
+            ),
+            StepSpec(
+                step_id="s2",
+                index=2,
+                action=StepAction.KEY_EVENT,
+                title_zh="提交搜索",
+                key="Enter",
+            ),
+        ],
+    )
+
+    source = source_of(spec)
+
+    assert "driver.press_key(KeyCode.ENTER)" in source
+    assert "from hypium import BY, KeyCode, MatchPattern, UiDriver" in source
+    assert "# skipped: key_event('Enter')" not in source
+
+
 def test_toast_checkpoint_starts_toast_listener_in_setup() -> None:
     source = source_of(toast_spec())
 
