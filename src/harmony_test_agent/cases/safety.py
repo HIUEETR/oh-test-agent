@@ -67,6 +67,7 @@ def canonical_key_event(value: str) -> str | None:
     normalized = (value or "").strip().lower().replace(" ", "").replace("-", "_")
     return _KEY_EVENT_ALIASES.get(normalized)
 
+
 MAX_DURATION_BUDGET_SECONDS = 7200
 """压测时长预算硬上限（秒），对齐 ``StressSpec.duration_budget_seconds`` 的 ``le=7200``。"""
 

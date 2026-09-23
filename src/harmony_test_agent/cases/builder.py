@@ -1407,9 +1407,7 @@ class CaseBuilder:
         wanted = (value or "").strip()
         if not wanted:
             return False
-        return any(
-            self._holds_text(element, wanted) for snapshot in self._snapshots for element in snapshot.elements
-        )
+        return any(self._holds_text(element, wanted) for snapshot in self._snapshots for element in snapshot.elements)
 
     @staticmethod
     def _key_id_candidate(element: UIElement) -> LocatorCandidate | None:

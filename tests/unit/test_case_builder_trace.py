@@ -935,9 +935,7 @@ def test_identifier_shaped_assert_target_is_not_rendered_as_exact_text() -> None
 
 def test_identifier_shaped_target_that_exists_as_literal_text_keeps_exact_text() -> None:
     """帧里确有该字面文本时，标识符形态的 target 仍是合法文本选择器。"""
-    trace = assert_visible_locator_trace(
-        target="log-in", snapshots=[text_holding_snapshot("log-in")]
-    )
+    trace = assert_visible_locator_trace(target="log-in", snapshots=[text_holding_snapshot("log-in")])
 
     result = CaseBuilder().from_trace(trace, profile())
 

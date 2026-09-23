@@ -312,7 +312,10 @@ def test_canonical_key_event_normalizes_whitelisted_keys(raw: str, expected: str
     assert canonical_key_event(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["Back", "back", "BACK", "backspace", "Power", "power", "Menu", "KEYCODE_ENTER", "return", ""])
+@pytest.mark.parametrize(
+    "raw",
+    ["Back", "back", "BACK", "backspace", "Power", "power", "Menu", "KEYCODE_ENTER", "return", ""],
+)
 def test_canonical_key_event_rejects_back_and_non_whitelisted_keys(raw: str) -> None:
     # Back 由调用方映射成 StepAction.BACK（渲染 driver.go_back()），有意不在此表内。
     assert canonical_key_event(raw) is None
@@ -335,9 +338,7 @@ def test_key_event_tables_agree() -> None:
     from harmony_test_agent.generation.standalone import KEYCODE_BY_KEY
     from harmony_test_agent.generation.xdevice_case import _KEY_CODES
 
-    canonical = {
-        canonical_key_event(k) for k in ("home", "enter", "Volume Up", "volume-up", "volumeUp", "volume_down")
-    }
+    canonical = {canonical_key_event(k) for k in ("home", "enter", "Volume Up", "volume-up", "volumeUp", "volume_down")}
     assert None not in canonical
     for key in canonical:
         assert key.casefold() in {item.casefold() for item in ALLOWED_KEY_EVENTS}

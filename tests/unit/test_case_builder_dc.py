@@ -329,9 +329,7 @@ def test_enter_key_event_maps_to_a_key_event_step(artifacts: ArtifactStore, raw:
         ("volume_down", "VolumeDown"),
     ],
 )
-def test_whitelisted_key_events_use_the_canonical_spelling(
-    artifacts: ArtifactStore, raw: str, canonical: str
-) -> None:
+def test_whitelisted_key_events_use_the_canonical_spelling(artifacts: ArtifactStore, raw: str, canonical: str) -> None:
     result = build_dc(
         artifacts,
         [invocation(DcToolName.KEY_EVENT, {"key": raw}, invocation_id="inv-key")],

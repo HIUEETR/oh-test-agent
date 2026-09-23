@@ -30,10 +30,12 @@ from harmony_test_agent.dc.tools import (
     tool_assert_visible,
     tool_click,
     tool_input_text,
+    tool_start_app,
 )
-from harmony_test_agent.models import BoundingBox, ScreenSnapshot, UIElement
+from harmony_test_agent.models import BoundingBox, CommandResult, ScreenSnapshot, UIElement
 
 ASSERT_TOOLS = (DcToolName.ASSERT_VISIBLE, DcToolName.ASSERT_NOT_VISIBLE, DcToolName.ASSERT_TEXT)
+BUNDLE = "com.github.zhuoyi233.zhplus"
 
 
 class TestTierTools:
@@ -504,3 +506,118 @@ class TestRecorderResolvedElement:
 
         assert len(recorder.invocations) == len(malformed)
         assert all(invocation.resolved_element is None for invocation in recorder.invocations)
+
+
+# ---------------------------------------------------------------------------
+# start_app 冷重置：录制起点必须与生成脚本的冷启动锚点对齐
+# ---------------------------------------------------------------------------
+
+
+class _LaunchDevice(_FakeDevice):
+    """在 ``_FakeDevice`` 之上补 start_app / stop_app 记账。"""
+
+    def __init__(self, snapshot: ScreenSnapshot, *, stop_ok: bool = True) -> None:
+        super().__init__(snapshot)
+        self.stop_ok = stop_ok
+        self.stops: list[str] = []
+        self.starts: list[tuple[str, str, str | None]] = []
+
+    def stop_app(self, bundle_name: str) -> CommandResult:
+        self.stops.append(bundle_name)
+        return CommandResult(
+            command=f"aa force-stop {bundle_name}",
+            returncode=0 if self.stop_ok else 1,
+            stderr="" if self.stop_ok else "error: not running",
+        )
+
+    def start_app(self, bundle_name: str, ability_name: str, module_name: str | None = None) -> CommandResult:
+        self.starts.append((bundle_name, ability_name, module_name))
+        return CommandResult(command=f"aa start -b {bundle_name} -a {ability_name}", returncode=0)
+
+
+def _launch_context(tmp_path: Path, *, stop_ok: bool = True) -> RunContext[DcToolContext]:
+    ctx = _context(tmp_path, _layered_snapshot())
+    ctx.deps.device = _LaunchDevice(_layered_snapshot(), stop_ok=stop_ok)  # type: ignore[assignment]
+    return ctx
+
+
+def test_first_start_app_in_the_session_cold_resets(tmp_path: Path) -> None:
+    """会话内该 bundle 的首次 start_app：先 force-stop，再 start，``args.reset=true``。"""
+    ctx = _launch_context(tmp_path)
+    device = ctx.deps.device
+
+    asyncio.run(tool_start_app(ctx, BUNDLE, "EntryAbility"))
+
+    assert device.stops == [BUNDLE]  # type: ignore[attr-defined]
+    assert device.starts == [(BUNDLE, "EntryAbility", None)]  # type: ignore[attr-defined]
+    invocation = ctx.deps.recorder.invocations[-1]
+    assert invocation.tool == DcToolName.START_APP
+    assert invocation.args["reset"] is True
+    assert invocation.args["bundle_name"] == BUNDLE
+    assert invocation.args["ability_name"] == "EntryAbility"
+    assert "module_name" not in invocation.args
+    assert invocation.status == DcToolStatus.SUCCEEDED
+
+
+def test_second_start_app_of_the_same_bundle_stays_warm(tmp_path: Path) -> None:
+    """同一 bundle 的第二次调用不再 force-stop：不打断用户当前屏幕。"""
+    ctx = _launch_context(tmp_path)
+    device = ctx.deps.device
+
+    asyncio.run(tool_start_app(ctx, BUNDLE, "EntryAbility"))
+    asyncio.run(tool_start_app(ctx, BUNDLE, "EntryAbility"))
+
+    assert device.stops == [BUNDLE]  # type: ignore[attr-defined]
+    assert len(device.starts) == 2  # type: ignore[attr-defined]
+    assert ctx.deps.recorder.invocations[0].args["reset"] is True
+    assert ctx.deps.recorder.invocations[1].args["reset"] is False
+
+
+def test_each_bundle_gets_its_own_cold_reset(tmp_path: Path) -> None:
+    """first-**per-bundle**：不同 bundle 各自冷重置一次。"""
+    ctx = _launch_context(tmp_path)
+    device = ctx.deps.device
+
+    asyncio.run(tool_start_app(ctx, BUNDLE, "EntryAbility"))
+    asyncio.run(tool_start_app(ctx, "com.other.app", "EntryAbility"))
+    asyncio.run(tool_start_app(ctx, BUNDLE, "EntryAbility"))
+
+    assert device.stops == [BUNDLE, "com.other.app"]  # type: ignore[attr-defined]
+    assert [item.args["reset"] for item in ctx.deps.recorder.invocations] == [True, True, False]
+
+
+def test_failed_force_stop_still_starts_the_app_and_succeeds(tmp_path: Path) -> None:
+    """``aa force-stop`` 对未运行的应用可能返回非 0，此时状态本来就是干净的 —— 不得判失败。"""
+    ctx = _launch_context(tmp_path, stop_ok=False)
+    device = ctx.deps.device
+
+    message = asyncio.run(tool_start_app(ctx, BUNDLE, "EntryAbility"))
+
+    assert device.stops == [BUNDLE]  # type: ignore[attr-defined]
+    assert device.starts == [(BUNDLE, "EntryAbility", None)]  # type: ignore[attr-defined]
+    invocation = ctx.deps.recorder.invocations[-1]
+    assert invocation.status == DcToolStatus.SUCCEEDED
+    assert invocation.args["reset"] is True
+    # 返回值仍是 start_app 的 CommandResult 摘要，不含 force-stop 的错误。
+    assert "not running" not in message
+    assert "error" not in invocation.args
+
+
+def test_module_name_is_recorded_only_when_provided(tmp_path: Path) -> None:
+    ctx = _launch_context(tmp_path)
+
+    asyncio.run(tool_start_app(ctx, BUNDLE, "EntryAbility", "entry"))
+
+    assert ctx.deps.recorder.invocations[-1].args["module_name"] == "entry"
+
+
+def test_running_invocation_already_in_the_ledger_counts_as_started(tmp_path: Path) -> None:
+    """账本里已有（含 RUNNING 残留）该 bundle 的 start_app ⇒ 不再重复 force-stop。"""
+    ctx = _launch_context(tmp_path)
+    device = ctx.deps.device
+    asyncio.run(ctx.deps.recorder.run(ctx, DcToolName.START_APP, {"bundle_name": BUNDLE}, lambda: None))
+
+    asyncio.run(tool_start_app(ctx, BUNDLE, "EntryAbility"))
+
+    assert device.stops == []  # type: ignore[attr-defined]
+    assert ctx.deps.recorder.invocations[-1].args["reset"] is False
