@@ -21,6 +21,7 @@ import pytest
 from harmony_test_agent.cases.builder import (
     FALLBACK_CHECKPOINT_MESSAGE,
     UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON,
+    UNGROUNDED_ASSERTION_FACTOR,
     CaseBuilder,
     CaseBuildResult,
 )
@@ -1027,6 +1028,43 @@ def test_assertion_locator_is_recovered_from_the_recorded_frame() -> None:
     )
     # 恢复成功 ⇒ 不发出「缺少控件证据」警告。
     assert not any("has no component evidence" in warning for warning in result.warnings)
+
+
+def test_recovered_assertion_leaves_no_ungrounded_signal() -> None:
+    """integration 夹具 step-08 的形态：运行时是 SPATIAL 候选，但帧里按 key 命中。
+
+    此时断言最终是**有据的硬** ``BY.key``。若在帧恢复**之前**就把非结构化候选喂给
+    ``locator_from_candidate``，终端兜底会先发一条 ``ungrounded target`` 警告，
+    恢复成功后就变成假信号，把 ``UNGROUNDED_ASSERTION_FACTOR`` 错误压进
+    confidence / promotion_blockers（实测会让
+    ``tests/integration/test_first_run_yields_executable_script.py`` 失败）。
+    """
+    frame = ScreenSnapshot(
+        snapshot_id="frame-home",
+        run_id="run-assertion-evidence",
+        image_path=Path("screens/frame-home.png"),
+        image_sha256="abc",
+        width=800,
+        height=1200,
+        elements=[UIElement(element_id="search", key="p2_home_titlebar_search", content="搜索", type="Button")],
+    )
+    trace = assert_visible_locator_trace(
+        target="p2_home_titlebar_search",
+        locator=LocatorCandidate(kind=LocatorKind.SPATIAL, value="搜索"),
+        snapshots=[frame],
+    )
+    trace.actions[1].before_snapshot_id = "frame-home"
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.soft is False
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.KEY
+    assert checkpoint.locator.value == "p2_home_titlebar_search"
+    assert not any("ungrounded target" in warning for warning in result.warnings)
+    assert UNGROUNDED_ASSERTION_FACTOR not in result.confidence_factors
+    assert UNGROUNDED_ASSERTION_FACTOR not in result.promotion_blockers
 
 
 def test_assertion_does_not_use_the_host_container_fallback() -> None:

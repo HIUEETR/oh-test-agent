@@ -245,6 +245,20 @@ WARM_START_RECORDING_BLOCKER = (
 )
 WARM_START_FACTOR = "script replays from a cold start but the recording began on a warm app launch"
 
+#: **能给出结构化选择器**的定位候选种类：只有这些才值得先喂给
+#: :meth:`CaseBuilder.locator_from_candidate`。
+#:
+#: 其余种类（``SPATIAL`` / ``VLM_BBOX`` / ``COORDINATE``）会被该函数一路穿透到
+#: **终端语义兜底**，于是「断言 target 无据」的警告会在**尝试帧恢复之前**就被发出。
+#: 断言随后完全可能被帧恢复救回（integration 夹具 step-08 就是如此：SPATIAL 候选 →
+#: 警告 → 帧里按 key 命中 ⇒ 硬 ``BY.key``），那条警告就成了假信号，并把
+#: ``UNGROUNDED_ASSERTION_FACTOR`` 错误地压进 confidence / promotion_blockers。
+#: 因此断言分支只在候选**本身结构化**时才走这一步，顺序固定为
+#: 结构化候选 → 帧恢复 → 语义文本锚点 → soft/omit。
+_STRUCTURED_LOCATOR_KINDS: frozenset[LocatorKind] = frozenset(
+    {LocatorKind.KEY, LocatorKind.ID, LocatorKind.TEXT, LocatorKind.TYPE_TEXT}
+)
+
 #: ``confidence`` 三档中判为 low 的质量因素前缀。
 #:
 #: 后四条是「注定跑不起来 / 结论不可信」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
@@ -619,7 +633,11 @@ class CaseBuilder:
                 generated_actions += 1
             elif tool == ToolName.ASSERT_VISIBLE:
                 target = action.params.get("target") or action.params.get("text")
-                locator = self.locator_from_candidate(action.locator, target, profile, warnings)
+                # 顺序固定：结构化候选 → 帧恢复 → 语义文本锚点 → soft。
+                # 非结构化候选（SPATIAL/VLM_BBOX/COORDINATE）不先喂给 locator_from_candidate，
+                # 否则「无据」警告会在帧恢复**之前**发出，恢复成功后变成假信号。
+                usable = action.locator is not None and action.locator.kind in _STRUCTURED_LOCATOR_KINDS
+                locator = self.locator_from_candidate(action.locator, target, profile, warnings) if usable else None
                 if locator is None:
                     # ① 已判定「无据标识符」或「易变 key」：先按录制帧精确回查 key/id
                     # （断言不使用宿主容器兜底，否则容器恒存在会把真失败洗成假绿）。
@@ -673,6 +691,8 @@ class CaseBuilder:
             elif tool == ToolName.ASSERT_TEXT:
                 # 修正历史 bug：ASSERT_TEXT 过去渲染为 check_component_exist，根本没有校验文本。
                 expected = action.params.get("text") or action.params.get("target") or ""
+                # 本分支**没有**帧恢复：候选穿透到终端兜底所得的 TEXT 定位器随后一定被下面的
+                # 过滤置空，因此这里保留原调用（含它的诊断警告），不做 _STRUCTURED_LOCATOR_KINDS 门控。
                 locator = self.locator_from_candidate(action.locator, action.params.get("target"), profile, warnings)
                 if locator is not None and locator.kind not in {LocatorKind.KEY, LocatorKind.ID}:
                     locator = None
@@ -715,7 +735,9 @@ class CaseBuilder:
                 explicit_assertions += 1
             elif tool == ToolName.ASSERT_NOT_VISIBLE:
                 target = action.params.get("target")
-                locator = self.locator_from_candidate(action.locator, target, profile, warnings)
+                # 同 ASSERT_VISIBLE：非结构化候选不先喂给 locator_from_candidate。
+                usable = action.locator is not None and action.locator.kind in _STRUCTURED_LOCATOR_KINDS
+                locator = self.locator_from_candidate(action.locator, target, profile, warnings) if usable else None
                 if locator is None:
                     # 断言分支不使用宿主容器兜底（容器恒存在 ⇒ 假绿）。
                     recovered = self._recorded_key_locator(trace, action, None, allow_owner_fallback=False)
