@@ -597,7 +597,9 @@ def test_ungrounded_assertion_renders_as_a_soft_key_checkpoint_end_to_end() -> N
     assert f"driver.check_component_exist(BY.key({target!r}), expect_exist=True)" in source
     assert "except Exception as _exc:" in source
     assert "result['soft_failures'].append(" in source
-    # confidence 分档由 §4.3 的警告→因素映射决定，见 test_confidence_levels.py。
+    # 生成器明知选择器命不中 ⇒ 不能再对外承诺 high / promotion_eligible。
+    assert built.confidence == "low"
+    assert built.promotion_eligible is False
     assert built.replay_eligible is True
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from harmony_test_agent.cases.builder import CaseBuilder
+from harmony_test_agent.cases.builder import UNGROUNDED_ASSERTION_FACTOR, CaseBuilder
 from harmony_test_agent.dc.models import DcToolInvocation, DcToolName, DcToolTier
 from harmony_test_agent.models import (
     AssertionDefinition,
@@ -176,6 +176,79 @@ def test_dc_locator_kind_is_used_for_the_evidence_inventory_probe() -> None:
     assert locator.value == "add_agenda_comfrim"
     assert locator.evidence is not None
     assert locator.evidence.source == "dc_resolved_element"
+
+
+# ---------------------------------------------------------------------------
+# 无据断言：进 promotion_blockers，但不进 runnable_blockers（I6）
+# ---------------------------------------------------------------------------
+
+UNGROUNDED_TARGET = "p2_channel_content_question_2085141629112009975"
+
+
+def ungrounded_invocation() -> DcToolInvocation:
+    """一条**目标没有任何控件证据**的可回放点击 + 一条无据断言。"""
+    return DcToolInvocation(
+        invocation_id="inv-1",
+        turn_id="turn-1",
+        tool=DcToolName.CLICK,
+        tier=DcToolTier.L1,
+        args={"x": 10, "y": 20},
+        success=True,
+        resolved_element=UIElement(element_id="ui-1", key="add_agenda_comfrim", content="确定"),
+    )
+
+
+def test_ungrounded_assertion_is_a_promotion_blocker_but_not_a_runnable_blocker() -> None:
+    result = CaseBuilder().from_dc_invocations(
+        "dc-session-001",
+        "127.0.0.1:5555",
+        [
+            ungrounded_invocation(),
+            DcToolInvocation(
+                invocation_id="inv-2",
+                turn_id="turn-1",
+                tool=DcToolName.ASSERT_VISIBLE,
+                tier=DcToolTier.L1,
+                args={"target": UNGROUNDED_TARGET},
+                success=True,
+                resolved_element=None,
+            ),
+        ],
+        bundle_name=BUNDLE,
+        main_ability="MainAbility",
+        profile=profile(ProfileStatus.VERIFIED),
+    )
+
+    # 物理上仍可执行（两个可回放动作都在脚本里），但结论不可信。
+    assert result.replay_eligible is True
+    assert result.runnable_blockers == []
+    assert result.promotion_eligible is False
+    assert result.promotion_blockers == [UNGROUNDED_ASSERTION_FACTOR]
+    assert result.confidence == "low"
+
+
+def test_ungrounded_assertion_blocker_follows_the_profile_blocker() -> None:
+    """顺序稳定：无据因素**追加在**既有 profile blocker 之后。"""
+    result = CaseBuilder().from_dc_invocations(
+        "dc-session-001",
+        "127.0.0.1:5555",
+        [
+            ungrounded_invocation(),
+            DcToolInvocation(
+                invocation_id="inv-2",
+                turn_id="turn-1",
+                tool=DcToolName.ASSERT_VISIBLE,
+                tier=DcToolTier.L1,
+                args={"target": UNGROUNDED_TARGET},
+                success=True,
+                resolved_element=None,
+            ),
+        ],
+        bundle_name=BUNDLE,
+        main_ability="MainAbility",
+    )
+
+    assert result.promotion_blockers == [BLOCKER, UNGROUNDED_ASSERTION_FACTOR]
 
 
 # ---------------------------------------------------------------------------

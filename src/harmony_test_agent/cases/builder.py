@@ -231,16 +231,30 @@ def is_identifier_shaped_target(value: str) -> bool:
     """
     return bool(_IDENTIFIER_SHAPED_TARGET.fullmatch((value or "").strip()))
 
+
+#: 脚本里有断言的目标**没有任何控件证据**（被降级为 soft 检查点）。生成器明知该选择器
+#: 命不中，就不能再对外承诺 ``confidence: high`` / ``promotion_eligible: true``。
+UNGROUNDED_ASSERTION_FACTOR = "script contains an assertion whose target has no component evidence"
+
+#: 录制从**热启动**开始，而生成脚本的 setup 是冷启动（``stop_app`` + ``start_app``）。
+WARM_START_RECORDING_BLOCKER = (
+    "dc recording started from a warm app launch; replay cold-starts and may begin on a different page"
+)
+WARM_START_FACTOR = "script replays from a cold start but the recording began on a warm app launch"
+
 #: ``confidence`` 三档中判为 low 的质量因素前缀。
 #:
-#: 后两条是定位器「注定跑不起来」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
-#: 时间戳前缀在同帧匹配到多个控件时不泛化也会挂。这类脚本报 high/medium 都是说谎。
+#: 后四条是「注定跑不起来 / 结论不可信」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
+#: 时间戳前缀在同帧匹配到多个控件时不泛化也会挂，无据断言与热启动录制则会落到不同页面上。
+#: 这类脚本报 high/medium 都是说谎。
 LOW_CONFIDENCE_PREFIXES: tuple[str, ...] = (
     "source agent outcome is failed",
     "source trace contains failed actions",
     "source trace does not end with a successful FINISH action",
     "script contains a locator that will not match on replay",
     "script contains a date/clock/list-instance locator that will not match on another day",
+    UNGROUNDED_ASSERTION_FACTOR,
+    WARM_START_FACTOR,
 )
 
 ConfidenceLevel = Literal["high", "medium", "low"]
@@ -262,6 +276,14 @@ def confidence_factors_from_warnings(warnings: list[str]) -> list[str]:
         factors.append("script contains a locator that will not match on replay")
     if any(item.startswith(("volatile key ", "volatile id ")) for item in warnings):
         factors.append("script contains a date/clock/list-instance locator that will not match on another day")
+    # 无据断言：`locator_from_candidate` 的终端兜底文案（Live/DC 共用），以及
+    # assert_text / DC 侧降级时的「has no component evidence」文案（不以 ungrounded 开头）。
+    if any(item.startswith("ungrounded target ") for item in warnings):
+        factors.append(UNGROUNDED_ASSERTION_FACTOR)
+    if any("has no component evidence" in item for item in warnings):
+        factors.append(UNGROUNDED_ASSERTION_FACTOR)
+    if any(item.startswith("the recording began with a warm app launch") for item in warnings):
+        factors.append(WARM_START_FACTOR)
     return factors
 
 
@@ -770,6 +792,10 @@ class CaseBuilder:
             warnings=warnings,
         )
         promotion_blockers = self._promotion_blockers(trace)
+        # 无据断言让脚本在物理上仍可执行，但结论不可信 ⇒ 归晋级层（**不进**
+        # runnable_blockers，见 evaluate_runnable 的「只有 2 条物理必要条件」契约）。
+        if UNGROUNDED_ASSERTION_FACTOR in confidence_factors:
+            promotion_blockers.append(UNGROUNDED_ASSERTION_FACTOR)
         included_actions = counts["generated_actions"] + counts["generated_assertions"]
         replay_eligible, runnable_blockers = evaluate_runnable(
             included_actions=included_actions,
@@ -1008,6 +1034,9 @@ class CaseBuilder:
         promotion_blockers: list[str] = []
         if profile is None or profile.status not in {ProfileStatus.CANDIDATE, ProfileStatus.VERIFIED}:
             promotion_blockers.append("dc recording has no cross-round locator evidence")
+        # **必须追加在既有 profile blocker 之后**：promotion_blockers 的列表全等断言依赖顺序稳定。
+        if UNGROUNDED_ASSERTION_FACTOR in confidence_factors:
+            promotion_blockers.append(UNGROUNDED_ASSERTION_FACTOR)
         return CaseBuildResult(
             spec=spec,
             omitted_actions=omitted,

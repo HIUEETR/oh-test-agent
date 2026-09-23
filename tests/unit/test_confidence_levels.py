@@ -10,6 +10,8 @@ import pytest
 
 from harmony_test_agent.cases.builder import (
     LOW_CONFIDENCE_PREFIXES,
+    UNGROUNDED_ASSERTION_FACTOR,
+    WARM_START_FACTOR,
     CaseBuilder,
     confidence_factors_from_warnings,
     evaluate_confidence,
@@ -65,9 +67,11 @@ def test_low_confidence_prefixes_are_the_blocking_quality_signals() -> None:
     """把置信度压到 ``low`` 的因素前缀**精确**钉住。
 
     前三条是历史契约（源运行结局 / 失败动作 / 未以 FINISH 结束）。
-    后两条是定位器修复新增的（计划 Phase 2.4 / 3.3）：日期格、时钟读数、列表实例 key
+    中间两条是定位器修复新增的（计划 Phase 2.4 / 3.3）：日期格、时钟读数、列表实例 key
     换一天必挂；时间戳前缀在同帧匹配到多个控件时不泛化也会挂——这类脚本报 high/medium
     都是说谎，因此必须进 ``low``。
+    末两条是「生成脚本的确定性回放失败」修复新增的：断言目标没有任何控件证据，
+    以及录制始于热启动而回放冷启动——两者都让「Live 跑通」不再等价于「脚本能回放」。
     """
     assert LOW_CONFIDENCE_PREFIXES == (
         "source agent outcome is failed",
@@ -75,6 +79,8 @@ def test_low_confidence_prefixes_are_the_blocking_quality_signals() -> None:
         "source trace does not end with a successful FINISH action",
         "script contains a locator that will not match on replay",
         "script contains a date/clock/list-instance locator that will not match on another day",
+        UNGROUNDED_ASSERTION_FACTOR,
+        WARM_START_FACTOR,
     )
 
 
@@ -102,6 +108,82 @@ def test_locator_warnings_translate_into_blocking_confidence_factors() -> None:
         )
         == "medium"
     )
+
+
+def test_ungrounded_assertion_and_warm_start_lower_confidence_to_low() -> None:
+    """§4.1/§4.3：无据断言与热启动录制都必须把 confidence 压到 ``low``。"""
+    ungrounded_terminal = confidence_factors_from_warnings(
+        [
+            "ungrounded target 'p2_channel_content_question_2085141629112009975' is identifier-shaped "
+            "and appears in no captured frame; BY.text() on it can never match",
+        ]
+    )
+    ungrounded_soft = confidence_factors_from_warnings(
+        ["assert: assertion target 'p2_search_input' has no component evidence; rendered as a soft checkpoint"],
+    )
+    warm_start = confidence_factors_from_warnings(
+        [
+            "the recording began with a warm app launch (no force-stop before start_app); "
+            "the generated script cold-starts, so the replay may begin on a different page",
+        ]
+    )
+
+    assert ungrounded_terminal == [UNGROUNDED_ASSERTION_FACTOR]
+    assert ungrounded_soft == [UNGROUNDED_ASSERTION_FACTOR]
+    assert warm_start == [WARM_START_FACTOR]
+    assert evaluate_confidence(ungrounded_terminal, outcome="completed") == "low"
+    assert evaluate_confidence(ungrounded_soft, outcome="completed") == "low"
+    assert evaluate_confidence(warm_start, outcome="completed") == "low"
+
+
+def test_new_confidence_prefixes_do_not_shadow_the_existing_ones() -> None:
+    """前缀匹配是单向的：三条 ``script contains a`` 文案互不误命中。"""
+    for factor in (UNGROUNDED_ASSERTION_FACTOR, WARM_START_FACTOR):
+        assert not factor.startswith("script contains a locator that will not match on replay")
+        assert not factor.startswith(
+            "script contains a date/clock/list-instance locator that will not match on another day"
+        )
+    assert UNGROUNDED_ASSERTION_FACTOR.startswith(WARM_START_FACTOR) is False
+
+
+def test_ungrounded_assertion_trace_is_low_and_not_promotion_eligible() -> None:
+    """端到端：真机复盘那份 trace 的形态 ⇒ ``low`` + ``promotion_blockers`` 含无据因素。"""
+    target = "p2_channel_content_question_2085141629112009975"
+    trace = RunTrace(
+        run_id="run-20260923T065210Z-23434a78",
+        target_app_id="zhihu-plus",
+        task="断言证据门禁",
+        device_id="device-1",
+        state=RunState.COMPLETED,
+        agent_outcome="completed",
+        actions=[
+            ActionResult(
+                step_id="click",
+                tool=ToolName.CLICK_ELEMENT,
+                success=True,
+                params={"target": "p2_home_titlebar_search"},
+                locator=LocatorCandidate(kind=LocatorKind.KEY, value="p2_home_titlebar_search"),
+            ),
+            ActionResult(
+                step_id="assert",
+                tool=ToolName.ASSERT_VISIBLE,
+                success=True,
+                params={"target": target},
+                locator=None,
+            ),
+            ActionResult(step_id="finish", tool=ToolName.FINISH, success=True),
+        ],
+    )
+
+    result = CaseBuilder().from_trace(trace, _profile())
+
+    assert UNGROUNDED_ASSERTION_FACTOR in result.confidence_factors
+    assert result.confidence == "low"
+    assert UNGROUNDED_ASSERTION_FACTOR in result.promotion_blockers
+    assert result.promotion_eligible is False
+    # 物理上仍然可执行 ⇒ 不得进 runnable_blockers（evaluate_runnable 只有 2 条必要条件）。
+    assert result.runnable_blockers == []
+    assert result.replay_eligible is True
 
 
 # ---------------------------------------------------------------------------
