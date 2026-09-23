@@ -36,6 +36,9 @@ from ..perception.volatility import is_unreplayable_locator_key
 # 「脚本定位器不可回放」的判定必须用 ``perception.volatility`` 里**最窄**的那个函数：
 # ``is_volatile_evidence_key`` 会把正在工作的稳定骨架 key 一并判为易变（真机实测误杀 6 个），
 # 详见该模块 docstring 的反例清单。``cases → perception`` 只依赖标准库，无环。
+# ``cases.safety`` 只依赖 ``..models`` / ``..runtime.safety`` / ``.spec``，已实测与
+# 本模块无环（I4）。按键名归一化的唯一真源在那边，避免三份表各写一份归一化规则。
+from .safety import canonical_key_event
 from .spec import (
     NO_REPLAYABLE_COMMENT,
     CaseProvenance,
@@ -167,6 +170,13 @@ VOLATILE_LOCATOR_OMIT_REASON = "volatile locator cannot be replayed"
 #: 输入框专用：没有坐标兜底，单独区分原因，便于诊断「少了输入」而不是「少了点击」。
 VOLATILE_INPUT_OMIT_REASON = "volatile locator on an input target cannot be replayed"
 
+#: 无据缺席断言的省略原因。
+#:
+#: ``ASSERT_NOT_VISIBLE`` 的语义是**反的**：``check_component_exist(BY.text(<无据标识符>),
+#: expect_exist=False)`` 是**恒真**的 —— 把它 soft 化会静默通过并制造假绿，比恒假更危险
+#: （恒假至少会被看见）。因此无据时直接 omit。
+UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON = "absent-assertion target has no component evidence (vacuously true)"
+
 #: **状态条件存在**、且「不存在时跳过」等价于无操作的控件 token。
 #: 只收这类控件，是因为把它们降级为条件步骤不会掩盖真实失败：
 #: ``clear``（搜索框清空按钮只在有输入时渲染）、``dismiss``（可关闭的提示卡）、
@@ -204,16 +214,64 @@ def is_optional_control(*values: str) -> bool:
 #: 反向断言（``PlannedStep.expects_defect``）的检查点说明前缀：通过 = 观测到异常现象。
 UNEXPECTED_CHECKPOINT_MESSAGE = "反向断言：通过即代表观测到异常现象"
 
+#: 「标识符形态的 target」正则：至少一个 ``_``/``-`` 分隔符的多 token 名字。
+#:
+#: 真机复盘 run-20260923T065210Z-23434a78：``assert_visible`` 的 target
+#: ``p2_channel_content_question_2085141629112009975`` 没有任何 ``locator``，被终端兜底
+#: 渲染成 ``BY.text(该标识符)`` —— 设备上永远不会有一个**文本**等于这串 key 的控件，
+#: 硬检查点恒假，脚本 3/3 attempt 全红（``[Script-0203003]``）。
+#:
+#: 要求至少一个 ``_``/``-`` 分隔符，是为了让 ``OK`` / ``确定`` / ``Sign In`` 这类
+#: 真实按钮文案（单 token 或含空格）不被误判成标识符。
+_IDENTIFIER_SHAPED_TARGET = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+$")
+
+
+def is_identifier_shaped_target(value: str) -> bool:
+    """target 长得像控件 key/id 标识符，而不是屏幕上的人类可读文本。
+
+    正则要求至少一个 ``_``/``-`` 分隔符，因此 ``OK`` / ``确定`` 这类单 token 按钮文案
+    **不算**标识符（它们确实可能是真实文本）。
+    """
+    return bool(_IDENTIFIER_SHAPED_TARGET.fullmatch((value or "").strip()))
+
+
+#: 脚本里有断言的目标**没有任何控件证据**（被降级为 soft 检查点）。生成器明知该选择器
+#: 命不中，就不能再对外承诺 ``confidence: high`` / ``promotion_eligible: true``。
+UNGROUNDED_ASSERTION_FACTOR = "script contains an assertion whose target has no component evidence"
+
+#: 录制从**热启动**开始，而生成脚本的 setup 是冷启动（``stop_app`` + ``start_app``）。
+WARM_START_RECORDING_BLOCKER = (
+    "dc recording started from a warm app launch; replay cold-starts and may begin on a different page"
+)
+WARM_START_FACTOR = "script replays from a cold start but the recording began on a warm app launch"
+
+#: **能给出结构化选择器**的定位候选种类：只有这些才值得先喂给
+#: :meth:`CaseBuilder.locator_from_candidate`。
+#:
+#: 其余种类（``SPATIAL`` / ``VLM_BBOX`` / ``COORDINATE``）会被该函数一路穿透到
+#: **终端语义兜底**，于是「断言 target 无据」的警告会在**尝试帧恢复之前**就被发出。
+#: 断言随后完全可能被帧恢复救回（integration 夹具 step-08 就是如此：SPATIAL 候选 →
+#: 警告 → 帧里按 key 命中 ⇒ 硬 ``BY.key``），那条警告就成了假信号，并把
+#: ``UNGROUNDED_ASSERTION_FACTOR`` 错误地压进 confidence / promotion_blockers。
+#: 因此断言分支只在候选**本身结构化**时才走这一步，顺序固定为
+#: 结构化候选 → 帧恢复 → 语义文本锚点 → soft/omit。
+_STRUCTURED_LOCATOR_KINDS: frozenset[LocatorKind] = frozenset(
+    {LocatorKind.KEY, LocatorKind.ID, LocatorKind.TEXT, LocatorKind.TYPE_TEXT}
+)
+
 #: ``confidence`` 三档中判为 low 的质量因素前缀。
 #:
-#: 后两条是定位器「注定跑不起来」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
-#: 时间戳前缀在同帧匹配到多个控件时不泛化也会挂。这类脚本报 high/medium 都是说谎。
+#: 后四条是「注定跑不起来 / 结论不可信」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
+#: 时间戳前缀在同帧匹配到多个控件时不泛化也会挂，无据断言与热启动录制则会落到不同页面上。
+#: 这类脚本报 high/medium 都是说谎。
 LOW_CONFIDENCE_PREFIXES: tuple[str, ...] = (
     "source agent outcome is failed",
     "source trace contains failed actions",
     "source trace does not end with a successful FINISH action",
     "script contains a locator that will not match on replay",
     "script contains a date/clock/list-instance locator that will not match on another day",
+    UNGROUNDED_ASSERTION_FACTOR,
+    WARM_START_FACTOR,
 )
 
 ConfidenceLevel = Literal["high", "medium", "low"]
@@ -235,6 +293,14 @@ def confidence_factors_from_warnings(warnings: list[str]) -> list[str]:
         factors.append("script contains a locator that will not match on replay")
     if any(item.startswith(("volatile key ", "volatile id ")) for item in warnings):
         factors.append("script contains a date/clock/list-instance locator that will not match on another day")
+    # 无据断言：`locator_from_candidate` 的终端兜底文案（Live/DC 共用），以及
+    # assert_text / DC 侧降级时的「has no component evidence」文案（不以 ungrounded 开头）。
+    if any(item.startswith("ungrounded target ") for item in warnings):
+        factors.append(UNGROUNDED_ASSERTION_FACTOR)
+    if any("has no component evidence" in item for item in warnings):
+        factors.append(UNGROUNDED_ASSERTION_FACTOR)
+    if any(item.startswith("the recording began with a warm app launch") for item in warnings):
+        factors.append(WARM_START_FACTOR)
     return factors
 
 
@@ -567,22 +633,66 @@ class CaseBuilder:
                 generated_actions += 1
             elif tool == ToolName.ASSERT_VISIBLE:
                 target = action.params.get("target") or action.params.get("text")
-                locator = self.locator_from_candidate(action.locator, target, profile, warnings)
+                # 顺序固定：结构化候选 → 帧恢复 → 语义文本锚点 → soft。
+                # 非结构化候选（SPATIAL/VLM_BBOX/COORDINATE）不先喂给 locator_from_candidate，
+                # 否则「无据」警告会在帧恢复**之前**发出，恢复成功后变成假信号。
+                usable = action.locator is not None and action.locator.kind in _STRUCTURED_LOCATOR_KINDS
+                locator = self.locator_from_candidate(action.locator, target, profile, warnings) if usable else None
                 if locator is None:
-                    # 易变 key 被拒后回退到语义文本断言（与「完全没有定位器」同一分支）。
+                    # ① 已判定「无据标识符」或「易变 key」：先按录制帧精确回查 key/id
+                    # （断言不使用宿主容器兜底，否则容器恒存在会把真失败洗成假绿）。
+                    recovered = self._recorded_key_locator(trace, action, None, allow_owner_fallback=False)
+                    if recovered is not None:
+                        locator = self.locator_from_candidate(recovered, target, profile, warnings)
+                        warnings.append(
+                            f"{action.step_id}: assertion locator recovered as "
+                            f"{recovered.kind}:{recovered.value!r} from the recorded frame"
+                        )
+                if locator is None:
+                    # 易变 key 被拒后回退到语义文本锚点（与「完全没有定位器」同一分支）。
+                    # CJK / 单 token / 含空格的人读 target 在这里正常拿到 BY.text 锚点；
+                    # 只有**无据的标识符形态** target 会让这一步也返回 None。
                     locator = self.locator_from_candidate(None, target, profile, warnings)
-                attach(
-                    CheckpointSpec(
-                        kind=CheckpointKind.ELEMENT_EXISTS,
-                        locator=locator,
-                        **self._polarity_fields(trace, action),
+                if locator is None:
+                    # 仍然没有可信选择器：用 KEY 而非 TEXT —— 标识符形态的 target 本来就是
+                    # key 命名空间的成员，且 checkpoints.py 在 locator 为 None 时会 raise
+                    # CheckpointRenderError。降级为 soft：不再让脚本变红，同时保留真信号。
+                    text = str(target or "")
+                    fields = self._polarity_fields(trace, action)
+                    # 反向断言（expects_defect）的极性必须保留：它决定脚本里的
+                    # 「通过即代表观测到异常现象」注释与下游 polarity 字段。
+                    fields["message_zh"] = (
+                        f"{UNEXPECTED_CHECKPOINT_MESSAGE}：断言目标 {text!r} 缺少控件证据，已降级为软检查点"
+                        if fields.get("polarity")
+                        else f"断言目标 {text!r} 缺少控件证据，已降级为软检查点"
                     )
-                )
+                    attach(
+                        CheckpointSpec(
+                            kind=CheckpointKind.ELEMENT_EXISTS,
+                            locator=LocatorSpec(kind=LocatorKind.KEY, value=text, target_label=text),
+                            soft=True,
+                            **fields,
+                        )
+                    )
+                    warnings.append(
+                        f"{action.step_id}: assertion target {target!r} has no component evidence; "
+                        "rendered as a soft checkpoint instead of a hard BY.text() that can never match"
+                    )
+                else:
+                    attach(
+                        CheckpointSpec(
+                            kind=CheckpointKind.ELEMENT_EXISTS,
+                            locator=locator,
+                            **self._polarity_fields(trace, action),
+                        )
+                    )
                 generated_assertions += 1
                 explicit_assertions += 1
             elif tool == ToolName.ASSERT_TEXT:
                 # 修正历史 bug：ASSERT_TEXT 过去渲染为 check_component_exist，根本没有校验文本。
                 expected = action.params.get("text") or action.params.get("target") or ""
+                # 本分支**没有**帧恢复：候选穿透到终端兜底所得的 TEXT 定位器随后一定被下面的
+                # 过滤置空，因此这里保留原调用（含它的诊断警告），不做 _STRUCTURED_LOCATOR_KINDS 门控。
                 locator = self.locator_from_candidate(action.locator, action.params.get("target"), profile, warnings)
                 if locator is not None and locator.kind not in {LocatorKind.KEY, LocatorKind.ID}:
                     locator = None
@@ -593,21 +703,63 @@ class CaseBuilder:
                 # 只有 KEY/ID 钉死了具体控件时才用精确 ``text=``；否则用包含匹配，
                 # 与运行时 ``evaluate_assertion`` 的 target_variants 模糊匹配保持一致，
                 # 避免生成脚本比录制时更严格而在回放中抖动失败。
+                # ``expected`` 本身也可能是无据标识符：那时 TEXT_CONTAINS 渲染出的
+                # BY.text(标识符) 同样恒假，降级为 soft。
+                soft = (
+                    locator is None
+                    and is_identifier_shaped_target(str(expected))
+                    and not self._literal_text_in_snapshots(str(expected))
+                )
+                if soft:
+                    warnings.append(
+                        f"{action.step_id}: assert_text expected {expected!r} is identifier-shaped and appears "
+                        "in no captured frame; rendered as a soft checkpoint"
+                    )
+                fields = self._polarity_fields(trace, action)
+                if soft:
+                    soft_message = f"断言文本 {str(expected)!r} 缺少控件证据，已降级为软检查点"
+                    # 反向断言的极性（``polarity="unexpected"``）必须原样保留。
+                    fields["message_zh"] = (
+                        f"{UNEXPECTED_CHECKPOINT_MESSAGE}：{soft_message}" if fields.get("polarity") else soft_message
+                    )
                 attach(
                     CheckpointSpec(
                         kind=CheckpointKind.TEXT_EQUALS if locator is not None else CheckpointKind.TEXT_CONTAINS,
                         locator=locator,
                         expected=str(expected),
-                        **self._polarity_fields(trace, action),
+                        soft=soft,
+                        **fields,
                     )
                 )
                 generated_assertions += 1
                 explicit_assertions += 1
             elif tool == ToolName.ASSERT_NOT_VISIBLE:
-                locator = self.locator_from_candidate(action.locator, action.params.get("target"), profile, warnings)
+                target = action.params.get("target")
+                # 同 ASSERT_VISIBLE：非结构化候选不先喂给 locator_from_candidate。
+                usable = action.locator is not None and action.locator.kind in _STRUCTURED_LOCATOR_KINDS
+                locator = self.locator_from_candidate(action.locator, target, profile, warnings) if usable else None
                 if locator is None:
-                    # 同 ASSERT_VISIBLE：拒绝易变 key 后退回语义文本锚点。
-                    locator = self.locator_from_candidate(None, action.params.get("target"), profile, warnings)
+                    # 断言分支不使用宿主容器兜底（容器恒存在 ⇒ 假绿）。
+                    recovered = self._recorded_key_locator(trace, action, None, allow_owner_fallback=False)
+                    if recovered is not None:
+                        locator = self.locator_from_candidate(recovered, target, profile, warnings)
+                        warnings.append(
+                            f"{action.step_id}: assertion locator recovered as "
+                            f"{recovered.kind}:{recovered.value!r} from the recorded frame"
+                        )
+                if locator is None:
+                    # 同 ASSERT_VISIBLE：拒绝易变 key 后退回语义文本锚点（CJK 等仍走 BY.text）。
+                    locator = self.locator_from_candidate(None, target, profile, warnings)
+                if locator is None:
+                    # 只有**无据的标识符形态** target 才会走到这里。无据的
+                    # expect_exist=False 恒真：soft 化等于静默放行，因此直接省略
+                    # （该断言没有进脚本，计数器不递增，与既有 omit 语义一致）。
+                    omit(action, UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON)
+                    warnings.append(
+                        f"{action.step_id}: absent-assertion target {target!r} has no component "
+                        "evidence; an ungrounded expect_exist=False check is vacuously true, so it was omitted"
+                    )
+                    continue
                 attach(
                     CheckpointSpec(
                         kind=CheckpointKind.ELEMENT_ABSENT,
@@ -665,6 +817,10 @@ class CaseBuilder:
             warnings=warnings,
         )
         promotion_blockers = self._promotion_blockers(trace)
+        # 无据断言让脚本在物理上仍可执行，但结论不可信 ⇒ 归晋级层（**不进**
+        # runnable_blockers，见 evaluate_runnable 的「只有 2 条物理必要条件」契约）。
+        if UNGROUNDED_ASSERTION_FACTOR in confidence_factors:
+            promotion_blockers.append(UNGROUNDED_ASSERTION_FACTOR)
         included_actions = counts["generated_actions"] + counts["generated_assertions"]
         replay_eligible, runnable_blockers = evaluate_runnable(
             included_actions=included_actions,
@@ -809,12 +965,15 @@ class CaseBuilder:
 
             if invocation.tool == DcToolName.KEY_EVENT:
                 key = str(invocation.args.get("key", ""))
-                if key.lower() != "back":
+                # Back/backspace 走 StepAction.BACK（渲染 driver.go_back()）；其余按键只要
+                # 能归一到 ALLOWED_KEY_EVENTS 的规范拼写就映射成 KEY_EVENT（Enter/Home/
+                # 音量键），两个 emitter 已完整支持，此前却在这里被无谓丢弃。
+                if key.strip().lower() not in {"back", "backspace"} and canonical_key_event(key) is None:
                     omitted.append(
                         {
                             "invocation_id": invocation.invocation_id,
                             "tool": invocation.tool.value,
-                            "reason": f"key_event({key!r}) is not replayable (only Back maps to go_back)",
+                            "reason": f"key_event({key!r}) is not replayable (unsupported key)",
                         }
                     )
                     add_step(
@@ -865,6 +1024,19 @@ class CaseBuilder:
             bundle_name=bundle_name,
             main_ability=main_ability,
         )
+        # 热启动录制：生成脚本的 setup 是 stop_app + start_app（冷启动），而录制里首个
+        # start_app 没有 force-stop ⇒ 回放可能落在与录制不同的页面上。
+        # 只在录制里**有** start_app 时判定：没有启动锚点就没有可比对象（这同时守住了
+        # test_dc_promotion_blockers.py 里那些纯 CLICK 夹具的列表全等断言）。
+        # 判定基于**整个会话**的 invocations，且只看首个 start_app —— 脚本 setup 也只有一个
+        # 冷启动锚点。此警告必须在这里发出：下面 confidence_factors_from_warnings 要读它。
+        start_apps = [item for item in invocations if item.tool == DcToolName.START_APP]
+        warm_start_recording = bool(start_apps) and not (start_apps[0].args or {}).get("reset")
+        if warm_start_recording:
+            warnings.append(
+                "the recording began with a warm app launch (no force-stop before start_app); "
+                "the generated script cold-starts, so the replay may begin on a different page"
+            )
         confidence_factors: list[str] = []
         if explicit_assertions == 0:
             # 「无显式断言」从阻断条件降为 medium 置信度：脚本照样能跑，只是没有检查点。
@@ -903,6 +1075,11 @@ class CaseBuilder:
         promotion_blockers: list[str] = []
         if profile is None or profile.status not in {ProfileStatus.CANDIDATE, ProfileStatus.VERIFIED}:
             promotion_blockers.append("dc recording has no cross-round locator evidence")
+        # **必须追加在既有 profile blocker 之后**：promotion_blockers 的列表全等断言依赖顺序稳定。
+        if UNGROUNDED_ASSERTION_FACTOR in confidence_factors:
+            promotion_blockers.append(UNGROUNDED_ASSERTION_FACTOR)
+        if warm_start_recording:
+            promotion_blockers.append(WARM_START_RECORDING_BLOCKER)
         return CaseBuildResult(
             spec=spec,
             omitted_actions=omitted,
@@ -1061,33 +1238,78 @@ class CaseBuilder:
         if tool in {dc_tool_name.ASSERT_VISIBLE, dc_tool_name.ASSERT_NOT_VISIBLE, dc_tool_name.ASSERT_TEXT}:
             target = str(args.get("target") or args.get("text") or "")
             locator = self._dc_locator(element, target, profile, warnings)
+            # DC 侧**不另造帧恢复路径**：``_dc_locator`` 用的 ``invocation.resolved_element``
+            # 已经是帧命中的元素，``resolved_element`` 为 None 时没有别的帧可查
+            # （``_recorded_key_locator`` 依赖 trace/action，DC 侧不存在）。
             if tool == dc_tool_name.ASSERT_VISIBLE:
                 if locator is None:
                     locator = self.locator_from_candidate(None, target, profile, warnings)
-                attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_EXISTS, message_zh="", locator=locator))
+                if locator is None:
+                    # 无据标识符：BY.text() 恒假。用 KEY 而非 TEXT —— 标识符本来就是 key
+                    # 命名空间的成员，且 checkpoints.py 在 locator 为 None 时会 raise。
+                    attach(
+                        CheckpointSpec(
+                            kind=CheckpointKind.ELEMENT_EXISTS,
+                            message_zh=f"断言目标 {target!r} 缺少控件证据，已降级为软检查点",
+                            locator=LocatorSpec(kind=LocatorKind.KEY, value=target, target_label=target),
+                            soft=True,
+                        )
+                    )
+                    warnings.append(
+                        f"{invocation.invocation_id}: assertion target {target!r} has no component evidence; "
+                        "rendered as a soft checkpoint instead of a hard BY.text() that can never match"
+                    )
+                else:
+                    attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_EXISTS, message_zh="", locator=locator))
             elif tool == dc_tool_name.ASSERT_NOT_VISIBLE:
                 if locator is None:
                     locator = self.locator_from_candidate(None, target, profile, warnings)
+                if locator is None:
+                    # 无据的 expect_exist=False 恒真：soft 化等于静默放行，直接省略。
+                    # 该调用没有产出任何内容 ⇒ ``(False, False)``，不把 included_count 虚增。
+                    omit(UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON)
+                    warnings.append(
+                        f"{invocation.invocation_id}: absent-assertion target {target!r} has no component "
+                        "evidence; an ungrounded expect_exist=False check is vacuously true, so it was omitted"
+                    )
+                    return False, False
                 attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_ABSENT, message_zh="", locator=locator))
             else:
+                soft = (
+                    locator is None
+                    and is_identifier_shaped_target(target)
+                    and not self._literal_text_in_snapshots(target)
+                )
+                if soft:
+                    warnings.append(
+                        f"{invocation.invocation_id}: assert_text expected {target!r} is identifier-shaped and "
+                        "appears in no captured frame; rendered as a soft checkpoint"
+                    )
                 attach(
                     CheckpointSpec(
                         # 与 Live 侧同一规则：无结构化定位器时用包含匹配（对齐运行时模糊匹配）。
                         kind=CheckpointKind.TEXT_EQUALS if locator is not None else CheckpointKind.TEXT_CONTAINS,
-                        message_zh="",
+                        message_zh=(f"断言文本 {target!r} 缺少控件证据，已降级为软检查点" if soft else ""),
                         locator=locator,
                         expected=target,
+                        soft=soft,
                     )
                 )
             # 历史实现里断言也会渲染成一行脚本体，因此同样计入 included_count
             # （``evaluate_runnable`` 的「至少 1 个可回放动作」依赖这个口径）。
-            # 历史实现把 Back 键事件映射到 ToolName.BACK 并渲染 driver.go_back()；
-            # 其他按键由调用方在进入本函数前就 omit 掉了。
             return True, True
 
         if tool == dc_tool_name.KEY_EVENT:
-            if str(args.get("key", "")).lower() == "back":
+            key = str(args.get("key", ""))
+            # 已知遗留（本次不动）：``backspace`` → ``driver.go_back()`` 在语义上是错的
+            # （退格 ≠ 返回）。``generation/standalone.py`` 的归一化表同样这么写，
+            # 改它会牵动既有行为，且与本次两条确定性回放失败无关。
+            if key.strip().lower() in {"back", "backspace"}:
                 add_step(StepAction.BACK, step_id=invocation.invocation_id)
+                return True, True
+            canonical = canonical_key_event(key)
+            if canonical is not None:
+                add_step(StepAction.KEY_EVENT, step_id=invocation.invocation_id, key=canonical)
                 return True, True
             return False, False
 
@@ -1217,6 +1439,13 @@ class CaseBuilder:
             return False
         return wanted in {element.content.strip(), element.description.strip()}
 
+    def _literal_text_in_snapshots(self, value: str) -> bool:
+        """该字面值是否真的作为某个元素的 content/description 出现在已采集帧里。"""
+        wanted = (value or "").strip()
+        if not wanted:
+            return False
+        return any(self._holds_text(element, wanted) for snapshot in self._snapshots for element in snapshot.elements)
+
     @staticmethod
     def _key_id_candidate(element: UIElement) -> LocatorCandidate | None:
         for candidate in element.locator_candidates:
@@ -1233,6 +1462,8 @@ class CaseBuilder:
         trace: RunTrace,
         action: ActionResult,
         runtime_locator: LocatorCandidate | None,
+        *,
+        allow_owner_fallback: bool = True,
     ) -> LocatorCandidate | None:
         """运行时只拿到空间/坐标回退时，按 ``params['target']`` 回查原始帧取 key/id 定位器。
 
@@ -1242,6 +1473,8 @@ class CaseBuilder:
         元素其实带 ``add_agenda_comfrim`` key——恢复出来就能渲染成稳定的 key 选择器。
 
         只恢复 key/id：内容文本选择器对坐标回退不是稳定替代，保持坐标兜底语义不变。
+
+        ``allow_owner_fallback=False``（断言分支）时不做宿主容器兜底，见下方注释。
         """
         if runtime_locator is not None and runtime_locator.kind in {
             LocatorKind.KEY,
@@ -1271,6 +1504,11 @@ class CaseBuilder:
             return LocatorCandidate(kind=LocatorKind.KEY, value=element.key, score=1)
         if element.id:
             return LocatorCandidate(kind=LocatorKind.ID, value=element.id, score=1)
+        # 断言**不得**使用宿主容器兜底：对点击，「包含该元素中心的最小带 key 元素」是合理的
+        # 空间归属推断；但对断言，容器往往**恒存在**，用它会把「内容不存在」这个真失败
+        # 洗成假绿。断言只接受上面精确的 element_id / key / id 命中。
+        if not allow_owner_fallback:
+            return None
         # 自绘/图标按钮常常既无 key 也无 id，但它的宿主容器带 key（``add_agenda_comfrim`` 包裹
         # 一个无 key 的 Button）——取「包含该元素中心的最小带 key 元素」作为归属控件。
         # 面积相同时取层级更靠后（更靠上层）的那个：弹层里的确认按钮与背景页的 more_menu
@@ -1449,6 +1687,13 @@ class CaseBuilder:
                 value=f"{type_name}|{text}",
                 target_label=target or text or type_name,
             )
+        target_text = (target or "").strip()
+        if is_identifier_shaped_target(target_text) and not self._literal_text_in_snapshots(target_text):
+            warnings.append(
+                f"ungrounded target {target!r} is identifier-shaped and appears in no captured frame; "
+                "BY.text() on it can never match"
+            )
+            return None
         warnings.append(f"semantic target {target!r} fell back to exact text")
         return LocatorSpec(kind=LocatorKind.TEXT, value=target or "", target_label=target or "")
 

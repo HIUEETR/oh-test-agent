@@ -20,6 +20,8 @@ import pytest
 
 from harmony_test_agent.cases.builder import (
     FALLBACK_CHECKPOINT_MESSAGE,
+    UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON,
+    UNGROUNDED_ASSERTION_FACTOR,
     CaseBuilder,
     CaseBuildResult,
 )
@@ -863,6 +865,326 @@ def test_assertion_without_preceding_step_creates_a_check_step() -> None:
 
     assert [step.action for step in result.spec.steps] == [StepAction.CHECK]
     assert only_checkpoint(result).kind == CheckpointKind.ELEMENT_EXISTS
+
+
+# ---------------------------------------------------------------------------
+# 断言证据门禁：标识符形态 target 不得渲染成恒假的 BY.text(...)
+# ---------------------------------------------------------------------------
+
+
+def assert_visible_locator_trace(
+    *,
+    target: str,
+    locator: LocatorCandidate | None = None,
+    snapshots: list[ScreenSnapshot] | None = None,
+    tool: ToolName = ToolName.ASSERT_VISIBLE,
+) -> RunTrace:
+    """一条「点击 → 断言 → FINISH」的 trace；断言侧可选择带/不带定位器与帧。"""
+    return RunTrace(
+        run_id="run-assertion-evidence",
+        target_app_id="zhihu-plus",
+        task="断言证据门禁",
+        device_id="device-1",
+        state=RunState.COMPLETED,
+        agent_outcome="completed",
+        snapshots=snapshots or [],
+        actions=[
+            click_action(locator=LocatorCandidate(kind=LocatorKind.KEY, value="p2_home_titlebar_search")),
+            ActionResult(
+                step_id="assert",
+                tool=tool,
+                success=True,
+                params={"target": target},
+                locator=locator,
+            ),
+            finish_action(),
+        ],
+    )
+
+
+def text_holding_snapshot(value: str) -> ScreenSnapshot:
+    return ScreenSnapshot(
+        snapshot_id="frame-1",
+        run_id="run-assertion-evidence",
+        image_path=Path("screens/frame-1.png"),
+        image_sha256="abc",
+        width=1080,
+        height=2340,
+        elements=[UIElement(element_id="ui-1", key="some_key", content=value)],
+    )
+
+
+IDENTIFIER_TARGET = "p2_channel_content_question_2085141629112009975"
+
+
+def test_identifier_shaped_assert_target_is_not_rendered_as_exact_text() -> None:
+    """本案根因：无据的标识符 target 不得退化成 ``BY.text(标识符)``（恒假硬检查点）。"""
+    result = CaseBuilder().from_trace(assert_visible_locator_trace(target=IDENTIFIER_TARGET), profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.KEY, "不得用 BY.text(标识符)"
+    assert checkpoint.locator.value == IDENTIFIER_TARGET
+    assert checkpoint.soft is True
+    assert any(
+        f"ungrounded target {IDENTIFIER_TARGET!r} is identifier-shaped and appears in no captured frame" in warning
+        for warning in result.warnings
+    )
+    # 输出里不得再出现「语义名回退成精确文本」这条老警告。
+    assert f"semantic target {IDENTIFIER_TARGET!r} fell back to exact text" not in result.warnings
+
+
+def test_identifier_shaped_target_that_exists_as_literal_text_keeps_exact_text() -> None:
+    """帧里确有该字面文本时，标识符形态的 target 仍是合法文本选择器。"""
+    trace = assert_visible_locator_trace(target="log-in", snapshots=[text_holding_snapshot("log-in")])
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert checkpoint.locator.value == "log-in"
+    assert "semantic target 'log-in' fell back to exact text" in result.warnings
+
+
+def test_identifier_shaped_target_without_literal_text_is_gated() -> None:
+    """同形 target，但帧里没有该字面文本 ⇒ 无证据，不冒险。"""
+    trace = assert_visible_locator_trace(target="log-in", snapshots=[text_holding_snapshot("别的文本")])
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.KEY
+    assert checkpoint.soft is True
+    assert any("ungrounded target 'log-in'" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("target", ["搜索", "加载中", "OK", "确定", "Sign In"])
+def test_human_readable_targets_still_fall_back_to_exact_text(target: str) -> None:
+    """CJK / 单 token / 含空格的人读文案不触发门禁（边界行为不变）。"""
+    result = CaseBuilder().from_trace(assert_visible_locator_trace(target=target), profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert checkpoint.locator.value == target
+    assert f"semantic target {target!r} fell back to exact text" in result.warnings
+
+
+def test_empty_target_keeps_exact_text_fallback() -> None:
+    """空 target 保持现状：语义由调用方决定，本层不新增分支。"""
+    result = CaseBuilder().from_trace(assert_visible_locator_trace(target=""), profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert checkpoint.locator.value == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("p2_search_input", True),
+        (IDENTIFIER_TARGET, True),
+        ("log-in", True),
+        ("OK", False),
+        ("确定", False),
+        ("Sign In", False),
+        ("", False),
+        ("Enter", False),
+    ],
+)
+def test_is_identifier_shaped_target_boundaries(value: str, expected: bool) -> None:
+    from harmony_test_agent.cases.builder import is_identifier_shaped_target
+
+    assert is_identifier_shaped_target(value) is expected
+
+
+def test_assertion_locator_is_recovered_from_the_recorded_frame() -> None:
+    """② 帧里确有该 target 的 key ⇒ 恢复成 ``BY.key(...)``（不再是 soft）。"""
+    frame = ScreenSnapshot(
+        snapshot_id="frame-key",
+        run_id="run-assertion-evidence",
+        image_path=Path("screens/frame-key.png"),
+        image_sha256="abc",
+        width=1080,
+        height=2340,
+        elements=[UIElement(element_id=IDENTIFIER_TARGET, key="content_question_holder", content="某个问题")],
+    )
+    trace = assert_visible_locator_trace(target=IDENTIFIER_TARGET, snapshots=[frame])
+    trace.actions[1].before_snapshot_id = "frame-key"
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.soft is False
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.KEY
+    assert checkpoint.locator.value == "content_question_holder"
+    assert any(
+        "assertion locator recovered as key:'content_question_holder' from the recorded frame" in warning
+        for warning in result.warnings
+    )
+    # 恢复成功 ⇒ 不发出「缺少控件证据」警告。
+    assert not any("has no component evidence" in warning for warning in result.warnings)
+
+
+def test_recovered_assertion_leaves_no_ungrounded_signal() -> None:
+    """integration 夹具 step-08 的形态：运行时是 SPATIAL 候选，但帧里按 key 命中。
+
+    此时断言最终是**有据的硬** ``BY.key``。若在帧恢复**之前**就把非结构化候选喂给
+    ``locator_from_candidate``，终端兜底会先发一条 ``ungrounded target`` 警告，
+    恢复成功后就变成假信号，把 ``UNGROUNDED_ASSERTION_FACTOR`` 错误压进
+    confidence / promotion_blockers（实测会让
+    ``tests/integration/test_first_run_yields_executable_script.py`` 失败）。
+    """
+    frame = ScreenSnapshot(
+        snapshot_id="frame-home",
+        run_id="run-assertion-evidence",
+        image_path=Path("screens/frame-home.png"),
+        image_sha256="abc",
+        width=800,
+        height=1200,
+        elements=[UIElement(element_id="search", key="p2_home_titlebar_search", content="搜索", type="Button")],
+    )
+    trace = assert_visible_locator_trace(
+        target="p2_home_titlebar_search",
+        locator=LocatorCandidate(kind=LocatorKind.SPATIAL, value="搜索"),
+        snapshots=[frame],
+    )
+    trace.actions[1].before_snapshot_id = "frame-home"
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.soft is False
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.KEY
+    assert checkpoint.locator.value == "p2_home_titlebar_search"
+    assert not any("ungrounded target" in warning for warning in result.warnings)
+    assert UNGROUNDED_ASSERTION_FACTOR not in result.confidence_factors
+    assert UNGROUNDED_ASSERTION_FACTOR not in result.promotion_blockers
+
+
+def test_assertion_does_not_use_the_host_container_fallback() -> None:
+    """④ 宿主容器兜底只给点击用；断言用了会把「内容不存在」洗成假绿。"""
+    child_bbox = BoundingBox(left=20, top=20, right=80, bottom=40)
+    owner_bbox = BoundingBox(left=0, top=0, right=200, bottom=100)
+
+    def frame() -> ScreenSnapshot:
+        return ScreenSnapshot(
+            snapshot_id="frame-owner",
+            run_id="run-assertion-evidence",
+            image_path=Path("screens/frame-owner.png"),
+            image_sha256="abc",
+            width=1080,
+            height=2340,
+            elements=[
+                UIElement(element_id="owner-container", key="owner_container", bbox=owner_bbox, clickable=True),
+                UIElement(element_id="child-btn", type="Button", bbox=child_bbox, clickable=True),
+            ],
+        )
+
+    click_trace = RunTrace(
+        run_id="run-assertion-evidence",
+        target_app_id="zhihu-plus",
+        task="宿主容器兜底",
+        device_id="device-1",
+        state=RunState.COMPLETED,
+        agent_outcome="completed",
+        snapshots=[frame()],
+        actions=[
+            click_action(target="child-btn", before_snapshot_id="frame-owner"),
+            finish_action(),
+        ],
+    )
+    click_result = CaseBuilder(inject_fallback_assertion=False).from_trace(click_trace, profile())
+    click_locator = click_result.spec.steps[0].locator
+    assert click_locator is not None
+    assert click_locator.kind == LocatorKind.KEY
+    assert click_locator.value == "owner_container"
+
+    assert_trace = RunTrace(
+        run_id="run-assertion-evidence",
+        target_app_id="zhihu-plus",
+        task="宿主容器兜底",
+        device_id="device-1",
+        state=RunState.COMPLETED,
+        agent_outcome="completed",
+        snapshots=[frame()],
+        actions=[
+            click_action(locator=LocatorCandidate(kind=LocatorKind.KEY, value="owner_container")),
+            ActionResult(
+                step_id="assert",
+                tool=ToolName.ASSERT_VISIBLE,
+                success=True,
+                params={"target": "child-btn"},
+                locator=None,
+                before_snapshot_id="frame-owner",
+            ),
+            finish_action(),
+        ],
+    )
+    assert_result = CaseBuilder().from_trace(assert_trace, profile())
+
+    checkpoint = only_checkpoint(assert_result)
+    assert checkpoint.soft is True
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.value == "child-btn", "断言不得借用宿主容器的 key"
+    assert any("has no component evidence" in warning for warning in assert_result.warnings)
+
+
+def test_absent_assertion_without_evidence_is_omitted_and_counters_do_not_move() -> None:
+    """⑥ 无据缺席断言恒真 ⇒ omit；断言计数器不递增，也不注入兜底断言。"""
+    trace = assert_visible_locator_trace(target=IDENTIFIER_TARGET, tool=ToolName.ASSERT_NOT_VISIBLE)
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    assert omit_reason(result, "assert") == UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON
+    assert result.explicit_assertions == 0
+    assert result.counts["generated_assertions"] == 0
+    assert all(not step.checkpoints for step in result.spec.steps)
+    # 没有稳定元素可注入兜底断言（该 trace 没有任何帧）。
+    assert "no stable UI assertion was available" in result.warnings
+    assert any("vacuously true" in warning for warning in result.warnings)
+
+
+def test_absent_assertion_with_human_readable_target_stays_hard() -> None:
+    """CJK 缺席断言保持原状：硬 ``ELEMENT_ABSENT`` + ``BY.text``。"""
+    trace = assert_visible_locator_trace(target="加载中", tool=ToolName.ASSERT_NOT_VISIBLE)
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.kind == CheckpointKind.ELEMENT_ABSENT
+    assert checkpoint.soft is False
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert all(item["step_id"] != "assert" for item in result.omitted_actions)
+
+
+def test_assert_text_with_identifier_expected_becomes_soft() -> None:
+    """⑦ ``assert_text`` 的 ``expected`` 本身是无据标识符 ⇒ 降级为 soft。"""
+    trace = assert_text_trace(locator=None, params={"target": IDENTIFIER_TARGET})
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.kind == CheckpointKind.TEXT_CONTAINS
+    assert checkpoint.soft is True
+    assert checkpoint.expected == IDENTIFIER_TARGET
+    assert checkpoint.message_zh
+    assert any("is identifier-shaped and appears in no captured frame" in warning for warning in result.warnings)
+
+
+def test_assert_text_with_human_readable_expected_stays_hard() -> None:
+    trace = assert_text_trace(locator=None, params={"target": "OpenHarmony"})
+
+    checkpoint = only_checkpoint(CaseBuilder().from_trace(trace, profile()))
+
+    assert checkpoint.soft is False
+    assert checkpoint.kind == CheckpointKind.TEXT_CONTAINS
 
 
 # ---------------------------------------------------------------------------

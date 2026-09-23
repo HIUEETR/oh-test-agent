@@ -43,6 +43,31 @@ ALLOWED_KEY_EVENTS: tuple[str, ...] = ("Back", "Home", "Enter", "VolumeUp", "Vol
 _ALLOWED_KEY_EVENTS_CASEFOLD: frozenset[str] = frozenset(item.casefold() for item in ALLOWED_KEY_EVENTS)
 """比较用的小写集合；按键比较**大小写不敏感**（``back`` / ``Back`` 等价），文档化以避免歧义。"""
 
+_KEY_EVENT_ALIASES: dict[str, str] = {
+    "home": "Home",
+    "enter": "Enter",
+    "volumeup": "VolumeUp",
+    "volume_up": "VolumeUp",
+    "volumedown": "VolumeDown",
+    "volume_down": "VolumeDown",
+}
+"""归一化键（已去空格/连字符并小写）→ ``ALLOWED_KEY_EVENTS`` 的规范拼写。"""
+
+
+def canonical_key_event(value: str) -> str | None:
+    """把录到的按键名归一到 ``ALLOWED_KEY_EVENTS`` 的规范拼写；不在白名单返回 ``None``。
+
+    归一化同时吃掉空格与连字符，因为 ``standalone._render_key_event`` 与
+    ``xdevice_case`` 的归一化规则历史上并不一致（前者去空格、后者不去）。
+    输出规范拼写后，两个 emitter 与 ``validate_case_spec`` 三方同时命中。
+
+    ``back`` / ``backspace`` **故意不在表里**：Back 由调用方映射成 ``StepAction.BACK``
+    （渲染 ``driver.go_back()``），不走 KEY_EVENT。
+    """
+    normalized = (value or "").strip().lower().replace(" ", "").replace("-", "_")
+    return _KEY_EVENT_ALIASES.get(normalized)
+
+
 MAX_DURATION_BUDGET_SECONDS = 7200
 """压测时长预算硬上限（秒），对齐 ``StressSpec.duration_budget_seconds`` 的 ``le=7200``。"""
 
@@ -191,5 +216,6 @@ __all__ = [
     "COORDINATE_RISK_TAG",
     "MAX_DURATION_BUDGET_SECONDS",
     "MAX_STEP_WAIT_SECONDS",
+    "canonical_key_event",
     "validate_case_spec",
 ]

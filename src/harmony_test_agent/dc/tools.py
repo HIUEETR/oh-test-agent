@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from collections.abc import Callable
@@ -50,6 +51,8 @@ from .models import (
     tools_up_to,
 )
 from .safety import DcShellPolicy
+
+logger = logging.getLogger(__name__)
 
 # 终态中文标签（事件 message 用）
 _STATUS_LABEL: dict[DcToolStatus, str] = {
@@ -864,14 +867,41 @@ async def tool_memory_dump(ctx: RunContext[DcToolContext], bundle_name: str) -> 
 async def tool_start_app(
     ctx: RunContext[DcToolContext], bundle_name: str, ability_name: str, module_name: str | None = None
 ) -> str:
-    """Start an application's ability."""
+    """Start an application's ability (cold reset on the session's first launch of that bundle).
+
+    真机复盘 dc-20260923T065513Z-03c6485e：该会话紧跟同任务的上一轮 run 创建，设备被留在
+    搜索页且输入框里还有上一轮的查询词。录制里这次 ``start_app`` 是**热恢复**（无 force-stop），
+    而生成脚本的 setup 是 ``stop_app`` + ``start_app`` 冷启动 ⇒ 回放落在首页，首页没有
+    ``p2_search_input``，脚本第 3 步就 ``HypiumComponentNotFoundError [Script-0203002]``。
+
+    因此会话内**每个 bundle 的首次** ``start_app`` 先从冷启动锚点开始，与
+    ``generation/standalone.py::_setup_lines`` 对齐；同一 bundle 的后续调用保持热启动语义。
+    """
     deps = ctx.deps
-    args: dict[str, Any] = {"bundle_name": bundle_name, "ability_name": ability_name}
+    # 必须在 recorder.run() **之前**算：run() 会先把 RUNNING 记录 append 进账本，
+    # 之后再扫 invocations 会把当前这条自己数进去，导致「首次」永远判不出来。
+    cold_reset = not any(
+        item.tool == DcToolName.START_APP and (item.args or {}).get("bundle_name") == bundle_name
+        for item in deps.recorder.invocations
+    )
+    args: dict[str, Any] = {"bundle_name": bundle_name, "ability_name": ability_name, "reset": cold_reset}
     if module_name:
         args["module_name"] = module_name
-    return await deps.recorder.run(
-        ctx, DcToolName.START_APP, args, lambda: deps.device.start_app(bundle_name, ability_name, module_name)
-    )
+
+    def _launch() -> CommandResult:
+        if cold_reset:
+            # ``aa force-stop`` 对未运行的应用可能返回非 0，而此时状态本来就是干净的 ——
+            # 判失败会把好状态误报成错误，因此只记警告并继续 start_app。
+            stopped = deps.device.stop_app(bundle_name)
+            if not stopped.ok:
+                logger.warning(
+                    "dc cold reset: force-stop %s failed (%s); continuing with start_app",
+                    bundle_name,
+                    stopped.stderr,
+                )
+        return deps.device.start_app(bundle_name, ability_name, module_name)
+
+    return await deps.recorder.run(ctx, DcToolName.START_APP, args, _launch)
 
 
 # ---------------------------------------------------------------------------

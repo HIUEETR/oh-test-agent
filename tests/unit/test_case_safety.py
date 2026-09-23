@@ -18,6 +18,7 @@ from harmony_test_agent.cases.safety import (
     COORDINATE_RISK_TAG,
     MAX_DURATION_BUDGET_SECONDS,
     MAX_STEP_WAIT_SECONDS,
+    canonical_key_event,
     validate_case_spec,
 )
 from harmony_test_agent.cases.spec import (
@@ -281,6 +282,68 @@ def test_key_event_with_forbidden_word_reports_both_rules() -> None:
     assert len(violations) == 2
     assert any("delete" in item for item in violations)
     assert any("KEY_EVENT" in item for item in violations)
+
+
+# ---------------------------------------------------------------------------
+# 规则 2 补充：canonical_key_event 与三张按键表的一致性
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Enter", "Enter"),
+        ("enter", "Enter"),
+        ("ENTER", "Enter"),
+        (" Enter ", "Enter"),
+        ("Home", "Home"),
+        ("home", "Home"),
+        ("Volume Up", "VolumeUp"),
+        ("volume-up", "VolumeUp"),
+        ("volumeUp", "VolumeUp"),
+        ("volume_up", "VolumeUp"),
+        ("VolumeUp", "VolumeUp"),
+        ("VolumeDown", "VolumeDown"),
+        ("volume_down", "VolumeDown"),
+        ("volume-down", "VolumeDown"),
+    ],
+)
+def test_canonical_key_event_normalizes_whitelisted_keys(raw: str, expected: str) -> None:
+    assert canonical_key_event(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["Back", "back", "BACK", "backspace", "Power", "power", "Menu", "KEYCODE_ENTER", "return", ""],
+)
+def test_canonical_key_event_rejects_back_and_non_whitelisted_keys(raw: str) -> None:
+    # Back 由调用方映射成 StepAction.BACK（渲染 driver.go_back()），有意不在此表内。
+    assert canonical_key_event(raw) is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["home", "enter", "Volume Up", "volume-up", "volumeUp", "volume_down", "Home", "ENTER"],
+)
+def test_canonical_key_event_output_passes_validate_case_spec(raw: str) -> None:
+    """canonical 的输出必须能通过 KEY_EVENT 白名单校验（不产生违规）。"""
+    key = canonical_key_event(raw)
+    assert key is not None
+    case = make_spec(steps=[make_step(1, action=StepAction.KEY_EVENT, key=key, checkpoints=[hard_checkpoint()])])
+    assert check(case) == []
+
+
+def test_key_event_tables_agree() -> None:
+    """三张按键表（safety / standalone / xdevice）对 canonical 输出必须一致命中。"""
+    from harmony_test_agent.generation.standalone import KEYCODE_BY_KEY
+    from harmony_test_agent.generation.xdevice_case import _KEY_CODES
+
+    canonical = {canonical_key_event(k) for k in ("home", "enter", "Volume Up", "volume-up", "volumeUp", "volume_down")}
+    assert None not in canonical
+    for key in canonical:
+        assert key.casefold() in {item.casefold() for item in ALLOWED_KEY_EVENTS}
+        assert key.lower().replace(" ", "").replace("-", "_") in KEYCODE_BY_KEY
+        assert key.replace("-", "_").lower() in _KEY_CODES
 
 
 # ---------------------------------------------------------------------------
