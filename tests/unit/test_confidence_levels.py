@@ -11,6 +11,7 @@ import pytest
 from harmony_test_agent.cases.builder import (
     LOW_CONFIDENCE_PREFIXES,
     CaseBuilder,
+    confidence_factors_from_warnings,
     evaluate_confidence,
 )
 from harmony_test_agent.models import (
@@ -60,11 +61,46 @@ def test_confidence_levels(factors: list[str], outcome: str, expected: str) -> N
     assert evaluate_confidence(factors, outcome=outcome) == expected
 
 
-def test_low_confidence_prefixes_are_the_three_blocking_quality_signals() -> None:
+def test_low_confidence_prefixes_are_the_blocking_quality_signals() -> None:
+    """把置信度压到 ``low`` 的因素前缀**精确**钉住。
+
+    前三条是历史契约（源运行结局 / 失败动作 / 未以 FINISH 结束）。
+    后两条是定位器修复新增的（计划 Phase 2.4 / 3.3）：日期格、时钟读数、列表实例 key
+    换一天必挂；时间戳前缀在同帧匹配到多个控件时不泛化也会挂——这类脚本报 high/medium
+    都是说谎，因此必须进 ``low``。
+    """
     assert LOW_CONFIDENCE_PREFIXES == (
         "source agent outcome is failed",
         "source trace contains failed actions",
         "source trace does not end with a successful FINISH action",
+        "script contains a locator that will not match on replay",
+        "script contains a date/clock/list-instance locator that will not match on another day",
+    )
+
+
+def test_locator_warnings_translate_into_blocking_confidence_factors() -> None:
+    """警告 → 因素的映射必须真能压到 ``low``（两条新前缀各自独立生效）。"""
+    not_unique = confidence_factors_from_warnings(
+        [
+            "timestamp-suffixed key 'x_1790078405913' matched 2 components in 1 frame(s); "
+            "prefix is not unique, retained as an exact selector that will fail on replay",
+        ]
+    )
+    volatile = confidence_factors_from_warnings(["volatile key '1_国庆节__廿一_休' encodes a date/clock/list-instance"])
+
+    assert not_unique == ["script contains a locator that will not match on replay"]
+    assert volatile == ["script contains a date/clock/list-instance locator that will not match on another day"]
+    assert evaluate_confidence(not_unique, outcome="completed") == "low"
+    assert evaluate_confidence(volatile, outcome="completed") == "low"
+    # 单会话泛化（前缀唯一）只是 medium：能跑，只是没有跨轮证据。
+    assert (
+        evaluate_confidence(
+            confidence_factors_from_warnings(
+                ["timestamp-suffixed key 'x_1790078405913' generalized to prefix 'x_' (unique in 1 captured frame(s))"]
+            ),
+            outcome="completed",
+        )
+        == "medium"
     )
 
 

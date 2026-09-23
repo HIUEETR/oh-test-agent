@@ -28,6 +28,11 @@ from pydantic import BaseModel, Field
 from ..devices import DeviceAdapter, DeviceError
 from ..models import AnomalyFinding, CommandResult, ExplorationPolicy, ScreenSnapshot, UIElement
 from ..perception.normalizer import normalize_layout, page_path
+from ..perception.volatility import (
+    _CONTENT_LIKE_KEY_ID_PATTERN,
+    is_volatile_evidence_key,
+    is_volatile_structural_key,
+)
 from ..runtime.safety import SafetyPolicy
 from ..targets import ForegroundApp, ResolvedTarget
 from .advisor import AdvisorTurnRecord
@@ -223,51 +228,16 @@ _TIME_TEXT_PATTERN = re.compile(r"^\d{1,2}[:：]\d{2}([:：]\d{2})?$")
 _DIGIT_PUNCT_TEXT_PATTERN = re.compile(r"^[\d\s:：.，,。、%/+-]+$")
 _STRUCTURAL_KEY_ID_PATTERN = re.compile(r"\d{4,}")
 _IDENTITY_KEY_ID_PATTERN = re.compile(r"\d+")
-_CONTENT_LIKE_KEY_ID_PATTERN = re.compile(r"\d{4,}")
-_CONTENT_STREAM_KEY_PATTERN = re.compile(r"feed|card|banner|recommend|article|answer|video", re.IGNORECASE)
 _CONTENT_LIKE_TEXT_LIMIT = 40
-# 时间/日期/节假日型 key：日历类应用的日期格与状态栏时钟每次启动都不同，
-# 进入结构身份会让跨启动比对必然失败（实测 com.huawei.hmos.calendar）。
-_VOLATILE_TIME_KEY_PATTERN = re.compile(
-    r"(?i)(^|_)(time|clock|date|day|today|tomorrow|yesterday|lunar|jieqi|holiday|festival)(_|$)"
-    r"|^\d{1,2}_"  # 22___十二_ / 23_秋分_秋分_十三_ 这类日期格
-    r"|timeText$"
-)
-# 列表项实例 key：normal_agenda_list_item193 这类带实例序号的内容项。
-# 序号是必需的：``add_custom_reminder_row`` 这类结构行的尾部词形相同，但它是稳定骨架。
-_LIST_INSTANCE_KEY_PATTERN = re.compile(r"(?i)_(item|card|cell|row|entry)_?\d+$")
 # 弹窗/遮罩容器与 Tab 容器 key：单页应用状态分类使用（计划 2.3，仅作报告元数据）。
 # 刻意不含 menu/toast：菜单按钮与提示条是普通页面元素，会造成大量误判。
 _DIALOG_KEY_PATTERN = re.compile(r"(?i)(dialog|popup|overlay|mask|sheet|alert)")
 _TAB_KEY_PATTERN = re.compile(r"(?i)(^|_)(tab|tabs|tabbar|tabcontent|tab_item)(_|$)")
 
-
-def is_volatile_structural_key(value: str) -> bool:
-    """该 KEY/ID 是否因时间/内容实例特征而不应进入结构身份或长期证据库。
-
-    与 :meth:`BoundedExplorer._identity_key_set` 共用同一组 pattern：页面身份判定与
-    任务期证据回收（orchestrator）必须对「什么算易变」给出一致答案（计划 2.2/3.3）。
-    """
-    if not value:
-        return True
-    return bool(
-        _CONTENT_LIKE_KEY_ID_PATTERN.search(value)
-        or _CONTENT_STREAM_KEY_PATTERN.search(value)
-        or _VOLATILE_TIME_KEY_PATTERN.search(value)
-        or _LIST_INSTANCE_KEY_PATTERN.search(value)
-    )
-
-
-def is_volatile_evidence_key(value: str) -> bool:
-    """任务期证据回收专用的易变判定（计划 3.3）：只含时间/日期型与列表实例型 key。
-
-    比 :func:`is_volatile_structural_key` 更窄：带长数字实例 ID 的内容 key
-    （``add_agenda_title-1789951623657``）在证据回收里会被折叠成 ``add_agenda_title-#``
-    继续复用，而时钟、日期格与列表实例序号每次启动都会变，必须丢弃。
-    """
-    if not value:
-        return True
-    return bool(_VOLATILE_TIME_KEY_PATTERN.search(value) or _LIST_INSTANCE_KEY_PATTERN.search(value))
+# 「什么算易变」的三个不同宽度判定已抽到 ``perception/volatility.py``（唯一归属地）：
+# 页面身份 / 证据回收 / 脚本定位器三处代价不对称，必须用三个函数（见该模块 docstring
+# 里的真机误杀反例）。这里 import 它们只是 re-export，``__all__`` 已列出，
+# 既有 ``discovery`` 公开导出面与 ``tests/unit/test_discovery.py`` 的钉法都不变。
 
 
 class BoundedExplorer:

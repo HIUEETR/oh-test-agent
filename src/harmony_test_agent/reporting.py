@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .analysis.defects import SEVERITY_ORDER, record_from_finding
-from .models import AnomalyFinding, ExecutionAnalysis, RunState, RunTrace
+from .models import AnomalyFinding, AnomalyKind, ExecutionAnalysis, RunState, RunTrace
 from .storage import ArtifactStore
 
 _ARTIFACT_SUFFIXES = (".jpeg", ".jpg", ".png", ".webp", ".json", ".log", ".txt", ".xml", ".html", ".zip")
@@ -177,9 +177,7 @@ class ReportBuilder:
     def _finding_row(finding: AnomalyFinding, run_id: str) -> str:
         """渲染一条 finding：类别 / 严重度 / 阶段 / 摘要 / 证据摘录与产物链接。"""
         severity_class = "ok" if finding.severity == "info" else "bad"
-        excerpt = json.dumps(finding.evidence, ensure_ascii=False)
-        if len(excerpt) > _EVIDENCE_EXCERPT_CHARS:
-            excerpt = excerpt[:_EVIDENCE_EXCERPT_CHARS] + "…"
+        evidence = ReportBuilder._evidence_markup(finding)
         detail = f"<br><small>{html.escape(finding.detail)}</small>" if finding.detail else ""
         links = ReportBuilder._artifact_links(finding.evidence, run_id)
         if finding.screenshot:
@@ -189,8 +187,32 @@ class ReportBuilder:
             f'<td><span class="{severity_class}">{html.escape(finding.severity)}</span></td>'
             f"<td>{html.escape(_PHASE_LABELS.get(finding.phase, finding.phase))}</td>"
             f"<td>{html.escape(finding.summary_zh)}{detail}</td>"
-            f"<td>{html.escape(excerpt)}{links}</td></tr>"
+            f"<td>{evidence}{links}</td></tr>"
         )
+
+    @staticmethod
+    def _evidence_markup(finding: AnomalyFinding) -> str:
+        """证据摘录的 HTML（已转义）：定位器失效渲染成人可读的选择器 / 出错行。
+
+        其余类别保持原样——300 字符 JSON 摘录，避免报告格式漂移。
+        """
+        if finding.kind == AnomalyKind.LOCATOR_STALE:
+            return ReportBuilder._locator_stale_markup(finding.evidence)
+        excerpt = json.dumps(finding.evidence, ensure_ascii=False)
+        if len(excerpt) > _EVIDENCE_EXCERPT_CHARS:
+            excerpt = excerpt[:_EVIDENCE_EXCERPT_CHARS] + "…"
+        return html.escape(excerpt)
+
+    @staticmethod
+    def _locator_stale_markup(evidence: dict[str, Any]) -> str:
+        """``LOCATOR_STALE`` 的证据：失效选择器 + 脚本行号 + 源码行（逐个转义）。"""
+        selector = html.escape(str(evidence.get("selector") or "—"))
+        script_line = html.escape(str(evidence.get("script_line") or "—"))
+        markup = f"失效选择器：<code>{selector}</code>；出错位置：第 {script_line} 行"
+        source_line = str(evidence.get("source_line") or "").strip()
+        if source_line:
+            markup += f"<br><small><code>{html.escape(source_line)}</code></small>"
+        return markup
 
     @staticmethod
     def _artifact_link(path: str, run_id: str) -> str:

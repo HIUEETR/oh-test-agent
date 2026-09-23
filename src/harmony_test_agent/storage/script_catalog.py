@@ -38,6 +38,13 @@ class ScriptCatalogEntry(BaseModel):
     python_path: str
     case_id: str | None = None
     """脚本级 ID（config 的 ``case_id``，即 ``safe_id``）；与用例 IR 的 ID 不同。"""
+    case_persisted: bool | None = None
+    """DC 录制脚本是否真的落进了用例库（config 的 ``case_persisted``）。
+
+    ``True`` 时目录项里的 ``case_id`` 指向用例库里的真实记录；``False`` 表示
+    「本次录制是临时脚本，尚未入库」；``None`` 表示旧产物没有该键（未知）。
+    前端只应在该值为 ``True`` 时把 ``case_id`` 当作可跳转的用例身份。
+    """
     ir_case_id: str | None = None
     """用例 IR 的 ``case_id``（``case_spec.json``）；无用例产物时为 ``None``。"""
     scenario: str | None = None
@@ -120,6 +127,7 @@ class ScriptCatalog:
             filename=script.name,
             python_path=str(script.resolve()),
             case_id=_str_or_none(config.get("case_id")),
+            case_persisted=_bool_or_none(config.get("case_persisted", metadata.get("case_persisted"))),
             ir_case_id=_str_or_none(case_spec.get("case_id")),
             scenario=_str_or_none(case_spec.get("scenario")),
             case_version=_int_or_none(case_spec.get("schema_version")),
@@ -186,6 +194,10 @@ class ScriptCatalog:
 
 def _str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _int_or_none(value: Any) -> int | None:

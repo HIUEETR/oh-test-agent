@@ -372,7 +372,8 @@ export const TERMINAL_STATES = new Set([
 /** 异常类别：与后端 ``AnomalyKind`` 逐一对应。 */
 export type AnomalyKind =
   | "cppcrash" | "jscrash" | "appfreeze" | "anr"
-  | "white_screen" | "page_unresponsive" | "layout_anomaly" | "memory_growth";
+  | "white_screen" | "page_unresponsive" | "layout_anomaly" | "memory_growth"
+  | "locator_stale";
 
 export type AnomalySeverity = "info" | "warning" | "critical";
 

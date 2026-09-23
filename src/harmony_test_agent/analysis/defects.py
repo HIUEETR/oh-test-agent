@@ -64,6 +64,10 @@ ANOMALY_TO_SYMPTOM: dict[AnomalyKind, str] = {
     AnomalyKind.WHITE_SCREEN: "white_screen",
     AnomalyKind.LAYOUT_ANOMALY: "layout",
     AnomalyKind.MEMORY_GROWTH: "other",
+    # 脚本定位器失效**不是应用缺陷**：并入 ``"other"`` 会让它冒充「other 症状已复现」
+    # （``SYMPTOM_KINDS["other"]`` 只认 ``MEMORY_GROWTH``），所以按 ``functional`` 口径
+    # 转换——复现判据是「重跑时硬 checkpoint 是否再次失败」，与 ``LOCATOR_STALE`` 无关。
+    AnomalyKind.LOCATOR_STALE: "functional",
 }
 
 SEVERITY_ORDER: dict[str, int] = {"info": 0, "warning": 1, "critical": 2}

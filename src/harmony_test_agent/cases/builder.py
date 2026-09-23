@@ -21,6 +21,7 @@ from ..models import (
     ActionResult,
     LocatorCandidate,
     LocatorKind,
+    ProfileStatus,
     RunState,
     RunTrace,
     ScenarioKind,
@@ -30,6 +31,11 @@ from ..models import (
     UIElement,
     utc_now,
 )
+from ..perception.volatility import is_unreplayable_locator_key
+
+# 「脚本定位器不可回放」的判定必须用 ``perception.volatility`` 里**最窄**的那个函数：
+# ``is_volatile_evidence_key`` 会把正在工作的稳定骨架 key 一并判为易变（真机实测误杀 6 个），
+# 详见该模块 docstring 的反例清单。``cases → perception`` 只依赖标准库，无环。
 from .spec import (
     NO_REPLAYABLE_COMMENT,
     CaseProvenance,
@@ -84,6 +90,55 @@ NON_REPLAYABLE_DC_TOOLS: frozenset[str] = frozenset(
 #: 回放时必然 ``Can't find component with [BY.key(...)]``。
 _DYNAMIC_LOCATOR = re.compile(r"(.+?[_-])\d{8,}")
 
+#: 「epoch 时间戳实例 ID」形态：``add_agenda_title-1790078405913``（13 位毫秒）
+#: 与 ``add_agenda_title_1790078405``（10 位秒）。只认这两种长度，19 位内容 ID
+#: （``p2_channel_content_question_2085141629112009975``）必须保持精确值：
+#: 内容 ID 的**前缀**（``p2_channel_content_question_``）会同时匹配多个不同内容项，
+#: 盲目 STARTS_WITH 会点到错误元素。
+_TIMESTAMP_SUFFIX_MS = re.compile(r"^(?P<prefix>.+?[_-])(?P<ts>\d{13})$")
+_TIMESTAMP_SUFFIX_S = re.compile(r"^(?P<prefix>.+?[_-])(?P<ts>\d{10})$")
+
+#: 会话帧时间窗的两侧余量（秒）。DC 录制里 key 的时间戳与帧采集时间之间存在工具调用
+#: 延迟，但仍必须落在同一次会话附近，才能把「时间戳实例 ID」与「内容 ID」区分开。
+SNAPSHOT_WINDOW_MARGIN_SECONDS = 3600.0
+
+
+def _timestamp_suffix(value: str, window: tuple[float, float] | None) -> str | None:
+    """识别「epoch 时间戳实例 ID」形态的 key/id 后缀，返回可用于 STARTS_WITH 的前缀。
+
+    只认 13 位（毫秒）与 10 位（秒），且解释为 epoch 后必须落在会话时间窗内。
+    窗口约束把时间戳实例 ID 与内容 ID 区分开：
+    ``add_agenda_title-1790078405913``（13 位，落在会话帧时间戳 1790078264–1790078623 之间）
+    → 可泛化；``p2_channel_content_question_2085141629112009975``（19 位内容 ID）→ 不泛化。
+
+    ``window is None``（会话一帧都没采到）时**不泛化**：无证据不冒险，退回
+    ``unvalidated dynamic`` 的「保留精确值 + 响亮警告」行为。
+    """
+    if not value or window is None:
+        return None
+    for pattern, scale in ((_TIMESTAMP_SUFFIX_MS, 1000.0), (_TIMESTAMP_SUFFIX_S, 1.0)):
+        match = pattern.fullmatch(value)
+        if match is None:
+            continue
+        try:
+            stamp = int(match.group("ts")) / scale
+        except TypeError, ValueError:
+            return None
+        return match.group("prefix") if window[0] <= stamp <= window[1] else None
+    return None
+
+
+def _snapshot_window(snapshots: list[ScreenSnapshot] | None) -> tuple[float, float] | None:
+    """从已采集帧的 ``captured_at`` 推出会话时间窗（两侧各留一小时）；无帧返回 ``None``。"""
+    if not snapshots:
+        return None
+    stamps = [
+        snapshot.captured_at.timestamp() for snapshot in snapshots if getattr(snapshot, "captured_at", None) is not None
+    ]
+    if not stamps:
+        return None
+    return (min(stamps) - SNAPSHOT_WINDOW_MARGIN_SECONDS, max(stamps) + SNAPSHOT_WINDOW_MARGIN_SECONDS)
+
 
 def _dynamic_pattern_variants(prefix: str, value: str) -> set[str]:
     """前缀泛化的等价写法：``foo-``/``foo_`` 与收割侧记录的 ``foo-#`` 必须互相认得。
@@ -105,14 +160,45 @@ UNKNOWN_RESOLUTION_BOUND = (0, 0)
 #: 兜底检查点的中文说明。
 FALLBACK_CHECKPOINT_MESSAGE = "检查点：应可见一个已观察到的稳定元素"
 
+#: 易变定位器（日期格 / 时钟读数 / 列表实例序号）被拒绝、且该动作**无坐标可退**时的省略原因。
+#: 必须与 ``counts["omitted_actions"]`` 一起出现在产物里：宁可脚本少一步，也不要把注定
+#: 失效的选择器写进脚本，更不要静默地把文本输进一个猜出来的控件。
+VOLATILE_LOCATOR_OMIT_REASON = "volatile locator cannot be replayed"
+#: 输入框专用：没有坐标兜底，单独区分原因，便于诊断「少了输入」而不是「少了点击」。
+VOLATILE_INPUT_OMIT_REASON = "volatile locator on an input target cannot be replayed"
+
 #: ``confidence`` 三档中判为 low 的质量因素前缀。
+#:
+#: 后两条是定位器「注定跑不起来」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
+#: 时间戳前缀在同帧匹配到多个控件时不泛化也会挂。这类脚本报 high/medium 都是说谎。
 LOW_CONFIDENCE_PREFIXES: tuple[str, ...] = (
     "source agent outcome is failed",
     "source trace contains failed actions",
     "source trace does not end with a successful FINISH action",
+    "script contains a locator that will not match on replay",
+    "script contains a date/clock/list-instance locator that will not match on another day",
 )
 
 ConfidenceLevel = Literal["high", "medium", "low"]
+
+
+def confidence_factors_from_warnings(warnings: list[str]) -> list[str]:
+    """把定位器类警告翻译成质量因素（Live 与 DC 两条构建路径共用）。
+
+    ``locator_from_candidate`` 只负责发出**带上下文数字**的警告（帧数、同帧命中数、
+    具体 key），分档所需的固定文案在这里集中映射，避免两条路径各写一份而漂移。
+    返回的因素按固定顺序排列，且全部是「非阻断」的质量顾虑。
+    """
+    factors: list[str] = []
+    if any(item.startswith("unvalidated dynamic ") for item in warnings):
+        factors.append("source trace contains a dynamic locator without stable unique-prefix evidence")
+    if any(item.startswith("timestamp-suffixed ") and "generalized to prefix" in item for item in warnings):
+        factors.append("dynamic locator generalized from a single session without cross-round evidence")
+    if any(item.startswith("timestamp-suffixed ") and "prefix is not unique" in item for item in warnings):
+        factors.append("script contains a locator that will not match on replay")
+    if any(item.startswith(("volatile key ", "volatile id ")) for item in warnings):
+        factors.append("script contains a date/clock/list-instance locator that will not match on another day")
+    return factors
 
 
 def evaluate_runnable(
@@ -221,6 +307,12 @@ class CaseBuilder:
     def __init__(self, *, min_observed_rounds: int = 3, inject_fallback_assertion: bool = True):
         self.min_observed_rounds = max(int(min_observed_rounds), 1)
         self.inject_fallback_assertion = inject_fallback_assertion
+        # 本次构建可用的已采集帧，以及由它们推出的会话时间窗。时间戳实例 key 的泛化
+        # （Phase 2）与「前缀在帧里是否唯一」的离线验证都只读这两个值：零设备零磁盘成本。
+        # 由 ``from_trace`` / ``from_dc_invocations`` 在入口处赋值，因此 ``CaseBuilder``
+        # 的构造签名不变，``dc/generator.py`` 与 ``generation/hypium.py`` 的调用点都不用改。
+        self._snapshots: list[ScreenSnapshot] = []
+        self._snapshot_window: tuple[float, float] | None = None
 
     # ------------------------------------------------------------------
     # Live 运行轨迹
@@ -236,6 +328,9 @@ class CaseBuilder:
         scenario: ScenarioKind = ScenarioKind.CORE_FLOW,
     ) -> CaseBuildResult:
         """把 Live 轨迹构建为用例 IR（逐分支复刻 ``HypiumGenerator._render_actions``）。"""
+        # 已采集帧是「前缀是否唯一」与「时间戳是否落在会话窗口内」的唯一证据来源。
+        self._snapshots = list(trace.snapshots)
+        self._snapshot_window = _snapshot_window(self._snapshots)
         warnings: list[str] = []
         omitted: list[dict[str, str]] = []
         source_failures: list[dict[str, str]] = []
@@ -294,15 +389,35 @@ class CaseBuilder:
                 coordinate = self._runtime_element_coordinate(trace, action)
                 recovered = self._recorded_key_locator(trace, action, action.locator)
                 if recovered is not None:
-                    add_step(
-                        StepAction.CLICK,
-                        step_id=action.step_id,
-                        locator=self.locator_from_candidate(recovered, target, profile, warnings),
-                    )
+                    locator = self.locator_from_candidate(recovered, target, profile, warnings)
                     warnings.append(
                         f"{action.step_id}: runtime locator recovered as "
                         f"{recovered.kind}:{recovered.value!r} from the recorded frame"
                     )
+                    if locator is not None:
+                        add_step(StepAction.CLICK, step_id=action.step_id, locator=locator)
+                    elif coordinate is not None:
+                        # 恢复出来的 key 本身不可回放（日期格 / 列表实例）：退回坐标。
+                        add_step(
+                            StepAction.CLICK,
+                            step_id=action.step_id,
+                            coordinate=coordinate,
+                            locator=self.coordinate_locator(
+                                coordinate,
+                                bound=self._snapshot_bound(trace, action.before_snapshot_id)
+                                or self._trace_bound(trace),
+                                label=str(target or ""),
+                                warning=f"{action.step_id}: volatile key {recovered.value!r} "
+                                f"fell back to coordinate {coordinate}",
+                            ),
+                        )
+                        warnings.append(
+                            f"{action.step_id}: volatile key {recovered.value!r} fell back to coordinate {coordinate}"
+                        )
+                        coordinate_fallbacks += 1
+                    else:
+                        omit(action, VOLATILE_LOCATOR_OMIT_REASON)
+                        continue
                 elif (
                     action.locator and action.locator.kind in {LocatorKind.SPATIAL, LocatorKind.VLM_BBOX} and coordinate
                 ):
@@ -321,7 +436,27 @@ class CaseBuilder:
                     coordinate_fallbacks += 1
                 else:
                     locator = self.locator_from_candidate(action.locator, target, profile, warnings)
-                    add_step(StepAction.CLICK, step_id=action.step_id, locator=locator)
+                    if locator is None and coordinate is not None:
+                        # 运行时候选就是不可回放的易变 key：保留动作，改成坐标兜底。
+                        add_step(
+                            StepAction.CLICK,
+                            step_id=action.step_id,
+                            coordinate=coordinate,
+                            locator=self.coordinate_locator(
+                                coordinate,
+                                bound=self._snapshot_bound(trace, action.before_snapshot_id)
+                                or self._trace_bound(trace),
+                                label=str(target or ""),
+                                warning=f"{action.step_id}: volatile locator fell back to coordinate {coordinate}",
+                            ),
+                        )
+                        warnings.append(f"{action.step_id}: volatile locator fell back to coordinate {coordinate}")
+                        coordinate_fallbacks += 1
+                    elif locator is None:
+                        omit(action, VOLATILE_LOCATOR_OMIT_REASON)
+                        continue
+                    else:
+                        add_step(StepAction.CLICK, step_id=action.step_id, locator=locator)
                 generated_actions += 1
             elif tool == ToolName.CLICK_COORDINATE:
                 raw = action.params.get("coordinate")
@@ -343,6 +478,11 @@ class CaseBuilder:
             elif tool == ToolName.INPUT_TEXT:
                 target = action.params.get("target") or "输入框"
                 locator = self.locator_from_candidate(action.locator, target, profile, warnings)
+                if locator is None:
+                    # 输入框没有坐标兜底：定位器不可回放时省略动作并留痕，
+                    # 也不要把文本静默输进一个猜出来的控件。
+                    omit(action, VOLATILE_INPUT_OMIT_REASON)
+                    continue
                 add_step(
                     StepAction.INPUT_TEXT,
                     step_id=action.step_id,
@@ -379,6 +519,9 @@ class CaseBuilder:
             elif tool == ToolName.ASSERT_VISIBLE:
                 target = action.params.get("target") or action.params.get("text")
                 locator = self.locator_from_candidate(action.locator, target, profile, warnings)
+                if locator is None:
+                    # 易变 key 被拒后回退到语义文本断言（与「完全没有定位器」同一分支）。
+                    locator = self.locator_from_candidate(None, target, profile, warnings)
                 attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_EXISTS, message_zh="", locator=locator))
                 generated_assertions += 1
                 explicit_assertions += 1
@@ -407,6 +550,9 @@ class CaseBuilder:
                 explicit_assertions += 1
             elif tool == ToolName.ASSERT_NOT_VISIBLE:
                 locator = self.locator_from_candidate(action.locator, action.params.get("target"), profile, warnings)
+                if locator is None:
+                    # 同 ASSERT_VISIBLE：拒绝易变 key 后退回语义文本锚点。
+                    locator = self.locator_from_candidate(None, action.params.get("target"), profile, warnings)
                 attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_ABSENT, message_zh="", locator=locator))
                 generated_assertions += 1
                 explicit_assertions += 1
@@ -512,16 +658,28 @@ class CaseBuilder:
         snapshots: list[ScreenSnapshot] | None = None,
         case_id: str | None = None,
         slug: str | None = None,
+        profile: TargetAppProfile | None = None,
     ) -> CaseBuildResult:
         """把 DC 会话录制构建为用例 IR（复刻 ``dc/generator.py`` 的逐分支语义）。
 
         ``invocations`` 的元素类型是 ``dc.models.DcToolInvocation``；此处故意用 ``Any``
         并在函数体内延迟 import，避免 ``cases`` ↔ ``dc`` 的包级循环依赖。
+
+        ``profile`` 可选：DC 会话没有「轮」的概念，但**已蒸馏过 Profile 的应用**可以在
+        磁盘上查到稳定定位器证据（``registry.get_any(bundle_name=...)``），传进来就能
+        让内容 key 的泛化走 ``validated dynamic`` 分支；``None`` 时退回「时间戳前缀 +
+        帧内唯一性」的离线证据（见 :meth:`locator_from_candidate`）。
+        ``snapshots`` 是本会话已采集的帧，同时用于坐标解析边界、时间戳会话窗口与
+        前缀唯一性验证——三者都零设备零磁盘成本。
         """
         from ..dc.models import DcToolName  # 延迟 import：避免 harmony_test_agent.dc 包初始化成环
 
         non_replayable = NON_REPLAYABLE_DC_TOOLS
         assert_tools = {DcToolName.ASSERT_VISIBLE, DcToolName.ASSERT_NOT_VISIBLE, DcToolName.ASSERT_TEXT}
+
+        # 帧证据只在这里赋值一次：``locator_from_candidate`` 与坐标边界都读实例属性。
+        self._snapshots = list(snapshots or [])
+        self._snapshot_window = _snapshot_window(self._snapshots)
 
         warnings: list[str] = []
         omitted: list[dict[str, str]] = []
@@ -613,15 +771,20 @@ class CaseBuilder:
                 warnings=warnings,
                 swipe_inferred=swipe_inferred,
                 bound=bundle_for_bounds,
+                omitted=omitted,
+                profile=profile,
             )
             if not produced:
-                omitted.append(
-                    {
-                        "invocation_id": invocation.invocation_id,
-                        "tool": invocation.tool.value,
-                        "reason": "could not map to action",
-                    }
-                )
+                # ``_dc_step`` 自己会为「有明确语义的省略」写 reason（例如易变定位器），
+                # 只有它完全无法归类的调用才落到这条兜底文案。
+                if not any(item["invocation_id"] == invocation.invocation_id for item in omitted):
+                    omitted.append(
+                        {
+                            "invocation_id": invocation.invocation_id,
+                            "tool": invocation.tool.value,
+                            "reason": "could not map to action",
+                        }
+                    )
                 continue
             if counted:
                 included_count += 1
@@ -645,6 +808,8 @@ class CaseBuilder:
         if explicit_assertions == 0:
             # 「无显式断言」从阻断条件降为 medium 置信度：脚本照样能跑，只是没有检查点。
             confidence_factors.append("no explicit assert_* tool call was recorded")
+        # 定位器质量顾虑（未验证动态 key / 时间戳泛化依据 / 易变 key）与 Live 同一映射。
+        confidence_factors.extend(confidence_factors_from_warnings(warnings))
         confidence = evaluate_confidence(confidence_factors, outcome="completed")
 
         counts = {
@@ -660,7 +825,7 @@ class CaseBuilder:
         }
         spec = self._assemble(
             steps=steps,
-            profile=None,
+            profile=profile,
             trace=None,
             case_id=case_id,
             slug=slug,
@@ -672,6 +837,11 @@ class CaseBuilder:
             source_kind="dc_session",
             source_id=session_id,
         )
+        # 晋级资格与「能否执行」解耦：DC 录制既没有跨轮 Profile 验证，也没有跨会话证据，
+        # 因此默认不能作为 Profile 晋级证据（历史实现无条件给了 True，是虚假承诺）。
+        promotion_blockers: list[str] = []
+        if profile is None or profile.status not in {ProfileStatus.CANDIDATE, ProfileStatus.VERIFIED}:
+            promotion_blockers.append("dc recording has no cross-round locator evidence")
         return CaseBuildResult(
             spec=spec,
             omitted_actions=omitted,
@@ -682,8 +852,8 @@ class CaseBuilder:
             confidence=confidence,
             replay_eligible=replay_eligible,
             runnable_blockers=runnable_blockers,
-            promotion_eligible=replay_eligible,
-            promotion_blockers=[],
+            promotion_eligible=replay_eligible and not promotion_blockers,
+            promotion_blockers=promotion_blockers,
             purpose="acceptance" if replay_eligible else "diagnostic",
             explicit_assertions=explicit_assertions,
             source_failures=source_failures,
@@ -699,12 +869,24 @@ class CaseBuilder:
         warnings: list[str],
         swipe_inferred: dict[str, int],
         bound: tuple[int, int] | None,
+        omitted: list[dict[str, str]],
+        profile: TargetAppProfile | None = None,
     ) -> tuple[bool, bool]:
         """把一个可回放的 DC 调用转为 IR 步骤；返回 ``(是否产出内容, 是否计入 included_count)``。"""
         tool = invocation.tool
         args = dict(invocation.args or {})
         element: UIElement | None = invocation.resolved_element
         locator: LocatorSpec | None = None
+
+        def omit(reason: str) -> None:
+            """在 ``_dc_step`` 内部直接写省略记录（reason 比调用方的兜底文案精确）。"""
+            omitted.append(
+                {
+                    "invocation_id": invocation.invocation_id,
+                    "tool": invocation.tool.value,
+                    "reason": reason,
+                }
+            )
 
         if tool == dc_tool_name.START_APP:
             add_step(
@@ -715,17 +897,18 @@ class CaseBuilder:
             return True, True
 
         if tool == dc_tool_name.CLICK:
-            if element and (element.key or element.id):
-                kind = LocatorKind.KEY if element.key else LocatorKind.ID
-                value = element.key or element.id
-                locator = LocatorSpec(
-                    kind=kind,
-                    value=value,
-                    target_label=value,
-                    evidence=LocatorEvidence(source="dc_resolved_element"),
+            raw_value = (element.key or element.id) if element is not None else ""
+            locator = self._dc_locator(element, str(args.get("target") or "") or None, profile, warnings)
+            if locator is not None:
+                add_step(
+                    StepAction.CLICK,
+                    step_id=invocation.invocation_id,
+                    locator=locator,
+                    # 步骤标签保留**录制时的原始 key**（历史行为），前缀泛化只影响选择器。
+                    text=raw_value,
                 )
-                add_step(StepAction.CLICK, step_id=invocation.invocation_id, locator=locator, text=value)
             else:
+                # 没有可回放的稳定定位器（无命中 / 易变 key 被拒）→ 坐标兜底。
                 coordinate = args.get("coordinate") or [args.get("x", 0), args.get("y", 0)]
                 point = (int(coordinate[0]), int(coordinate[1]))
                 add_step(
@@ -768,17 +951,13 @@ class CaseBuilder:
             return True, True
 
         if tool == dc_tool_name.INPUT_TEXT:
-            if element and (element.key or element.id):
-                kind = LocatorKind.KEY if element.key else LocatorKind.ID
-                value = element.key or element.id
-                locator = LocatorSpec(
-                    kind=kind,
-                    value=value,
-                    target_label=value,
-                    evidence=LocatorEvidence(source="dc_resolved_element"),
-                )
-            else:
-                locator = self.locator_from_candidate(None, "输入框", None, warnings)
+            locator = self._dc_locator(element, "输入框", profile, warnings)
+            if locator is None:
+                if element is not None and (element.key or element.id):
+                    # 输入框没有坐标兜底，也不能把文本输进猜出来的控件：省略并留痕。
+                    omit(VOLATILE_INPUT_OMIT_REASON)
+                    return False, False
+                locator = self.locator_from_candidate(None, "输入框", profile, warnings)
             add_step(
                 StepAction.INPUT_TEXT,
                 step_id=invocation.invocation_id,
@@ -802,24 +981,14 @@ class CaseBuilder:
 
         if tool in {dc_tool_name.ASSERT_VISIBLE, dc_tool_name.ASSERT_NOT_VISIBLE, dc_tool_name.ASSERT_TEXT}:
             target = str(args.get("target") or args.get("text") or "")
-            if element and (element.key or element.id):
-                kind = LocatorKind.KEY if element.key else LocatorKind.ID
-                value = element.key or element.id
-                locator = LocatorSpec(
-                    kind=kind,
-                    value=value,
-                    target_label=target or value,
-                    evidence=LocatorEvidence(source="dc_resolved_element"),
-                )
-            else:
-                locator = None
+            locator = self._dc_locator(element, target, profile, warnings)
             if tool == dc_tool_name.ASSERT_VISIBLE:
                 if locator is None:
-                    locator = self.locator_from_candidate(None, target, None, warnings)
+                    locator = self.locator_from_candidate(None, target, profile, warnings)
                 attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_EXISTS, message_zh="", locator=locator))
             elif tool == dc_tool_name.ASSERT_NOT_VISIBLE:
                 if locator is None:
-                    locator = self.locator_from_candidate(None, target, None, warnings)
+                    locator = self.locator_from_candidate(None, target, profile, warnings)
                 attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_ABSENT, message_zh="", locator=locator))
             else:
                 attach(
@@ -883,7 +1052,7 @@ class CaseBuilder:
         expected: str,
         profile: TargetAppProfile | None,
         warnings: list[str],
-    ) -> LocatorSpec:
+    ) -> LocatorSpec | None:
         """把 TEXT_EQUALS 检查点对齐到「真正持有该文本的元素」。
 
         真机复盘（run-20260921T063745Z-ba36e30e 的知乎++回放）：``assert_text 'OpenHarmony'`` 的
@@ -1017,21 +1186,97 @@ class CaseBuilder:
             return LocatorCandidate(kind=LocatorKind.KEY, value=owner.key, score=0.9)
         return LocatorCandidate(kind=LocatorKind.ID, value=owner.id, score=0.9)
 
+    def _dc_locator(
+        self,
+        element: Any | None,
+        target: str | None,
+        profile: TargetAppProfile | None,
+        warnings: list[str],
+    ) -> LocatorSpec | None:
+        """DC ``resolved_element`` → IR 定位器：**必须**经 :meth:`locator_from_candidate`。
+
+        直接手工构造 ``LocatorSpec`` 会同时跳过动态 key 泛化（``_DYNAMIC_LOCATOR``）与
+        易变 key 拒绝（``is_unreplayable_locator_key``），导致
+        ``add_agenda_title-<epoch_ms>`` 这类实例 key 被原样写进脚本，回放必然
+        ``Can't find component with [BY.key(...)]``（真机复盘 dc-20260922T115708Z-f2acffa4）。
+
+        返回 ``None`` 表示「这个元素给不出可回放的稳定定位器」：调用方负责坐标兜底
+        （点击）或省略动作（输入框）。``evidence.source`` 保持 ``dc_resolved_element``，
+        DC 录制链路的既有断言依赖它。
+        """
+        if element is None or not (element.key or element.id):
+            return None
+        kind = LocatorKind.KEY if element.key else LocatorKind.ID
+        candidate = LocatorCandidate(kind=kind, value=element.key or element.id)
+        spec = self.locator_from_candidate(candidate, target or candidate.value, profile, warnings)
+        if spec is None:
+            return None
+        # 保留 DC 的证据来源标记：既有测试断言 evidence.source == "dc_resolved_element"。
+        evidence = spec.evidence or LocatorEvidence()
+        return spec.model_copy(
+            update={"evidence": evidence.model_copy(update={"source": "dc_resolved_element"})},
+            deep=True,
+        )
+
+    def _prefix_unique_in_snapshots(
+        self,
+        prefix: str,
+        kind: LocatorKind,
+        snapshots: list[ScreenSnapshot] | None,
+    ) -> tuple[bool, int, int]:
+        """在已采集帧里验证前缀唯一性；返回 ``(是否唯一, 含该前缀的帧数, 最大同帧命中数)``。
+
+        零设备零磁盘成本：``from_dc_invocations`` 已收到 snapshots，``from_trace`` 直接读
+        ``trace.snapshots``。判定标准是「至少出现过一次，且没有任何一帧里同前缀匹配 >1 个
+        控件」——``BY.key(prefix, STARTS_WITH)`` 在同帧匹配多个控件时 hypium 取第一个，
+        可能操作到错误元素，因此不唯一就**不泛化**，改为响亮警告 + 低置信度。
+        """
+        if not prefix or not snapshots:
+            return False, 0, 0
+        frames = 0
+        max_hits = 0
+        for snapshot in snapshots:
+            hits = 0
+            for item in snapshot.elements:
+                value = item.key if kind == LocatorKind.KEY else item.id
+                if value and value.startswith(prefix):
+                    hits += 1
+            if hits:
+                frames += 1
+                max_hits = max(max_hits, hits)
+        return frames >= 1 and max_hits <= 1, frames, max_hits
+
     def locator_from_candidate(
         self,
         locator: LocatorCandidate | None,
         target: str | None,
         profile: TargetAppProfile | None,
         warnings: list[str],
-    ) -> LocatorSpec:
+    ) -> LocatorSpec | None:
         """把运行时候选定位器提升为带 Profile 证据的 IR 定位器。
 
         逐条复刻 ``HypiumGenerator._selector`` 的语义与**警告文案**：
         动态 key 有跨轮证据 → 前缀泛化 + ``validated dynamic ...`` 警告；
-        无证据 → 保留精确值 + ``unvalidated dynamic ...`` 警告（该警告仍会喂给
-        ``incomplete_reasons``）；完全无定位器 → ``BY.text(target)`` 兜底 + 语义回退警告。
+        无跨轮证据但时间戳前缀在已采集帧里唯一 → 离线泛化 + ``timestamp-suffixed ...`` 警告；
+        两者都不成立 → 保留精确值 + ``unvalidated dynamic ...`` 警告（该警告仍会喂给
+        ``incomplete_reasons``）；易变 key（日期格 / 时钟读数 / 列表实例）→ **返回 ``None``**，
+        由调用方坐标兜底或省略动作；完全无定位器 → ``BY.text(target)`` 兜底 + 语义回退警告。
         """
+        if (
+            locator is not None
+            and locator.kind in {LocatorKind.KEY, LocatorKind.ID}
+            # 可折叠的实例 ID（``add_agenda_title-<epoch_ms>``）走泛化，不在这条拒绝。
+            and _DYNAMIC_LOCATOR.fullmatch(locator.value) is None
+            and is_unreplayable_locator_key(locator.value)
+        ):
+            method = "key" if locator.kind == LocatorKind.KEY else "id"
+            warnings.append(
+                f"volatile {method} {locator.value!r} encodes a date/clock/list-instance and cannot "
+                "be used as a replay locator"
+            )
+            return None
         if locator is not None and locator.kind in {LocatorKind.KEY, LocatorKind.ID}:
+            method = "key" if locator.kind == LocatorKind.KEY else "id"
             dynamic = _DYNAMIC_LOCATOR.fullmatch(locator.value)
             if dynamic:
                 prefix = dynamic.group(1)
@@ -1040,8 +1285,7 @@ class CaseBuilder:
                     # 前缀可能是 ``foo-``（连字符 + 毫秒时间戳）或 ``foo_``：Hypium 的
                     # starts_with 对二者同样有效，用前缀本身作为选择器值。
                     warnings.append(
-                        f"validated dynamic {'key' if locator.kind == LocatorKind.KEY else 'id'} "
-                        f"{locator.value!r} generalized to unique prefix {prefix!r}"
+                        f"validated dynamic {method} {locator.value!r} generalized to unique prefix {prefix!r}"
                     )
                     return LocatorSpec(
                         kind=locator.kind,
@@ -1050,10 +1294,34 @@ class CaseBuilder:
                         target_label=target or prefix,
                         evidence=evidence,
                     )
-                warnings.append(
-                    f"unvalidated dynamic {'key' if locator.kind == LocatorKind.KEY else 'id'} "
-                    f"{locator.value!r} retained as an exact diagnostic selector"
-                )
+                # DC 会话没有「轮」，profile 恒为 None；但时间戳实例 key 的前缀唯一性
+                # 可以用本会话已采集的帧离线确认，零设备零磁盘成本。
+                ts_prefix = _timestamp_suffix(locator.value, self._snapshot_window)
+                if ts_prefix is not None:
+                    unique, frames, max_hits = self._prefix_unique_in_snapshots(
+                        ts_prefix, locator.kind, self._snapshots
+                    )
+                    if unique:
+                        warnings.append(
+                            f"timestamp-suffixed {method} {locator.value!r} generalized to prefix "
+                            f"{ts_prefix!r} (unique in {frames} captured frame(s); "
+                            "no cross-round Profile evidence)"
+                        )
+                        return LocatorSpec(
+                            kind=locator.kind,
+                            value=ts_prefix,
+                            match=MatchMode.STARTS_WITH,
+                            target_label=target or ts_prefix,
+                        )
+                    warnings.append(
+                        f"timestamp-suffixed {method} {locator.value!r} matched {max_hits} components "
+                        f"in {frames} frame(s); prefix is not unique, retained as an exact selector "
+                        "that will fail on replay"
+                    )
+                else:
+                    warnings.append(
+                        f"unvalidated dynamic {method} {locator.value!r} retained as an exact diagnostic selector"
+                    )
             return LocatorSpec(
                 kind=locator.kind,
                 value=locator.value,
@@ -1191,8 +1459,9 @@ class CaseBuilder:
             factors.append("source trace has no successful explicit assertion")
         if any(item["reason"].startswith("unsupported replay tool") for item in omitted):
             factors.append("source trace contains unsupported replay actions")
-        if any(item.startswith("unvalidated dynamic ") for item in warnings):
-            factors.append("source trace contains a dynamic locator without stable unique-prefix evidence")
+        # 定位器类顾虑（未验证动态 key / 时间戳泛化依据 / 易变 key）统一由映射函数给出，
+        # 避免 Live 与 DC 两条路径各写一份而漂移。
+        factors.extend(confidence_factors_from_warnings(warnings))
         return list(dict.fromkeys(factors))
 
     @staticmethod

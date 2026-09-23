@@ -68,6 +68,8 @@ const DC_ENTRY = entry({
   script_id: DC_ID,
   source: "dc",
   case_id: "dc_case",
+  // 已入库的 DC 录制：只有 case_persisted === true 时 case_id 才被当作脚本身份。
+  case_persisted: true,
   replay_eligible: false,
   included_actions: 5,
   omitted_actions: 10,
@@ -212,5 +214,79 @@ describe("ScriptPanel 脚本库", () => {
     expect(launch).toBeDisabled();
     expect(screen.getByText(/该脚本当前不可执行/)).toBeInTheDocument();
     expect(screen.getByText("script has no replayable action")).toBeInTheDocument();
+  });
+
+  it("DC 未入库脚本不用悬空的 case_id 冒充用例身份，并提示可用入库接口", async () => {
+    const unsaved = entry({
+      script_id: "dc-3/generated/dc_test_dc_3.py",
+      source: "dc",
+      case_id: "dangling_case",
+      case_persisted: false,
+      replay_eligible: true,
+    });
+    listScripts.mockResolvedValue([unsaved]);
+    getScript.mockResolvedValue(detailFor(unsaved));
+
+    render(<ScriptPanel />);
+
+    // 等详情加载完成，再断言列表标题与详情标题都用文件名。
+    await screen.findByText("dc-3/generated/dc_test_dc_3.py");
+    const titles = screen.getAllByText("dc_test_dc_3.py", { selector: "strong" });
+    expect(titles).toHaveLength(2);
+    expect(screen.queryByText("dangling_case")).not.toBeInTheDocument();
+    expect(titles[0].getAttribute("title")).toBe("dc_test_dc_3.py");
+    expect(screen.getByText(/尚未保存为可复用用例/)).toBeInTheDocument();
+    expect(screen.getByText(/POST \/api\/cases\/from-dc\//)).toBeInTheDocument();
+  });
+
+  it("DC 已入库脚本（case_persisted=true）仍用 case_id 作为身份并展示用例 ID", async () => {
+    const persisted = entry({
+      script_id: "dc-4/generated/dc_test_dc_4.py",
+      source: "dc",
+      case_id: "persisted_case",
+      case_persisted: true,
+      replay_eligible: true,
+    });
+    listScripts.mockResolvedValue([persisted]);
+    getScript.mockResolvedValue(detailFor(persisted));
+
+    render(<ScriptPanel />);
+
+    await screen.findByText("dc-4/generated/dc_test_dc_4.py");
+    // 列表标题 + 详情标题 + 详情里的用例 ID（<code>）
+    expect(screen.getAllByText("persisted_case")).toHaveLength(3);
+    expect(screen.getByText("persisted_case", { selector: "code" })).toBeInTheDocument();
+    expect(screen.queryByText(/尚未保存为可复用用例/)).not.toBeInTheDocument();
+  });
+
+  it("旧 DC 产物（缺 case_persisted 键）按未入库处理，不显示悬空 case_id", async () => {
+    const legacy = entry({
+      script_id: "dc-5/generated/dc_test_dc_5.py",
+      source: "dc",
+      case_id: "legacy_dangling_case",
+      replay_eligible: true,
+    });
+    listScripts.mockResolvedValue([legacy]);
+    getScript.mockResolvedValue(detailFor(legacy));
+
+    render(<ScriptPanel />);
+
+    await screen.findByText("dc-5/generated/dc_test_dc_5.py");
+    expect(screen.getAllByText("dc_test_dc_5.py", { selector: "strong" })).toHaveLength(2);
+    expect(screen.queryByText("legacy_dangling_case")).not.toBeInTheDocument();
+    // 缺该键（未知）不渲染入库提示，避免对旧产物下结论。
+    expect(screen.queryByText(/尚未保存为可复用用例/)).not.toBeInTheDocument();
+  });
+
+  it("Live 脚本没有 case_persisted 键也照旧用 case_id 作为身份", async () => {
+    listScripts.mockResolvedValue([LIVE_ENTRY]);
+    getScript.mockResolvedValue(detailFor(LIVE_ENTRY));
+
+    render(<ScriptPanel />);
+
+    await screen.findByText(LIVE_ID);
+    // 列表标题 + 详情标题（Live 语义不变）
+    expect(screen.getAllByText("live_case")).toHaveLength(2);
+    expect(screen.queryByText(/尚未保存为可复用用例/)).not.toBeInTheDocument();
   });
 });

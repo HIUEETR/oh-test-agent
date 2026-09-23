@@ -468,13 +468,23 @@ class DcScriptArtifact(BaseModel):
     confidence_factors: list[str] = Field(default_factory=list)
     """质量顾虑清单（非阻断），逐条对应 ``confidence`` 分档依据。"""
     promotion_eligible: bool = False
-    """能否作为 Profile 晋级证据；DC 录制脚本恒为可执行性的镜像，不参与晋级。"""
+    """能否作为 Profile 晋级证据。
+
+    DC 录制既无跨轮 Profile 验证也无跨会话定位器证据，因此默认为 ``False``；
+    只有会话关联到 CANDIDATE/VERIFIED Profile（已有跨轮证据）时才随可执行性打开。
+    """
+    promotion_blockers: list[str] = Field(default_factory=list)
+    """不能作为 Profile 晋级证据的原因；``promotion_eligible`` 为 ``False`` 时非空。"""
     runnable_blockers: list[str] = Field(default_factory=list)
     """不可执行的原因；非空时 ``replay_eligible`` 必为 ``False``。"""
     explicit_assertions: int = 0
     """成功执行的 assert_* 工具调用数（决定 ``confidence`` 是否降为 medium，不再阻断执行）。"""
     case_id: str | None = None
-    """用例 IR 的 ``case_id``（``cases/spec.py``）；旧产物为 ``None``。"""
+    """**用例库**里的用例 ID（``POST /api/cases/from-dc/{session_id}`` 的产物）。
+
+    未入库的临时脚本为 ``None``（config 对应 ``case_persisted: false``）：脚本生成从不落库，
+    因此不得把刚 mint 的用例 IR ID 当成可查询的用例身份展示。
+    """
     case_spec_path: str | None = None
     """落盘的 ``case_spec.json`` 绝对路径；旧产物为 ``None``。"""
     xdevice_project_path: str | None = None

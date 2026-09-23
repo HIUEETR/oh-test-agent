@@ -52,6 +52,17 @@ TIMEOUT_MARKER_RE = re.compile(
     re.I,
 )
 
+#: 脚本定位器失效：hypium 的实际文案是 ``Can't find component with [BY.key('...')]``。
+#: 与 :data:`TIMEOUT_MARKER_RE` 的 ``find component.*(timeout|not found)`` **不匹配**（实测），
+#: 因此定位器失效此前完全不被识别，导致 ``passed=false`` 与 ``healthy=true`` 并存。
+STALE_LOCATOR_RE = re.compile(
+    r"Can't find component with \[(?P<selector>.+?)\]"
+    r"|HypiumComponentNotFoundError:\s*(?P<selector2>.+)",
+)
+STALE_STEP_RE = re.compile(r"line (?P<line>\d+), in \w+\s*\n\s*(?P<source>.+)")
+#: traceback 帧的文件路径；用于区分「生成的脚本帧」与 ``site-packages`` 内部帧。
+FRAME_PATH_RE = re.compile(r'File "(?P<path>[^"]+)"')
+
 #: 压测内存增长阈值（KB）。生成的用例未附带阈值时使用该默认值。
 DEFAULT_MEMORY_GROWTH_THRESHOLD_KB = 30_000
 
@@ -85,6 +96,11 @@ SYMPTOM_KINDS: dict[str, frozenset[AnomalyKind]] = {
     # 生成能判出「已复现」的复现用例（Phase 4 反向映射的前置条件）。
     "memory_growth": frozenset({AnomalyKind.MEMORY_GROWTH}),
     "other": frozenset({AnomalyKind.MEMORY_GROWTH}),
+    # 脚本定位器失效**不是应用缺陷**，因此绝不能并入 ``"other"``（那会让它冒充
+    # 「other 症状已复现」）。它按 ``functional`` 口径判定：重跑时硬 checkpoint 失败
+    # 即视为复现——该分支在 :func:`_symptom_reproduced` 里提前返回，下面的集合只为让
+    # ``ANOMALY_TO_SYMPTOM`` ↔ ``SYMPTOM_KINDS`` 的反函数不变式成立而登记，不参与判定。
+    "functional": frozenset({AnomalyKind.LOCATOR_STALE}),
 }
 
 
@@ -145,6 +161,57 @@ def _symptom_reproduced(
     if expected is None:
         return None
     return any(finding.kind in expected and finding.severity in ADVISORY_SEVERITIES for finding in findings)
+
+
+def _clean_selector(value: str) -> str:
+    """规范化选择器文本。
+
+    ``HypiumComponentNotFoundError:`` 分支会把整句 ``Can't find component with [...]``
+    带回来，此时再退一层取方括号内容；hypium 文案里的选择器可能带尾部 ``]`` / 换行。
+    """
+    text = str(value or "").strip()
+    inner = re.search(r"\[(.*)\]", text, re.S)
+    if inner is not None:
+        text = inner.group(1)
+    return text.strip().rstrip("]").strip()
+
+
+def _extract_stale_selector(text: str) -> str | None:
+    """按 :data:`STALE_LOCATOR_RE` 抽取失效选择器；抽不到返回 ``None``。"""
+    try:
+        match = STALE_LOCATOR_RE.search(text or "")
+    except Exception:  # 文本扫描异常不得中断分析
+        return None
+    if match is None:
+        return None
+    for group in ("selector", "selector2"):
+        selector = _clean_selector(match.group(group) or "")
+        if selector:
+            return selector
+    return None
+
+
+def _extract_stale_step(text: str) -> tuple[int, str, bool]:
+    """抽取 traceback 里的「出错脚本行 + 源码行」，返回 ``(行号, 源码行, 是否脚本帧)``。
+
+    生成的脚本帧优先：同一条 traceback 里还有 ``site-packages``（``.venv`` / ``devicetest``
+    / ``hypium``）的内部帧，直接取第一条会把行号指到库代码而不是生成的脚本；两条判据
+    （源码行含 ``driver.`` / 帧文件路径不在 ``site-packages`` 里）都不满足时退回第一条。
+    """
+    first: tuple[int, str] | None = None
+    for match in STALE_STEP_RE.finditer(text or ""):
+        try:
+            line = int(match.group("line"))
+        except TypeError, ValueError:
+            continue
+        source = (match.group("source") or "").strip()
+        if first is None:
+            first = (line, source)
+        paths = list(FRAME_PATH_RE.finditer(text, 0, match.start()))
+        path = paths[-1].group("path") if paths else ""
+        if "driver." in source or (bool(path) and "site-packages" not in path.replace("\\", "/")):
+            return line, source, True
+    return (*first, False) if first is not None else (0, "", False)
 
 
 def _screen_size(hierarchy: Any) -> tuple[int, int] | None:
@@ -486,8 +553,14 @@ class ExecutionAnalyzer:
         blank_findings, tail_run, tail_digests = self._scan_frames(analysis_input, coverage, groups_metrics)
         layout_findings, layout_stale, layout_file = self._scan_layout(analysis_input, coverage, fetch_layout)
         unresponsive = self._detect_unresponsive(analysis_input, tail_run, layout_stale)
+        # 5.3 的区分规则：定位器失效与页面无响应是**两个独立信号，互不抑制**——
+        # 页面没有停滞时只留下 LOCATOR_STALE；页面确实停滞时 _detect_unresponsive 会另外
+        # 产出一条 PAGE_UNRESPONSIVE，这里原样并进 findings，不做任何一方对另一方的过滤。
+        stale_locator = self._detect_stale_locator(analysis_input)
         stress_finding, stress_metrics = self._scan_stress(analysis_input, coverage)
         findings = [*log_findings, *blank_findings, *layout_findings, *unresponsive]
+        if stale_locator is not None:
+            findings.append(stale_locator)
         if stress_finding is not None:
             findings.append(stress_finding)
         findings = self._escalate_blank_screen(findings)
@@ -769,6 +842,76 @@ class ExecutionAnalyzer:
                 )
             ]
         return []
+
+    def _detect_stale_locator(self, analysis_input: _AnalysisInput) -> AnomalyFinding | None:
+        """第 3.5 步：脚本定位器在设备上已失效（选择器过期，非应用缺陷）。
+
+        与 :meth:`_detect_unresponsive` 的关系（**两个信号互不抑制**）：
+
+        - 本检测只看「选择器在设备上找不到」，页面是否真的卡死是另一个独立信号；
+        - 页面**没有**停滞 → 只报 ``LOCATOR_STALE``；
+        - 页面**确实**停滞（``_detect_unresponsive`` 也产出了 finding）→ 两条都报：
+          既不因为「有定位器失效」就吞掉 ``PAGE_UNRESPONSIVE``，也不反过来。
+
+        信息可能只存在于 ``generated_result.json``（这次真机失败的 ``stderr.log`` 是空的），
+        因此 stdout/stderr 文本与 ``generated_result`` 的 ``error.message`` / ``traceback``
+        **两路都必须扫**。best-effort：任何异常都只记日志并返回 ``None``。
+        """
+        try:
+            return self._detect_stale_locator_unsafe(analysis_input)
+        except Exception as exc:  # 定位器扫描失败不得中断分析
+            logger.warning("stale locator scan failed: %s: %s", type(exc).__name__, exc)
+            return None
+
+    @staticmethod
+    def _detect_stale_locator_unsafe(analysis_input: _AnalysisInput) -> AnomalyFinding | None:
+        """定位器失效检测主体（由 :meth:`_detect_stale_locator` 包裹兜底）。"""
+        sources: list[tuple[str, str]] = []
+        if analysis_input.stdout_text:
+            sources.append(("stdout", analysis_input.stdout_text))
+        payload = analysis_input.generated_result
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and message:
+                    sources.append(("generated_result", message))
+            traceback_text = payload.get("traceback")
+            if isinstance(traceback_text, str) and traceback_text:
+                sources.append(("generated_result", traceback_text))
+        selector, matched_in = "", ""
+        for origin, text in sources:
+            selector = _extract_stale_selector(text)
+            if selector:
+                matched_in = origin
+                break
+        if not selector:
+            # 抽不到选择器就不产出 finding：绝不报一条没有证据的「定位器失效」。
+            return None
+        line, source, preferred = 0, "", False
+        for _, text in sources:
+            candidate_line, candidate_source, candidate_preferred = _extract_stale_step(text)
+            if candidate_source and (candidate_preferred or not source):
+                line, source, preferred = candidate_line, candidate_source, candidate_preferred
+            if preferred:
+                break
+        return AnomalyFinding(
+            kind=AnomalyKind.LOCATOR_STALE,
+            severity="critical",
+            summary_zh=f"脚本定位器在设备上已失效：{selector}",
+            detail=f"第 {line} 行：{source}" if source else "",
+            evidence={
+                "selector": selector,
+                "script_line": line,
+                "source_line": source,
+                # ``source`` 字段只有 "stdout" 这个合法取值（``AnomalyFinding.source`` 的
+                # Literal 未定义「generated_result」），命中来源另记 ``matched_in`` 保持如实。
+                "matched_in": matched_in,
+                "exception": "HypiumComponentNotFoundError",
+            },
+            source="stdout",
+            phase="replay",
+        )
 
     def _scan_stress(self, analysis_input: _AnalysisInput, coverage: _Coverage) -> tuple[AnomalyFinding | None, dict]:
         """第 5 步：``generated_result.json["stress"]`` 的内存增长判定。"""
@@ -1068,6 +1211,8 @@ class ExecutionAnalyzer:
 
 __all__ = [
     "DEFAULT_MEMORY_GROWTH_THRESHOLD_KB",
+    "STALE_LOCATOR_RE",
+    "STALE_STEP_RE",
     "SYMPTOM_KINDS",
     "TIMEOUT_MARKER_RE",
     "ExecutionAnalyzer",

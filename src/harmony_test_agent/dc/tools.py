@@ -205,7 +205,11 @@ def _bbox_area(element: UIElement) -> int:
 
 
 def _resolve_element(snapshot: ScreenSnapshot | None, x: int, y: int) -> UIElement | None:
-    """命中测试：取包含 ``(x, y)`` 的面积最小元素（最内层控件），editable 元素优先。
+    """命中测试：取包含 ``(x, y)`` 的候选元素，优先级 editable > 带 key/id > 面积最小。
+
+    「带 key/id 优先」是为了保住稳定的结构化定位器：命中测试若单纯取最小 bbox，
+    会选中容器内部无 key 的 Text 标签，丢掉父容器的稳定 key（真机复盘
+    dc-20260922T115708Z-f2acffa4）。这只是几何近似，不做向上回溯——详见下方注释。
 
     无快照、无元素包含该点或元素缺 bbox 时返回 ``None``，绝不抛异常：录制路径上的
     坐标可能落在任何位置，命中失败只意味着脚本回退坐标写法（行为与补录前一致）。
@@ -224,7 +228,14 @@ def _resolve_element(snapshot: ScreenSnapshot | None, x: int, y: int) -> UIEleme
     # editable 优先：输入框常被更小的装饰性子元素覆盖，取最内层会失去可输入目标。
     editable = [element for element in hits if element.editable]
     pool = editable or hits
-    return min(pool, key=_bbox_area)
+    # 带 key/id 的优先：命中测试取最小 bbox 会选中容器内部的无 key Text 标签，
+    # 丢掉父容器的稳定定位器（真机复盘 dc-20260922T115708Z-f2acffa4：「确定」按钮
+    # bbox [685,1536,1212,1656] 中心 (948,1596) 命中了按钮内部无 key 的 Text 标签，
+    # 脚本只能退化成坐标兜底，而同一份 dump 里 add_agenda_comfrim 是稳定的）。
+    # ScreenSnapshot.elements 是 normalize_layout 产出的扁平列表、没有 parent 指针，
+    # 因此这里用「命中集合里优先选有 key/id 的最小元素」这个几何近似，而不是向上回溯。
+    keyed = [element for element in pool if element.key or element.id]
+    return min(keyed or pool, key=_bbox_area)
 
 
 def _invocation_coordinates(tool: DcToolName, args: dict[str, Any]) -> tuple[int, int] | None:

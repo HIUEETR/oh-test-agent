@@ -76,6 +76,7 @@ export const ANOMALY_KIND_LABELS: Record<string, string> = {
   page_unresponsive: "页面无响应",
   layout_anomaly: "布局异常",
   memory_growth: "内存增长",
+  locator_stale: "定位器失效",
 };
 
 /** 缺陷状态的中文标签。 */

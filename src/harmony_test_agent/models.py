@@ -211,6 +211,8 @@ class AnomalyKind(StrEnum):
     PAGE_UNRESPONSIVE = "page_unresponsive"
     LAYOUT_ANOMALY = "layout_anomaly"
     MEMORY_GROWTH = "memory_growth"
+    LOCATOR_STALE = "locator_stale"
+    """脚本定位器在设备上已失效（选择器过期，非应用缺陷）。"""
 
 
 class AnomalyFinding(BaseModel):

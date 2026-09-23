@@ -12,6 +12,8 @@ export interface ScriptCatalogEntry {
   filename: string;
   python_path: string;
   case_id?: string | null;
+  /** true = case_id 指向用例库里的真实记录；false = DC 临时脚本未入库；null/缺省 = 旧产物未知 */
+  case_persisted?: boolean | null;
   bundle_name?: string | null;
   main_ability?: string | null;
   purpose?: string | null;
