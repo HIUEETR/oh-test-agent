@@ -866,6 +866,136 @@ def test_assertion_without_preceding_step_creates_a_check_step() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 断言证据门禁：标识符形态 target 不得渲染成恒假的 BY.text(...)
+# ---------------------------------------------------------------------------
+
+
+def assert_visible_locator_trace(
+    *,
+    target: str,
+    locator: LocatorCandidate | None = None,
+    snapshots: list[ScreenSnapshot] | None = None,
+    tool: ToolName = ToolName.ASSERT_VISIBLE,
+) -> RunTrace:
+    """一条「点击 → 断言 → FINISH」的 trace；断言侧可选择带/不带定位器与帧。"""
+    return RunTrace(
+        run_id="run-assertion-evidence",
+        target_app_id="zhihu-plus",
+        task="断言证据门禁",
+        device_id="device-1",
+        state=RunState.COMPLETED,
+        agent_outcome="completed",
+        snapshots=snapshots or [],
+        actions=[
+            click_action(locator=LocatorCandidate(kind=LocatorKind.KEY, value="p2_home_titlebar_search")),
+            ActionResult(
+                step_id="assert",
+                tool=tool,
+                success=True,
+                params={"target": target},
+                locator=locator,
+            ),
+            finish_action(),
+        ],
+    )
+
+
+def text_holding_snapshot(value: str) -> ScreenSnapshot:
+    return ScreenSnapshot(
+        snapshot_id="frame-1",
+        run_id="run-assertion-evidence",
+        image_path=Path("screens/frame-1.png"),
+        image_sha256="abc",
+        width=1080,
+        height=2340,
+        elements=[UIElement(element_id="ui-1", key="some_key", content=value)],
+    )
+
+
+IDENTIFIER_TARGET = "p2_channel_content_question_2085141629112009975"
+
+
+def test_identifier_shaped_assert_target_is_not_rendered_as_exact_text() -> None:
+    """本案根因：无据的标识符 target 不得退化成 ``BY.text(标识符)``（恒假硬检查点）。"""
+    result = CaseBuilder().from_trace(assert_visible_locator_trace(target=IDENTIFIER_TARGET), profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is None
+    assert any(
+        f"ungrounded target {IDENTIFIER_TARGET!r} is identifier-shaped and appears in no captured frame" in warning
+        for warning in result.warnings
+    )
+    # 输出里不得再出现「语义名回退成精确文本」这条老警告。
+    assert f"semantic target {IDENTIFIER_TARGET!r} fell back to exact text" not in result.warnings
+
+
+def test_identifier_shaped_target_that_exists_as_literal_text_keeps_exact_text() -> None:
+    """帧里确有该字面文本时，标识符形态的 target 仍是合法文本选择器。"""
+    trace = assert_visible_locator_trace(
+        target="log-in", snapshots=[text_holding_snapshot("log-in")]
+    )
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert checkpoint.locator.value == "log-in"
+    assert "semantic target 'log-in' fell back to exact text" in result.warnings
+
+
+def test_identifier_shaped_target_without_literal_text_is_gated() -> None:
+    """同形 target，但帧里没有该字面文本 ⇒ 无证据，不冒险。"""
+    trace = assert_visible_locator_trace(target="log-in", snapshots=[text_holding_snapshot("别的文本")])
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    assert only_checkpoint(result).locator is None
+    assert any("ungrounded target 'log-in'" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("target", ["搜索", "加载中", "OK", "确定", "Sign In"])
+def test_human_readable_targets_still_fall_back_to_exact_text(target: str) -> None:
+    """CJK / 单 token / 含空格的人读文案不触发门禁（边界行为不变）。"""
+    result = CaseBuilder().from_trace(assert_visible_locator_trace(target=target), profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert checkpoint.locator.value == target
+    assert f"semantic target {target!r} fell back to exact text" in result.warnings
+
+
+def test_empty_target_keeps_exact_text_fallback() -> None:
+    """空 target 保持现状：语义由调用方决定，本层不新增分支。"""
+    result = CaseBuilder().from_trace(assert_visible_locator_trace(target=""), profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert checkpoint.locator.value == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("p2_search_input", True),
+        (IDENTIFIER_TARGET, True),
+        ("log-in", True),
+        ("OK", False),
+        ("确定", False),
+        ("Sign In", False),
+        ("", False),
+        ("Enter", False),
+    ],
+)
+def test_is_identifier_shaped_target_boundaries(value: str, expected: bool) -> None:
+    from harmony_test_agent.cases.builder import is_identifier_shaped_target
+
+    assert is_identifier_shaped_target(value) is expected
+
+
+# ---------------------------------------------------------------------------
 # 兜底断言注入
 # ---------------------------------------------------------------------------
 

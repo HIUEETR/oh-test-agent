@@ -204,6 +204,26 @@ def is_optional_control(*values: str) -> bool:
 #: 反向断言（``PlannedStep.expects_defect``）的检查点说明前缀：通过 = 观测到异常现象。
 UNEXPECTED_CHECKPOINT_MESSAGE = "反向断言：通过即代表观测到异常现象"
 
+#: 「标识符形态的 target」正则：至少一个 ``_``/``-`` 分隔符的多 token 名字。
+#:
+#: 真机复盘 run-20260923T065210Z-23434a78：``assert_visible`` 的 target
+#: ``p2_channel_content_question_2085141629112009975`` 没有任何 ``locator``，被终端兜底
+#: 渲染成 ``BY.text(该标识符)`` —— 设备上永远不会有一个**文本**等于这串 key 的控件，
+#: 硬检查点恒假，脚本 3/3 attempt 全红（``[Script-0203003]``）。
+#:
+#: 要求至少一个 ``_``/``-`` 分隔符，是为了让 ``OK`` / ``确定`` / ``Sign In`` 这类
+#: 真实按钮文案（单 token 或含空格）不被误判成标识符。
+_IDENTIFIER_SHAPED_TARGET = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+$")
+
+
+def is_identifier_shaped_target(value: str) -> bool:
+    """target 长得像控件 key/id 标识符，而不是屏幕上的人类可读文本。
+
+    正则要求至少一个 ``_``/``-`` 分隔符，因此 ``OK`` / ``确定`` 这类单 token 按钮文案
+    **不算**标识符（它们确实可能是真实文本）。
+    """
+    return bool(_IDENTIFIER_SHAPED_TARGET.fullmatch((value or "").strip()))
+
 #: ``confidence`` 三档中判为 low 的质量因素前缀。
 #:
 #: 后两条是定位器「注定跑不起来」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
@@ -1217,6 +1237,15 @@ class CaseBuilder:
             return False
         return wanted in {element.content.strip(), element.description.strip()}
 
+    def _literal_text_in_snapshots(self, value: str) -> bool:
+        """该字面值是否真的作为某个元素的 content/description 出现在已采集帧里。"""
+        wanted = (value or "").strip()
+        if not wanted:
+            return False
+        return any(
+            self._holds_text(element, wanted) for snapshot in self._snapshots for element in snapshot.elements
+        )
+
     @staticmethod
     def _key_id_candidate(element: UIElement) -> LocatorCandidate | None:
         for candidate in element.locator_candidates:
@@ -1449,6 +1478,13 @@ class CaseBuilder:
                 value=f"{type_name}|{text}",
                 target_label=target or text or type_name,
             )
+        target_text = (target or "").strip()
+        if is_identifier_shaped_target(target_text) and not self._literal_text_in_snapshots(target_text):
+            warnings.append(
+                f"ungrounded target {target!r} is identifier-shaped and appears in no captured frame; "
+                "BY.text() on it can never match"
+            )
+            return None
         warnings.append(f"semantic target {target!r} fell back to exact text")
         return LocatorSpec(kind=LocatorKind.TEXT, value=target or "", target_label=target or "")
 
