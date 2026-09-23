@@ -167,6 +167,13 @@ VOLATILE_LOCATOR_OMIT_REASON = "volatile locator cannot be replayed"
 #: 输入框专用：没有坐标兜底，单独区分原因，便于诊断「少了输入」而不是「少了点击」。
 VOLATILE_INPUT_OMIT_REASON = "volatile locator on an input target cannot be replayed"
 
+#: 无据缺席断言的省略原因。
+#:
+#: ``ASSERT_NOT_VISIBLE`` 的语义是**反的**：``check_component_exist(BY.text(<无据标识符>),
+#: expect_exist=False)`` 是**恒真**的 —— 把它 soft 化会静默通过并制造假绿，比恒假更危险
+#: （恒假至少会被看见）。因此无据时直接 omit。
+UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON = "absent-assertion target has no component evidence (vacuously true)"
+
 #: **状态条件存在**、且「不存在时跳过」等价于无操作的控件 token。
 #: 只收这类控件，是因为把它们降级为条件步骤不会掩盖真实失败：
 #: ``clear``（搜索框清空按钮只在有输入时渲染）、``dismiss``（可关闭的提示卡）、
@@ -589,15 +596,53 @@ class CaseBuilder:
                 target = action.params.get("target") or action.params.get("text")
                 locator = self.locator_from_candidate(action.locator, target, profile, warnings)
                 if locator is None:
-                    # 易变 key 被拒后回退到语义文本断言（与「完全没有定位器」同一分支）。
+                    # ① 已判定「无据标识符」或「易变 key」：先按录制帧精确回查 key/id
+                    # （断言不使用宿主容器兜底，否则容器恒存在会把真失败洗成假绿）。
+                    recovered = self._recorded_key_locator(trace, action, None, allow_owner_fallback=False)
+                    if recovered is not None:
+                        locator = self.locator_from_candidate(recovered, target, profile, warnings)
+                        warnings.append(
+                            f"{action.step_id}: assertion locator recovered as "
+                            f"{recovered.kind}:{recovered.value!r} from the recorded frame"
+                        )
+                if locator is None:
+                    # 易变 key 被拒后回退到语义文本锚点（与「完全没有定位器」同一分支）。
+                    # CJK / 单 token / 含空格的人读 target 在这里正常拿到 BY.text 锚点；
+                    # 只有**无据的标识符形态** target 会让这一步也返回 None。
                     locator = self.locator_from_candidate(None, target, profile, warnings)
-                attach(
-                    CheckpointSpec(
-                        kind=CheckpointKind.ELEMENT_EXISTS,
-                        locator=locator,
-                        **self._polarity_fields(trace, action),
+                if locator is None:
+                    # 仍然没有可信选择器：用 KEY 而非 TEXT —— 标识符形态的 target 本来就是
+                    # key 命名空间的成员，且 checkpoints.py 在 locator 为 None 时会 raise
+                    # CheckpointRenderError。降级为 soft：不再让脚本变红，同时保留真信号。
+                    text = str(target or "")
+                    fields = self._polarity_fields(trace, action)
+                    # 反向断言（expects_defect）的极性必须保留：它决定脚本里的
+                    # 「通过即代表观测到异常现象」注释与下游 polarity 字段。
+                    fields["message_zh"] = (
+                        f"{UNEXPECTED_CHECKPOINT_MESSAGE}：断言目标 {text!r} 缺少控件证据，已降级为软检查点"
+                        if fields.get("polarity")
+                        else f"断言目标 {text!r} 缺少控件证据，已降级为软检查点"
                     )
-                )
+                    attach(
+                        CheckpointSpec(
+                            kind=CheckpointKind.ELEMENT_EXISTS,
+                            locator=LocatorSpec(kind=LocatorKind.KEY, value=text, target_label=text),
+                            soft=True,
+                            **fields,
+                        )
+                    )
+                    warnings.append(
+                        f"{action.step_id}: assertion target {target!r} has no component evidence; "
+                        "rendered as a soft checkpoint instead of a hard BY.text() that can never match"
+                    )
+                else:
+                    attach(
+                        CheckpointSpec(
+                            kind=CheckpointKind.ELEMENT_EXISTS,
+                            locator=locator,
+                            **self._polarity_fields(trace, action),
+                        )
+                    )
                 generated_assertions += 1
                 explicit_assertions += 1
             elif tool == ToolName.ASSERT_TEXT:
@@ -613,21 +658,61 @@ class CaseBuilder:
                 # 只有 KEY/ID 钉死了具体控件时才用精确 ``text=``；否则用包含匹配，
                 # 与运行时 ``evaluate_assertion`` 的 target_variants 模糊匹配保持一致，
                 # 避免生成脚本比录制时更严格而在回放中抖动失败。
+                # ``expected`` 本身也可能是无据标识符：那时 TEXT_CONTAINS 渲染出的
+                # BY.text(标识符) 同样恒假，降级为 soft。
+                soft = (
+                    locator is None
+                    and is_identifier_shaped_target(str(expected))
+                    and not self._literal_text_in_snapshots(str(expected))
+                )
+                if soft:
+                    warnings.append(
+                        f"{action.step_id}: assert_text expected {expected!r} is identifier-shaped and appears "
+                        "in no captured frame; rendered as a soft checkpoint"
+                    )
+                fields = self._polarity_fields(trace, action)
+                if soft:
+                    soft_message = f"断言文本 {str(expected)!r} 缺少控件证据，已降级为软检查点"
+                    # 反向断言的极性（``polarity="unexpected"``）必须原样保留。
+                    fields["message_zh"] = (
+                        f"{UNEXPECTED_CHECKPOINT_MESSAGE}：{soft_message}" if fields.get("polarity") else soft_message
+                    )
                 attach(
                     CheckpointSpec(
                         kind=CheckpointKind.TEXT_EQUALS if locator is not None else CheckpointKind.TEXT_CONTAINS,
                         locator=locator,
                         expected=str(expected),
-                        **self._polarity_fields(trace, action),
+                        soft=soft,
+                        **fields,
                     )
                 )
                 generated_assertions += 1
                 explicit_assertions += 1
             elif tool == ToolName.ASSERT_NOT_VISIBLE:
-                locator = self.locator_from_candidate(action.locator, action.params.get("target"), profile, warnings)
+                target = action.params.get("target")
+                locator = self.locator_from_candidate(action.locator, target, profile, warnings)
                 if locator is None:
-                    # 同 ASSERT_VISIBLE：拒绝易变 key 后退回语义文本锚点。
-                    locator = self.locator_from_candidate(None, action.params.get("target"), profile, warnings)
+                    # 断言分支不使用宿主容器兜底（容器恒存在 ⇒ 假绿）。
+                    recovered = self._recorded_key_locator(trace, action, None, allow_owner_fallback=False)
+                    if recovered is not None:
+                        locator = self.locator_from_candidate(recovered, target, profile, warnings)
+                        warnings.append(
+                            f"{action.step_id}: assertion locator recovered as "
+                            f"{recovered.kind}:{recovered.value!r} from the recorded frame"
+                        )
+                if locator is None:
+                    # 同 ASSERT_VISIBLE：拒绝易变 key 后退回语义文本锚点（CJK 等仍走 BY.text）。
+                    locator = self.locator_from_candidate(None, target, profile, warnings)
+                if locator is None:
+                    # 只有**无据的标识符形态** target 才会走到这里。无据的
+                    # expect_exist=False 恒真：soft 化等于静默放行，因此直接省略
+                    # （该断言没有进脚本，计数器不递增，与既有 omit 语义一致）。
+                    omit(action, UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON)
+                    warnings.append(
+                        f"{action.step_id}: absent-assertion target {target!r} has no component "
+                        "evidence; an ungrounded expect_exist=False check is vacuously true, so it was omitted"
+                    )
+                    continue
                 attach(
                     CheckpointSpec(
                         kind=CheckpointKind.ELEMENT_ABSENT,
@@ -1081,22 +1166,61 @@ class CaseBuilder:
         if tool in {dc_tool_name.ASSERT_VISIBLE, dc_tool_name.ASSERT_NOT_VISIBLE, dc_tool_name.ASSERT_TEXT}:
             target = str(args.get("target") or args.get("text") or "")
             locator = self._dc_locator(element, target, profile, warnings)
+            # DC 侧**不另造帧恢复路径**：``_dc_locator`` 用的 ``invocation.resolved_element``
+            # 已经是帧命中的元素，``resolved_element`` 为 None 时没有别的帧可查
+            # （``_recorded_key_locator`` 依赖 trace/action，DC 侧不存在）。
             if tool == dc_tool_name.ASSERT_VISIBLE:
                 if locator is None:
                     locator = self.locator_from_candidate(None, target, profile, warnings)
-                attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_EXISTS, message_zh="", locator=locator))
+                if locator is None:
+                    # 无据标识符：BY.text() 恒假。用 KEY 而非 TEXT —— 标识符本来就是 key
+                    # 命名空间的成员，且 checkpoints.py 在 locator 为 None 时会 raise。
+                    attach(
+                        CheckpointSpec(
+                            kind=CheckpointKind.ELEMENT_EXISTS,
+                            message_zh=f"断言目标 {target!r} 缺少控件证据，已降级为软检查点",
+                            locator=LocatorSpec(kind=LocatorKind.KEY, value=target, target_label=target),
+                            soft=True,
+                        )
+                    )
+                    warnings.append(
+                        f"{invocation.invocation_id}: assertion target {target!r} has no component evidence; "
+                        "rendered as a soft checkpoint instead of a hard BY.text() that can never match"
+                    )
+                else:
+                    attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_EXISTS, message_zh="", locator=locator))
             elif tool == dc_tool_name.ASSERT_NOT_VISIBLE:
                 if locator is None:
                     locator = self.locator_from_candidate(None, target, profile, warnings)
+                if locator is None:
+                    # 无据的 expect_exist=False 恒真：soft 化等于静默放行，直接省略。
+                    # 该调用没有产出任何内容 ⇒ ``(False, False)``，不把 included_count 虚增。
+                    omit(UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON)
+                    warnings.append(
+                        f"{invocation.invocation_id}: absent-assertion target {target!r} has no component "
+                        "evidence; an ungrounded expect_exist=False check is vacuously true, so it was omitted"
+                    )
+                    return False, False
                 attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_ABSENT, message_zh="", locator=locator))
             else:
+                soft = (
+                    locator is None
+                    and is_identifier_shaped_target(target)
+                    and not self._literal_text_in_snapshots(target)
+                )
+                if soft:
+                    warnings.append(
+                        f"{invocation.invocation_id}: assert_text expected {target!r} is identifier-shaped and "
+                        "appears in no captured frame; rendered as a soft checkpoint"
+                    )
                 attach(
                     CheckpointSpec(
                         # 与 Live 侧同一规则：无结构化定位器时用包含匹配（对齐运行时模糊匹配）。
                         kind=CheckpointKind.TEXT_EQUALS if locator is not None else CheckpointKind.TEXT_CONTAINS,
-                        message_zh="",
+                        message_zh=(f"断言文本 {target!r} 缺少控件证据，已降级为软检查点" if soft else ""),
                         locator=locator,
                         expected=target,
+                        soft=soft,
                     )
                 )
             # 历史实现里断言也会渲染成一行脚本体，因此同样计入 included_count
@@ -1262,6 +1386,8 @@ class CaseBuilder:
         trace: RunTrace,
         action: ActionResult,
         runtime_locator: LocatorCandidate | None,
+        *,
+        allow_owner_fallback: bool = True,
     ) -> LocatorCandidate | None:
         """运行时只拿到空间/坐标回退时，按 ``params['target']`` 回查原始帧取 key/id 定位器。
 
@@ -1271,6 +1397,8 @@ class CaseBuilder:
         元素其实带 ``add_agenda_comfrim`` key——恢复出来就能渲染成稳定的 key 选择器。
 
         只恢复 key/id：内容文本选择器对坐标回退不是稳定替代，保持坐标兜底语义不变。
+
+        ``allow_owner_fallback=False``（断言分支）时不做宿主容器兜底，见下方注释。
         """
         if runtime_locator is not None and runtime_locator.kind in {
             LocatorKind.KEY,
@@ -1300,6 +1428,11 @@ class CaseBuilder:
             return LocatorCandidate(kind=LocatorKind.KEY, value=element.key, score=1)
         if element.id:
             return LocatorCandidate(kind=LocatorKind.ID, value=element.id, score=1)
+        # 断言**不得**使用宿主容器兜底：对点击，「包含该元素中心的最小带 key 元素」是合理的
+        # 空间归属推断；但对断言，容器往往**恒存在**，用它会把「内容不存在」这个真失败
+        # 洗成假绿。断言只接受上面精确的 element_id / key / id 命中。
+        if not allow_owner_fallback:
+            return None
         # 自绘/图标按钮常常既无 key 也无 id，但它的宿主容器带 key（``add_agenda_comfrim`` 包裹
         # 一个无 key 的 Button）——取「包含该元素中心的最小带 key 元素」作为归属控件。
         # 面积相同时取层级更靠后（更靠上层）的那个：弹层里的确认按钮与背景页的 more_menu

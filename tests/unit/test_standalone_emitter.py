@@ -555,6 +555,52 @@ def test_soft_checkpoint_wraps_in_try_except_and_records_soft_failures() -> None
     assert "driver.check_component_exist(BY.key('banner_slot'), expect_exist=True)" in source
 
 
+def test_ungrounded_assertion_renders_as_a_soft_key_checkpoint_end_to_end() -> None:
+    """真机复盘 run-20260923T065210Z-23434a78：生成脚本里不得再有恒假的 ``BY.text(标识符)``。
+
+    这条走完整链路（``CaseBuilder.from_trace`` → ``StandaloneEmitter``），确认降级后的
+    soft 检查点确实渲染成 ``try/except`` + ``soft_failures``，脚本因此不会再 3/3 全红。
+    """
+    target = "p2_channel_content_question_2085141629112009975"
+    trace = RunTrace(
+        run_id=RUN_ID,
+        target_app_id="zhihu-plus",
+        task="断言证据门禁",
+        device_id=DEVICE_ID,
+        state=RunState.COMPLETED,
+        agent_outcome="completed",
+        actions=[
+            ActionResult(
+                step_id="click",
+                tool=ToolName.CLICK_ELEMENT,
+                success=True,
+                params={"target": "p2_home_titlebar_search"},
+                locator=LocatorCandidate(kind=LocatorKind.KEY, value="p2_home_titlebar_search"),
+            ),
+            ActionResult(
+                step_id="assert",
+                tool=ToolName.ASSERT_VISIBLE,
+                success=True,
+                params={"target": target},
+                locator=None,
+            ),
+            ActionResult(step_id="finish", tool=ToolName.FINISH, success=True),
+        ],
+    )
+    built = CaseBuilder().from_trace(trace, demo_profile())
+
+    source = source_of(built.spec)
+
+    # 有证据的点击逐字不变。
+    assert "driver.touch(BY.key('p2_home_titlebar_search'))" in source
+    assert f"BY.text({target!r})" not in source
+    assert f"driver.check_component_exist(BY.key({target!r}), expect_exist=True)" in source
+    assert "except Exception as _exc:" in source
+    assert "result['soft_failures'].append(" in source
+    # confidence 分档由 §4.3 的警告→因素映射决定，见 test_confidence_levels.py。
+    assert built.replay_eligible is True
+
+
 def test_toast_checkpoint_starts_toast_listener_in_setup() -> None:
     source = source_of(toast_spec())
 

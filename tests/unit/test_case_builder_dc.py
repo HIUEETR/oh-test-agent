@@ -19,6 +19,7 @@ import pytest
 from harmony_test_agent.cases.builder import (
     PLACEHOLDER_ABILITY,
     PLACEHOLDER_BUNDLE,
+    UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON,
     CaseBuilder,
     CaseBuildResult,
 )
@@ -590,3 +591,143 @@ def test_replayable_recording_has_no_no_replayable_warning(artifacts: ArtifactSt
 
     assert "no replayable operations were recorded" not in result.warnings
     assert all(step.comment != NO_REPLAYABLE_COMMENT for step in result.spec.steps)
+
+
+# ---------------------------------------------------------------------------
+# 断言证据门禁（DC 侧）
+# ---------------------------------------------------------------------------
+
+DC_IDENTIFIER_TARGET = "p2_channel_content_question_2085141629112009975"
+
+
+def test_dc_assert_visible_without_evidence_becomes_a_soft_key_checkpoint(artifacts: ArtifactStore) -> None:
+    """无据标识符 target：不得渲染成恒假的 ``BY.text(标识符)``，改用 soft 的 ``BY.key``。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.ASSERT_VISIBLE, {"target": DC_IDENTIFIER_TARGET}, invocation_id="inv-assert")],
+    )
+
+    checkpoint = checkpoints_of(result)[0]
+    assert checkpoint.kind == CheckpointKind.ELEMENT_EXISTS
+    assert checkpoint.soft is True
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.KEY
+    assert checkpoint.locator.value == DC_IDENTIFIER_TARGET
+    assert any("has no component evidence" in warning for warning in result.warnings)
+    # soft 仍然产出了一个检查点 ⇒ 计入 included_count（与历史口径一致）。
+    assert result.counts["generated_actions"] == 1
+    assert result.explicit_assertions == 1
+    assert result.runnable_blockers == []
+
+    rendered = StandaloneEmitter().render(result.spec, run_id=SESSION_ID, device_id=DEVICE_ID)
+    assert f"BY.key({DC_IDENTIFIER_TARGET!r})" in rendered.python_text
+    assert f"BY.text({DC_IDENTIFIER_TARGET!r})" not in rendered.python_text
+    assert "result['soft_failures'].append(" in rendered.python_text
+
+
+def test_dc_assert_visible_without_element_keeps_human_readable_text_locator(artifacts: ArtifactStore) -> None:
+    """CJK target 不触发门禁：仍是硬的 ``BY.text`` 锚点（边界行为不变）。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.ASSERT_VISIBLE, {"target": "搜索"}, invocation_id="inv-assert")],
+    )
+
+    checkpoint = checkpoints_of(result)[0]
+    assert checkpoint.soft is False
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert checkpoint.locator.value == "搜索"
+
+
+def test_dc_assert_not_visible_without_evidence_is_omitted_not_softened(artifacts: ArtifactStore) -> None:
+    """无据的 ``expect_exist=False`` 恒真：soft 化等于静默放行，因此省略。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.ASSERT_NOT_VISIBLE, {"target": DC_IDENTIFIER_TARGET}, invocation_id="inv-absent")],
+    )
+
+    assert result.omitted_actions == [
+        {
+            "invocation_id": "inv-absent",
+            "tool": "assert_not_visible",
+            "reason": UNGROUNDED_ABSENT_ASSERTION_OMIT_REASON,
+        }
+    ]
+    assert checkpoints_of(result) == []
+    # DC 侧的 ``explicit_assertions`` 计的是**录制到几次断言调用**（``builder.py:967``），
+    # 与被省略与否无关；这里如实钉住该既有口径，不改动它。
+    assert result.counts["source_assertions"] == 1
+    assert result.explicit_assertions == 1
+    # 「什么都没产出」⇒ 不虚增 included_count ⇒ 命中「无可回放动作」这条物理必要条件。
+    assert result.counts["generated_actions"] == 0
+    assert result.runnable_blockers == ["script has no replayable action"]
+    assert result.replay_eligible is False
+    assert any("vacuously true" in warning for warning in result.warnings)
+
+
+def test_dc_assert_not_visible_with_human_readable_target_stays_a_hard_absent_checkpoint(
+    artifacts: ArtifactStore,
+) -> None:
+    """CJK 缺席断言保持原状：硬 ``ELEMENT_ABSENT`` + ``BY.text``。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.ASSERT_NOT_VISIBLE, {"target": "加载中"}, invocation_id="inv-absent")],
+    )
+
+    checkpoint = checkpoints_of(result)[0]
+    assert checkpoint.kind == CheckpointKind.ELEMENT_ABSENT
+    assert checkpoint.soft is False
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert result.omitted_actions == []
+
+
+def test_dc_assert_text_with_identifier_expected_becomes_soft(artifacts: ArtifactStore) -> None:
+    """``expected`` 本身是无据标识符时，``TEXT_CONTAINS`` 也恒假 ⇒ 降级为 soft。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.ASSERT_TEXT, {"target": DC_IDENTIFIER_TARGET}, invocation_id="inv-text")],
+    )
+
+    checkpoint = checkpoints_of(result)[0]
+    assert checkpoint.kind == CheckpointKind.TEXT_CONTAINS
+    assert checkpoint.soft is True
+    assert checkpoint.locator is None
+    assert checkpoint.message_zh
+    assert any("is identifier-shaped and appears in no captured frame" in warning for warning in result.warnings)
+
+
+def test_dc_assert_text_with_human_readable_expected_stays_hard(artifacts: ArtifactStore) -> None:
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.ASSERT_TEXT, {"target": "OpenHarmony"}, invocation_id="inv-text")],
+    )
+
+    checkpoint = checkpoints_of(result)[0]
+    assert checkpoint.kind == CheckpointKind.TEXT_CONTAINS
+    assert checkpoint.soft is False
+
+
+def test_dc_identifier_target_present_as_literal_text_in_a_frame_is_not_gated(artifacts: ArtifactStore) -> None:
+    """帧里确有该字面文本 ⇒ 有证据 ⇒ 保持硬检查点。"""
+    frame = ScreenSnapshot(
+        snapshot_id="snap-login",
+        run_id=SESSION_ID,
+        image_path=Path("screens/snap-login.png"),
+        image_sha256="abc",
+        width=1080,
+        height=2340,
+        elements=[UIElement(element_id="ui-1", key="some_key", content="log-in")],
+    )
+
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.ASSERT_VISIBLE, {"target": "log-in"}, invocation_id="inv-assert")],
+        snapshots=[frame],
+    )
+
+    checkpoint = checkpoints_of(result)[0]
+    assert checkpoint.soft is False
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.TEXT
+    assert checkpoint.locator.value == "log-in"
