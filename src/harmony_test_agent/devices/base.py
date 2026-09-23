@@ -20,6 +20,74 @@ class DeviceError(RuntimeError):
     pass
 
 
+# ---------------------------------------------------------------------------
+# ``uitest uiInput`` 的两个真机陷阱（Live 适配器与 DC 执行器共用）
+# ---------------------------------------------------------------------------
+
+#: ``uitest uiInput`` 参数非法时会**打印 usage 但退出码仍是 0**，只靠返回码判定就会把
+#: 失败录制成「动作已生效」。真机实测到两种输出：坐标越界的 swipe
+#: （``Please confirm that the coordinate values are correct.``）与不被接受的按键名
+#: （``keyEvent Enter`` ⇒ ``Invalid parameters.`` + 整页 usage）。
+UI_INPUT_REJECTION_MARKERS: tuple[str, ...] = (
+    "please confirm that the coordinate values are correct",
+    "invalid parameters",
+    "usage :",
+    "usage:",
+)
+
+#: ``uitest uiInput keyEvent`` 只接受这三个**名字**，其余按键必须传数字 keyID
+#: （真机 usage 原文：``keyEvent <keyID/Back/Home/Power> [displayId]``）。
+_UI_INPUT_NAMED_KEYS: dict[str, str] = {"back": "Back", "home": "Home", "power": "Power"}
+
+#: 按键名 → 鸿蒙数字 keyID。数值与 ``generation/xdevice_case.py::_KEY_CODES`` 保持一致。
+_UI_INPUT_KEY_CODES: dict[str, int] = {
+    "enter": 2054,
+    "volumeup": 16,
+    "volume_up": 16,
+    "volumedown": 17,
+    "volume_down": 17,
+}
+
+
+def normalize_key_name(value: str) -> str:
+    """按键名归一：去空格、连字符转下划线、转小写。"""
+    return (value or "").strip().lower().replace(" ", "").replace("-", "_")
+
+
+def ui_input_key_argument(name: str) -> str:
+    """把按键名翻译成 ``uitest uiInput keyEvent`` 真正接受的实参。
+
+    真机复盘 dc-20260923T180535Z-1bed642e：直接传 ``Enter`` 时 uitest 打印 usage 却返回 0，
+    于是「按下 Enter 提交搜索」被录制成 ``succeeded`` / ``effect_status=confirmed``，
+    而设备上什么都没发生；模型只能改点软键盘的搜索键（``index_keyMenu_container``，
+    属于 ``com.huawei.hmos.inputmethod``）来补偿，那次点击又被原样写进生成脚本，
+    回放时键盘早已不在 ⇒ ``Can't find component``。
+
+    白名单外的按键名原样透传，让设备自己拒绝 —— 再由 :func:`reject_ui_input_usage`
+    把拒绝转成显式失败，绝不静默成功。
+    """
+    normalized = normalize_key_name(name)
+    if normalized in _UI_INPUT_NAMED_KEYS:
+        return _UI_INPUT_NAMED_KEYS[normalized]
+    code = _UI_INPUT_KEY_CODES.get(normalized)
+    if code is not None:
+        return str(code)
+    return (name or "").strip()
+
+
+def reject_ui_input_usage(result: CommandResult) -> CommandResult:
+    """把 ``uitest uiInput`` 的参数拒绝转成显式失败（返回码改为 1 并写明原因）。"""
+    output = f"{result.stdout}\n{result.stderr}".casefold()
+    if any(marker in output for marker in UI_INPUT_REJECTION_MARKERS):
+        return result.model_copy(
+            update={
+                "returncode": 1,
+                "stderr": f"uiInput rejected the arguments: {result.stdout.strip()[:400]}",
+            }
+        )
+    return result
+
+
 class DeviceAdapter(ABC):
     """编排器依赖的设备能力边界，具体传输协议由实现类负责。"""
 

@@ -555,6 +555,67 @@ def test_soft_checkpoint_wraps_in_try_except_and_records_soft_failures() -> None
     assert "driver.check_component_exist(BY.key('banner_slot'), expect_exist=True)" in source
 
 
+def test_checkpoint_on_a_noop_comment_step_is_still_rendered() -> None:
+    """真机复盘 dc-20260923T180535Z-1bed642e：挂在 NOOP 步骤上的检查点必须渲染出来。
+
+    ``CaseBuilder.attach`` 的规则是「断言挂到前一个步骤」，而模型习惯**先截图再断言**，
+    于是检查点常常落在 ``# skipped: screenshot`` 这种 ``NOOP_COMMENT`` 步骤上。发射器以前
+    在 NOOP 分支直接 ``continue``，这些断言一行都没渲染 —— IR 里有、``hard_checkpoint_count``
+    也算了 2 个，脚本却根本不检查任何内容，「跑通」只代表没崩。
+    """
+    spec = make_spec(
+        steps=[
+            StepSpec(
+                step_id="noop-with-checkpoint",
+                index=1,
+                action=StepAction.NOOP_COMMENT,
+                title_zh="跳过截图",
+                comment="skipped: screenshot",
+                checkpoints=[
+                    CheckpointSpec(
+                        kind=CheckpointKind.ELEMENT_EXISTS,
+                        message_zh="",
+                        locator=key("p2_answer_detail_page", "回答详情页"),
+                    )
+                ],
+            )
+        ],
+    )
+
+    source = source_of(spec)
+
+    assert "# skipped: screenshot" in source
+    assert "driver.check_component_exist(BY.key('p2_answer_detail_page'), expect_exist=True)" in source
+
+
+def test_soft_checkpoint_on_a_noop_comment_step_is_still_wrapped() -> None:
+    """同上，但 soft 检查点在 NOOP 步骤上也要走 try/except + soft_failures。"""
+    spec = make_spec(
+        steps=[
+            StepSpec(
+                step_id="noop-soft",
+                index=1,
+                action=StepAction.NOOP_COMMENT,
+                title_zh="跳过截图",
+                comment="skipped: screenshot",
+                checkpoints=[
+                    CheckpointSpec(
+                        kind=CheckpointKind.ELEMENT_EXISTS,
+                        message_zh="详情页应可见",
+                        locator=key("p2_answer_detail_page", "回答详情页"),
+                        soft=True,
+                    )
+                ],
+            )
+        ],
+    )
+
+    source = source_of(spec)
+
+    assert "        try:" in source
+    assert "result['soft_failures'].append({'message': '详情页应可见', 'error': str(_exc)})" in source
+
+
 def test_ungrounded_assertion_renders_as_a_soft_key_checkpoint_end_to_end() -> None:
     """真机复盘 run-20260923T065210Z-23434a78：生成脚本里不得再有恒假的 ``BY.text(标识符)``。
 
