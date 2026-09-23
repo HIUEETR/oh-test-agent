@@ -62,6 +62,7 @@ CRASH_KINDS: frozenset[AnomalyKind] = frozenset(
 
 FOREGROUND_LOST_SUMMARY = "动作后前台应用丢失，疑似崩溃"
 STALL_SUMMARY = "点击后页面结构无变化，疑似无响应控件"
+NOOP_NAVIGATION_SUMMARY = "点击后页面未发生跳转，疑似无响应控件"
 
 
 @dataclass(frozen=True)
@@ -78,12 +79,22 @@ class InRunThresholds:
     screen_scan_enabled: bool = True
     """每步对 after 帧做白屏 / 布局本地扫描（纯本地计算，无设备调用）。"""
 
+    noop_navigation_enabled: bool = True
+    """点击后未导航检测。判据是 page_path + 元素数 + 被点元素 bbox 三者全未变，
+    独立于 struct_same：结构指纹会被轮播/动画的一个文本变化推翻（真机复盘
+    run-20260922T141003Z-6bf8bf42 step-5）。"""
+
+    noop_text_drift_ratio: float = 0.10
+    """stable_texts 变化比例低于此值时不视为「有效结构变化」（轮播/时钟豁免）。"""
+
 
 @dataclass
 class InRunObservationState:
     """一次观测的内部累计状态（只用于升级判定与 metrics）。"""
 
     stall_actions: set[str] = field(default_factory=set)
+    weak_change_actions: set[str] = field(default_factory=set)
+    """命中「路径与元素数不变、仅文本漂移」的**不同动作**（改动 4 的弱判据累计）。"""
 
 
 def stability_fingerprint(page: str, elements: list[Any]) -> tuple[str, int, tuple[str, ...]]:
@@ -107,6 +118,40 @@ def stability_fingerprint(page: str, elements: list[Any]) -> tuple[str, int, tup
 def snapshot_fingerprint(snapshot: ScreenSnapshot) -> tuple[str, int, tuple[str, ...]]:
     """对 :class:`ScreenSnapshot` 取结构指纹。"""
     return stability_fingerprint(snapshot.page_path, snapshot.elements)
+
+
+@dataclass(frozen=True)
+class StructureDelta:
+    """结构指纹的**分量**比较结果（改动 4：治轮播 / 动画对全等判定的污染）。"""
+
+    page_same: bool
+    count_same: bool
+    text_drift_ratio: float
+    """稳定文本集的对称差 / 并集；0.0 = 完全相同，1.0 = 完全不相交。"""
+
+    struct_same: bool
+    """原有的全等判定（指纹三元组完全相等），保留供停滞检测使用。"""
+
+
+def structure_delta(before: ScreenSnapshot, after: ScreenSnapshot) -> StructureDelta:
+    """把结构指纹拆成分量：全等判定会被轮播的一个文本变化推翻（真机复盘
+    run-20260922T141003Z-6bf8bf42 step-5：texts 31->32 就让 struct_same=False），
+    而 page_path 与元素数不变本身就是「未导航」的强信号。
+
+    刻意**不动** ``stability_fingerprint`` 本身：它被 ``explorer`` 的页面身份判定与
+    ``analysis/service.py::_structure_fingerprint`` 共用，改它会波及探索与事后分析。
+    """
+    before_fingerprint = snapshot_fingerprint(before)
+    after_fingerprint = snapshot_fingerprint(after)
+    before_texts = set(before_fingerprint[2])
+    after_texts = set(after_fingerprint[2])
+    union = before_texts | after_texts
+    return StructureDelta(
+        page_same=before.page_path == after.page_path,
+        count_same=len(before.elements) == len(after.elements),
+        text_drift_ratio=(len(before_texts ^ after_texts) / len(union)) if union else 0.0,
+        struct_same=before_fingerprint == after_fingerprint,
+    )
 
 
 def fingerprint_from_hierarchy(hierarchy: Any, *, width: int, height: int) -> tuple[str, int, tuple[str, ...]] | None:
@@ -229,15 +274,26 @@ class InRunDetector:
         after: ScreenSnapshot,
         tool: ToolName,
         target: str = "",
+        clicked_element_id: str = "",
     ) -> InRunObservation | None:
         """判定一个变更类动作后是否出现异常。
 
         返回 ``None`` 表示「不值得关注」（Pareto 大多数情况，**零设备调用**）。
         返回 :class:`InRunObservation` 时 ``finding`` 可能仍为 ``None``
         （有信号但不构成异常）。
+
+        ``clicked_element_id`` 是本次点击的目标元素 id（``decision.target``），
+        用于「点击后未导航」的三条件判定；非点击动作传空串即可。
         """
         try:
-            return self._observe(action_id=action_id, before=before, after=after, tool=tool, target=target)
+            return self._observe(
+                action_id=action_id,
+                before=before,
+                after=after,
+                tool=tool,
+                target=target,
+                clicked_element_id=clicked_element_id,
+            )
         except Exception as exc:  # noqa: BLE001 - 检测是 advisory，任何异常都不得打断任务
             logger.warning("in-run detection failed for %s: %s: %s", action_id, type(exc).__name__, exc)
             return None
@@ -250,14 +306,35 @@ class InRunDetector:
         after: ScreenSnapshot,
         tool: ToolName,
         target: str,
+        clicked_element_id: str = "",
     ) -> InRunObservation | None:
         self.metrics["observations"] = int(self.metrics["observations"]) + 1
         pixel_same = bool(before.image_sha256) and before.image_sha256 == after.image_sha256
-        struct_same = snapshot_fingerprint(before) == snapshot_fingerprint(after)
+        delta = structure_delta(before, after)
+        struct_same = delta.struct_same
         local_findings: list[AnomalyFinding] = []
         evidence_paths: list[str] = []
         if self.thresholds.screen_scan_enabled:
             local_findings, evidence_paths = self._local_scan(after, action_id)
+        # 点击后未导航在 suspicious 门**之外**：它抓的正是「看起来变了、其实没导航」，
+        # 因此无论像素/结构是否变化都要判一次（纯本地计算，零设备调用）。
+        if self.thresholds.noop_navigation_enabled and clicked_element_id:
+            noop = self._noop_navigation_finding(
+                action_id=action_id,
+                before=before,
+                after=after,
+                tool=tool,
+                target=target,
+                clicked_element_id=clicked_element_id,
+            )
+            if noop is not None:
+                local_findings.append(noop)
+        # 改动 4 的**弱判据**：不要求有明确点击目标，靠「不同动作」累计（与改动 1 互补，
+        # swipe / wait 序列也能命中）。
+        if delta.page_same and delta.count_same and delta.text_drift_ratio <= self.thresholds.noop_text_drift_ratio:
+            weak = self._weak_change_finding(action_id=action_id, after=after, tool=tool, target=target, delta=delta)
+            if weak is not None:
+                local_findings.append(weak)
 
         suspicious = pixel_same or struct_same
         if not suspicious:
@@ -333,6 +410,98 @@ class InRunDetector:
         )
 
     # ------------------------------------------------------------------ 分支
+
+    def _noop_navigation_finding(
+        self,
+        *,
+        action_id: str,
+        before: ScreenSnapshot,
+        after: ScreenSnapshot,
+        tool: ToolName,
+        target: str,
+        clicked_element_id: str,
+    ) -> AnomalyFinding | None:
+        """点击后未导航判定（纯本地，零设备调用）。
+
+        三条件全成立才算：``page_path`` 未变 AND 元素数未变 AND 被点元素仍在**同一 bbox**。
+        实测 run-20260922T141003Z-6bf8bf42：step-5 点「每日推荐卡片播放按钮」三条件全中，
+        step-2 / step-3 点底部导航栏则 count_same=False，零误报。
+
+        滑动 / 返回 / 输入文本不适用：滑动本就不该导航，输入文本改的是控件内容。
+        """
+        if tool not in {ToolName.CLICK_ELEMENT, ToolName.CLICK_COORDINATE}:
+            return None
+        if before.page_path != after.page_path:
+            return None
+        if len(before.elements) != len(after.elements):
+            return None
+        clicked_before = _element_for(before.elements, clicked_element_id)
+        clicked_after = _element_for(after.elements, clicked_element_id)
+        if clicked_before is None or clicked_after is None:
+            return None
+        if clicked_before.bbox != clicked_after.bbox:
+            return None
+        bbox = clicked_after.bbox
+        return self._finding(
+            AnomalyKind.NO_OP_NAVIGATION,
+            "warning",
+            NOOP_NAVIGATION_SUMMARY,
+            source="screenshot",
+            action_id=action_id,
+            after=after,
+            target=target,
+            tool=tool,
+            detail=(
+                f"动作 {action_id}（{tool}）点击 {clicked_element_id!r} 后页面路径（{after.page_path}）、"
+                f"元素数（{len(after.elements)}）与被点元素位置（{bbox}）全部未变，疑似无响应控件"
+            ),
+            extra={
+                "clicked_element": clicked_element_id,
+                "bbox": bbox.model_dump(mode="json") if bbox is not None else None,
+                "element_count": len(after.elements),
+            },
+        )
+
+    def _weak_change_finding(
+        self,
+        *,
+        action_id: str,
+        after: ScreenSnapshot,
+        tool: ToolName,
+        target: str,
+        delta: StructureDelta,
+    ) -> AnomalyFinding | None:
+        """弱判据：``page_path`` 与元素数持续不变、仅稳定文本漂移（轮播 / 时钟）。
+
+        单次只是信号：累计 ``escalate_count`` 个**不同动作**才产 warning。与改动 1 的三条件
+        规则互补 —— 那条要求「被点元素 bbox 也没变」（强判据，零误报），本条不要求有明确
+        点击目标，因而对 swipe / wait 序列也适用。
+        """
+        self.state.weak_change_actions.add(action_id)
+        if len(self.state.weak_change_actions) < max(1, self.thresholds.escalate_count):
+            return None
+        return self._finding(
+            AnomalyKind.PAGE_UNRESPONSIVE,
+            "warning",
+            "页面疑似无响应：路径与元素数持续不变，仅轮播文本漂移",
+            source="screenshot",
+            action_id=action_id,
+            after=after,
+            target=target,
+            tool=tool,
+            detail=(
+                f"累计 {len(self.state.weak_change_actions)} 个不同动作后 page_path"
+                f"（{after.page_path}）与元素数（{len(after.elements)}）均未变，"
+                f"稳定文本漂移 {delta.text_drift_ratio:.2f} ≤ 阈值 {self.thresholds.noop_text_drift_ratio}"
+            ),
+            extra={
+                "weak_change_actions": sorted(self.state.weak_change_actions),
+                "weak_change_actions_count": len(self.state.weak_change_actions),
+                "text_drift_ratio": round(delta.text_drift_ratio, 4),
+                "page_same": delta.page_same,
+                "count_same": delta.count_same,
+            },
+        )
 
     def _stall_finding(self, *, action_id: str, after: ScreenSnapshot, tool: ToolName, target: str) -> AnomalyFinding:
         """结构停滞：首次 warning，累计到 ``escalate_count`` 升 critical。"""
@@ -468,6 +637,7 @@ class InRunDetector:
             "pixel_same": pixel_same,
             "struct_same": struct_same,
             "stall_actions": len(self.state.stall_actions),
+            "weak_change_actions": len(self.state.weak_change_actions),
         }
         payload.update(extra or {})
         return payload
@@ -539,16 +709,37 @@ def _safe_id(value: str) -> str:
     return "".join(char if char.isalnum() or char in "-_" else "_" for char in value)[:60] or "action"
 
 
+def _element_for(elements: list[Any], target: str) -> Any:
+    """按「先 element_id，再 key / id / content」解析被点元素。
+
+    与 ``runtime/tools.py::find_element`` 的回退顺序一致：模型偶尔会把 key 或语义文本当成
+    ``target`` 发出来（而不是 element_id），只认 element_id 会让判定静默漏报。解析不到时
+    返回 ``None``，判定按「不成立」处理 —— 保守方向。
+    """
+    if not target:
+        return None
+    for element in elements:
+        if getattr(element, "element_id", "") == target:
+            return element
+    for element in elements:
+        if target in {getattr(element, "key", ""), getattr(element, "id", ""), getattr(element, "content", "")}:
+            return element
+    return None
+
+
 __all__ = [
     "CRASH_KINDS",
     "FOREGROUND_LOST_SUMMARY",
     "MUTATING_TOOLS",
+    "NOOP_NAVIGATION_SUMMARY",
     "STALL_SUMMARY",
     "InRunDetector",
     "InRunObservationState",
     "InRunThresholds",
+    "StructureDelta",
     "fingerprint_from_hierarchy",
     "probe_crash_after_foreground_loss",
     "snapshot_fingerprint",
     "stability_fingerprint",
+    "structure_delta",
 ]

@@ -213,6 +213,12 @@ class AnomalyKind(StrEnum):
     MEMORY_GROWTH = "memory_growth"
     LOCATOR_STALE = "locator_stale"
     """脚本定位器在设备上已失效（选择器过期，非应用缺陷）。"""
+    NO_OP_NAVIGATION = "noop_navigation"
+    """点击后未发生导航：页面路径 / 元素数 / 被点元素位置三者全未变。
+
+    与 :attr:`PAGE_UNRESPONSIVE` 的区别是**故障模式**：整页冻结时结构指纹全等；
+    而本类是「页面活着（轮播还在动、文本在漂）但点击没产生任何导航」，结构指纹的
+    全等比较会被一个与点击无关的文本变化推翻（真机复盘 run-20260922T141003Z-6bf8bf42）。"""
 
 
 class AnomalyFinding(BaseModel):
@@ -592,6 +598,12 @@ class PlannedStep(BaseModel):
     end: tuple[int, int] | None = None
     distance: int | None = Field(default=None, ge=0)
     steps: int | None = Field(default=None, ge=0)
+    expects_defect: bool = False
+    """该步骤的断言用于**确认异常现象**：通过即代表观测到缺陷（探索性测试 / 问题复现）。
+
+    例：任务要求「查看点击后是否无反应」时，计划里会有一步
+    ``assert_visible(第一个海报)`` 且 ``expected`` 写「该海报仍可见 ⇒ 点击无反应」——
+    这类断言**通过**才是发现缺陷。默认 ``False`` 表示历史语义（通过 = 行为正常）。"""
 
 
 class StepHistoryEntry(BaseModel):
@@ -657,6 +669,13 @@ class AssertionResult(BaseModel):
     target: str
     passed: bool
     message: str
+    expects_defect: bool = False
+    """**反向断言**标记：``passed=True`` 代表「观测到了不期望的现象」而非「行为正常」。
+
+    真机复盘 run-20260922T141003Z-6bf8bf42 step-7：计划里的 ``expected`` 是「点击第一个
+    海报后该海报仍可见，页面未跳转，说明点击无反应」，断言 ``passed=true`` —— agent 正确
+    发现了缺陷，系统却把它记成一条**通过**的断言，于是 ``state=completed``、``defects=[]``。
+    该字段让上层能把这种「成功即异常」转成缺陷记录（仍然不改 ``passed`` / ``success``）。"""
 
 
 class ActionResult(BaseModel):

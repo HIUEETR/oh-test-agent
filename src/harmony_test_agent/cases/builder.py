@@ -201,6 +201,9 @@ def is_optional_control(*values: str) -> bool:
     return False
 
 
+#: 反向断言（``PlannedStep.expects_defect``）的检查点说明前缀：通过 = 观测到异常现象。
+UNEXPECTED_CHECKPOINT_MESSAGE = "反向断言：通过即代表观测到异常现象"
+
 #: ``confidence`` 三档中判为 low 的质量因素前缀。
 #:
 #: 后两条是定位器「注定跑不起来」的因素：日期格 / 时钟读数 / 列表实例 key 换一天必挂，
@@ -568,7 +571,13 @@ class CaseBuilder:
                 if locator is None:
                     # 易变 key 被拒后回退到语义文本断言（与「完全没有定位器」同一分支）。
                     locator = self.locator_from_candidate(None, target, profile, warnings)
-                attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_EXISTS, message_zh="", locator=locator))
+                attach(
+                    CheckpointSpec(
+                        kind=CheckpointKind.ELEMENT_EXISTS,
+                        locator=locator,
+                        **self._polarity_fields(trace, action),
+                    )
+                )
                 generated_assertions += 1
                 explicit_assertions += 1
             elif tool == ToolName.ASSERT_TEXT:
@@ -587,9 +596,9 @@ class CaseBuilder:
                 attach(
                     CheckpointSpec(
                         kind=CheckpointKind.TEXT_EQUALS if locator is not None else CheckpointKind.TEXT_CONTAINS,
-                        message_zh="",
                         locator=locator,
                         expected=str(expected),
+                        **self._polarity_fields(trace, action),
                     )
                 )
                 generated_assertions += 1
@@ -599,7 +608,13 @@ class CaseBuilder:
                 if locator is None:
                     # 同 ASSERT_VISIBLE：拒绝易变 key 后退回语义文本锚点。
                     locator = self.locator_from_candidate(None, action.params.get("target"), profile, warnings)
-                attach(CheckpointSpec(kind=CheckpointKind.ELEMENT_ABSENT, message_zh="", locator=locator))
+                attach(
+                    CheckpointSpec(
+                        kind=CheckpointKind.ELEMENT_ABSENT,
+                        locator=locator,
+                        **self._polarity_fields(trace, action),
+                    )
+                )
                 generated_assertions += 1
                 explicit_assertions += 1
             else:
@@ -1146,6 +1161,34 @@ class CaseBuilder:
             f"{candidate.value!r} (the element that actually holds {expected!r})"
         )
         return self.locator_from_candidate(candidate, expected, profile, warnings)
+
+    @staticmethod
+    def _expects_defect(trace: RunTrace, action: ActionResult) -> bool:
+        """该动作的断言是否为**反向断言**（通过即代表观测到缺陷）。
+
+        两个来源都认：断言结果上由运行期透传的 ``expects_defect``（决定即时 finding），
+        以及计划步骤 ``PlannedStep.expects_defect``（决定 IR 的 ``polarity``）。
+        """
+        if action.assertion is not None and action.assertion.expects_defect:
+            return True
+        return any(step.step_id == action.step_id and step.expects_defect for step in trace.plan)
+
+    @staticmethod
+    def _polarity_fields(trace: RunTrace, action: ActionResult) -> dict[str, Any]:
+        """``expects_defect`` → ``CheckpointSpec`` 的构造字段。
+
+        非反向断言返回的 ``message_zh=""`` 与历史行为逐字一致（由 ``attach`` 兜底填标题）。
+        """
+        if not CaseBuilder._expects_defect(trace, action):
+            return {"message_zh": ""}
+        expected = next(
+            (step.expected for step in trace.plan if step.step_id == action.step_id and step.expected),
+            "",
+        )
+        return {
+            "message_zh": f"{UNEXPECTED_CHECKPOINT_MESSAGE}：{expected}" if expected else UNEXPECTED_CHECKPOINT_MESSAGE,
+            "polarity": "unexpected",
+        }
 
     @staticmethod
     def _assertion_frame(trace: RunTrace, action: ActionResult) -> ScreenSnapshot | None:

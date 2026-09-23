@@ -74,6 +74,7 @@ export const ANOMALY_KIND_LABELS: Record<string, string> = {
   anr: "无响应 (ANR)",
   white_screen: "白屏 / 黑屏",
   page_unresponsive: "页面无响应",
+  noop_navigation: "点击无跳转",
   layout_anomaly: "布局异常",
   memory_growth: "内存增长",
   locator_stale: "定位器失效",
