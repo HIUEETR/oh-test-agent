@@ -109,7 +109,9 @@ def _install_replay(monkeypatch) -> None:
             evidence_paths=[f"hypium/attempt-{attempt:02d}/stdout.log"],
         )
 
-    monkeypatch.setattr("harmony_test_agent.api.app.HypiumRunner.execute", fake_execute)
+    # 打桩目标必须是真正被调用的那个类：回放端点用 ``make_hypium_runner`` 现构
+    # :class:`~harmony_test_agent.runner.hypium.HypiumRunner`，api.app 模块本身并不导出它。
+    monkeypatch.setattr("harmony_test_agent.runner.HypiumRunner.execute", fake_execute)
 
 
 def _task_trace() -> RunTrace:
