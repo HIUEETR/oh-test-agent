@@ -13,7 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from harmony_test_agent.cases.builder import UNGROUNDED_ASSERTION_FACTOR, CaseBuilder
+from harmony_test_agent.cases.builder import (
+    UNGROUNDED_ASSERTION_FACTOR,
+    WARM_START_FACTOR,
+    WARM_START_RECORDING_BLOCKER,
+    CaseBuilder,
+)
 from harmony_test_agent.dc.models import DcToolInvocation, DcToolName, DcToolTier
 from harmony_test_agent.models import (
     AssertionDefinition,
@@ -249,6 +254,118 @@ def test_ungrounded_assertion_blocker_follows_the_profile_blocker() -> None:
     )
 
     assert result.promotion_blockers == [BLOCKER, UNGROUNDED_ASSERTION_FACTOR]
+
+
+# ---------------------------------------------------------------------------
+# 热启动录制：录制起点与回放起点不一致
+# ---------------------------------------------------------------------------
+
+
+def start_app(reset: bool | None = None, *, bundle: str = BUNDLE) -> DcToolInvocation:
+    """``start_app`` 记录；``reset=None`` 模拟 ④ 之前的**历史**录制（args 里没有 reset 键）。"""
+    args: dict = {"bundle_name": bundle, "ability_name": "MainAbility"}
+    if reset is not None:
+        args["reset"] = reset
+    return DcToolInvocation(
+        invocation_id=f"inv-start-{reset}",
+        turn_id="turn-1",
+        tool=DcToolName.START_APP,
+        tier=DcToolTier.L2,
+        args=args,
+        success=True,
+    )
+
+
+def build_with(invocations: list[DcToolInvocation], **kwargs) -> object:
+    return CaseBuilder().from_dc_invocations(
+        "dc-session-001",
+        "127.0.0.1:5555",
+        invocations,
+        bundle_name=BUNDLE,
+        main_ability="MainAbility",
+        **kwargs,
+    )
+
+
+def test_recording_without_any_start_app_gets_no_warm_start_blocker() -> None:
+    """⚑ 守住既有列表全等断言：没有启动锚点就没有可比对象，绝不加这条 blocker。"""
+    result = build(profile=profile(ProfileStatus.VERIFIED))
+
+    assert result.promotion_blockers == []
+    assert WARM_START_RECORDING_BLOCKER not in result.promotion_blockers
+    assert all("warm app launch" not in warning for warning in result.warnings)
+
+
+def test_legacy_recording_without_the_reset_key_is_flagged_as_warm_start() -> None:
+    """本案例（``dc-20260923T065513Z-03c6485e``）的形态：args 里没有 reset 键。"""
+    result = build_with([start_app(), invocation()], profile=profile(ProfileStatus.VERIFIED))
+
+    assert result.promotion_blockers == [WARM_START_RECORDING_BLOCKER]
+    assert result.promotion_eligible is False
+    assert result.confidence == "low"
+    assert result.confidence_factors.count(WARM_START_FACTOR) == 1 or WARM_START_FACTOR in result.confidence_factors
+    assert any("warm app launch" in warning for warning in result.warnings)
+    # 物理上仍可执行：不得进 runnable_blockers。
+    assert result.replay_eligible is True
+    assert result.runnable_blockers == []
+
+
+def test_recording_with_reset_true_gets_no_warm_start_blocker() -> None:
+    """④ 之后产生的新录制：首个 start_app 带 reset=true。"""
+    result = build_with([start_app(True), invocation()], profile=profile(ProfileStatus.VERIFIED))
+
+    assert WARM_START_RECORDING_BLOCKER not in result.promotion_blockers
+    assert result.promotion_blockers == []
+    assert WARM_START_FACTOR not in result.confidence_factors
+    # 该录制没有显式断言 ⇒ 只到 medium（与热启动无关）。
+    assert result.confidence == "medium"
+
+
+def test_explicit_reset_false_is_flagged() -> None:
+    result = build_with([start_app(False), invocation()], profile=profile(ProfileStatus.VERIFIED))
+
+    assert WARM_START_RECORDING_BLOCKER in result.promotion_blockers
+
+
+def test_only_the_first_start_app_decides() -> None:
+    """首个 ``reset=true``、后续 ``reset=false`` ⇒ 不判热启动（只看首个）。"""
+    result = build_with(
+        [start_app(True), start_app(False), invocation()],
+        profile=profile(ProfileStatus.VERIFIED),
+    )
+
+    assert WARM_START_RECORDING_BLOCKER not in result.promotion_blockers
+
+    reversed_order = build_with(
+        [start_app(False), start_app(True), invocation()],
+        profile=profile(ProfileStatus.VERIFIED),
+    )
+    assert WARM_START_RECORDING_BLOCKER in reversed_order.promotion_blockers
+
+
+def test_warm_start_blocker_follows_the_profile_blocker() -> None:
+    result = build_with([start_app(), invocation()])
+
+    assert result.promotion_blockers == [BLOCKER, WARM_START_RECORDING_BLOCKER]
+
+
+def test_live_path_never_gets_the_dc_warm_start_blocker() -> None:
+    """Live 由 ``open_app(reset=True)`` / ``_quick_revalidate`` 保证冷启动，与 DC 无关。"""
+    from harmony_test_agent.models import RunState, RunTrace
+
+    trace = RunTrace(
+        run_id="run-warm",
+        target_app_id="zhihu-plus",
+        task="Live 路径不得出现 DC 的启动 blocker",
+        device_id="device-1",
+        state=RunState.COMPLETED,
+        agent_outcome="completed",
+    )
+
+    built = CaseBuilder().from_trace(trace, profile(ProfileStatus.VERIFIED))
+
+    assert WARM_START_RECORDING_BLOCKER not in built.promotion_blockers
+    assert all("warm app launch" not in warning for warning in built.warnings)
 
 
 # ---------------------------------------------------------------------------

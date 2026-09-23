@@ -1002,6 +1002,19 @@ class CaseBuilder:
             bundle_name=bundle_name,
             main_ability=main_ability,
         )
+        # 热启动录制：生成脚本的 setup 是 stop_app + start_app（冷启动），而录制里首个
+        # start_app 没有 force-stop ⇒ 回放可能落在与录制不同的页面上。
+        # 只在录制里**有** start_app 时判定：没有启动锚点就没有可比对象（这同时守住了
+        # test_dc_promotion_blockers.py 里那些纯 CLICK 夹具的列表全等断言）。
+        # 判定基于**整个会话**的 invocations，且只看首个 start_app —— 脚本 setup 也只有一个
+        # 冷启动锚点。此警告必须在这里发出：下面 confidence_factors_from_warnings 要读它。
+        start_apps = [item for item in invocations if item.tool == DcToolName.START_APP]
+        warm_start_recording = bool(start_apps) and not (start_apps[0].args or {}).get("reset")
+        if warm_start_recording:
+            warnings.append(
+                "the recording began with a warm app launch (no force-stop before start_app); "
+                "the generated script cold-starts, so the replay may begin on a different page"
+            )
         confidence_factors: list[str] = []
         if explicit_assertions == 0:
             # 「无显式断言」从阻断条件降为 medium 置信度：脚本照样能跑，只是没有检查点。
@@ -1043,6 +1056,8 @@ class CaseBuilder:
         # **必须追加在既有 profile blocker 之后**：promotion_blockers 的列表全等断言依赖顺序稳定。
         if UNGROUNDED_ASSERTION_FACTOR in confidence_factors:
             promotion_blockers.append(UNGROUNDED_ASSERTION_FACTOR)
+        if warm_start_recording:
+            promotion_blockers.append(WARM_START_RECORDING_BLOCKER)
         return CaseBuildResult(
             spec=spec,
             omitted_actions=omitted,
