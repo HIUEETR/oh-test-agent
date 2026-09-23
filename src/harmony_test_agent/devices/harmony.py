@@ -28,7 +28,7 @@ from ..targets.catalog import (
     parse_installed_app,
     parse_launcher_labels,
 )
-from .base import DeviceAdapter, DeviceError
+from .base import DeviceAdapter, DeviceError, reject_ui_input_usage
 
 if TYPE_CHECKING:
     from ..runtime.tools import LaunchSpec
@@ -39,12 +39,6 @@ _LAUNCHER_HOME_SETTLE_SECONDS = 1.0
 _LAUNCHER_PAGE_SWIPE_SLEEP = 1.0
 # `bm dump -n <missing>` 退出码为 0，仅在输出中给出该提示
 _MISSING_BUNDLE_HINT = "failed to get information"
-# `uitest uiInput` 参数非法时打印 usage 但退出码仍为 0：必须显式识别，否则静默成功。
-_UI_INPUT_REJECTION_MARKERS = (
-    "please confirm that the coordinate values are correct",
-    "usage :",
-    "usage:",
-)
 
 
 class HarmonyDeviceAdapter(DeviceAdapter):
@@ -506,16 +500,11 @@ class HarmonyDeviceAdapter(DeviceAdapter):
         真机实测：``uiInput swipe 1118 2231 1118 0 11500``（终点 y=0 越界）会打印 usage 与
         ``Please confirm that the coordinate values are correct.``，但**返回码仍是 0**，因此原先
         会被当成「动作成功」写进 trace（日历一次滚轮滑动就是这样静默失败的）。
+
+        判定规则与 DC 侧 ``DcHdcExecutor.key_event`` 共用 ``devices/base.py`` 的同一份实现，
+        避免两处标记表各自漂移。
         """
-        output = f"{result.stdout}\n{result.stderr}".casefold()
-        if any(marker in output for marker in _UI_INPUT_REJECTION_MARKERS):
-            return result.model_copy(
-                update={
-                    "returncode": 1,
-                    "stderr": f"uiInput rejected the arguments: {result.stdout.strip()[:400]}",
-                }
-            )
-        return result
+        return reject_ui_input_usage(result)
 
     def back(self) -> CommandResult:
         """发送系统返回键事件。"""

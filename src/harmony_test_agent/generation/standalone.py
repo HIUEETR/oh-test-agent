@@ -160,6 +160,13 @@ class StandaloneEmitter:
                     lines.append("        pass")
                 else:
                     lines.append(f"        # {step.comment}")
+                # NOOP 步骤照样可能挂着检查点：``CaseBuilder.attach`` 的规则是「断言挂到前一个
+                # 步骤」，而模型习惯在断言前先截图，于是检查点常常落在 ``# skipped: screenshot``
+                # 这种 NOOP 步骤上。这里以前直接 ``continue``，导致这些断言**一行都没渲染**——
+                # IR 里有、``hard_checkpoint_count`` 也算了，脚本却根本不检查任何内容
+                # （真机复盘 dc-20260923T180535Z-1bed642e）。
+                for checkpoint in step.checkpoints:
+                    lines += render_standalone_checkpoint(checkpoint, indent=DEFAULT_INDENT)
                 continue
             lines.append(f"        # 步骤 {number}：{step.title_zh}")
             if _is_optional_click(step):

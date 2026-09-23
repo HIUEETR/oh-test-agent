@@ -33,6 +33,29 @@ def walk_nodes(root: dict[str, Any]) -> Iterable[dict[str, Any]]:
         stack.extend(reversed(node.get("children") or []))
 
 
+def walk_nodes_with_bundle(root: dict[str, Any]) -> Iterable[tuple[dict[str, Any], str]]:
+    """与 :func:`walk_nodes` **完全相同的遍历顺序**，额外携带最近祖先的 ``bundleName``。
+
+    鸿蒙把每个窗口作为一个带 ``bundleName`` 的 root 节点输出，而窗口内的控件节点自己
+    **不带** bundleName —— 因此归属必须靠继承。真机复盘 dc-20260923T180535Z-1bed642e：
+    同一帧里并列着被测应用（``com.github.zhuoyi233.zhplus``）、桌面
+    （``com.ohos.sceneboard``）与输入法（``com.huawei.hmos.inputmethod``）三棵窗口树，
+    ``index_keyMenu_container`` 挂在输入法那棵下面。没有归属信息就分不清「点的是应用控件」
+    还是「点的是软键盘」。
+
+    顺序必须与 ``walk_nodes`` 一致：``normalize_layout`` 用 ``enumerate`` 的下标参与
+    ``element_id`` 哈希，顺序一变所有 element_id 都会变，历史帧与 ``resolved_element``
+    就对不上了。
+    """
+    stack: list[tuple[dict[str, Any], str]] = [(root, "")]
+    while stack:
+        node, inherited = stack.pop()
+        attrs = node.get("attributes") or {}
+        bundle = str(attrs.get("bundleName") or "") or inherited
+        yield node, bundle
+        stack.extend((child, bundle) for child in reversed(node.get("children") or []))
+
+
 def parse_bounds(value: str | None) -> BoundingBox | None:
     """解析 HDC bounds 字符串，并过滤无效或退化的矩形。"""
     if not value:
@@ -59,7 +82,7 @@ def normalize_layout(layout: dict[str, Any], width: int, height: int) -> list[UI
     """把可见且可识别的层级节点转换为去重后的统一 UI 元素。"""
     elements: list[UIElement] = []
     seen: set[str] = set()
-    for index, node in enumerate(walk_nodes(layout)):
+    for index, (node, owner_bundle) in enumerate(walk_nodes_with_bundle(layout)):
         attrs = node.get("attributes") or {}
         if attrs.get("visible", "true") != "true" or attrs.get("enabled", "true") == "false":
             continue
@@ -108,7 +131,14 @@ def normalize_layout(layout: dict[str, Any], width: int, height: int) -> list[UI
                 selected=attrs.get("selected") == "true",
                 source="hdc_uitest_dumpLayout",
                 locator_candidates=candidates,
-                metadata={"page_path": attrs.get("pagePath", ""), "hierarchy": attrs.get("hierarchy", "")},
+                metadata={
+                    "page_path": attrs.get("pagePath", ""),
+                    "hierarchy": attrs.get("hierarchy", ""),
+                    # 归属窗口（继承自最近带 bundleName 的祖先）：脚本生成靠它把输入法 /
+                    # 桌面等外来浮层与被测应用自己的控件区分开。空串表示该帧没有归属信息
+                    # （历史快照或非鸿蒙来源），消费方必须按「判不了就不判」处理。
+                    "bundle_name": owner_bundle,
+                },
             )
         )
     return elements

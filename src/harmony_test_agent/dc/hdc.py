@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from ..devices.base import DeviceError
+from ..devices.base import DeviceError, reject_ui_input_usage, ui_input_key_argument
 from ..models import CommandResult
 
 # Windows 下用独立进程组启动子进程，便于超时时按进程树终止
@@ -151,8 +151,14 @@ class DcHdcExecutor:
     # ------------------------------------------------------------------
 
     def key_event(self, name: str) -> CommandResult:
-        """发送系统按键事件（Home / Back / Power 等）。"""
-        return self._run("shell", "uitest", "uiInput", "keyEvent", name)
+        """发送系统按键事件（Back / Home / Power 走名字，其余走数字 keyID）。
+
+        ``uitest uiInput keyEvent`` 只接受 ``Back``/``Home``/``Power`` 三个名字，其余按键必须
+        传数字 keyID；参数非法时它打印 usage **但退出码仍是 0**，只靠返回码判定就会把
+        「按了 Enter」录制成成功（真机复盘 dc-20260923T180535Z-1bed642e，详见
+        ``devices/base.py::ui_input_key_argument``）。因此这里同时做名字翻译与拒绝识别。
+        """
+        return reject_ui_input_usage(self._run("shell", "uitest", "uiInput", "keyEvent", ui_input_key_argument(name)))
 
     # ------------------------------------------------------------------
     # L3：应用管理

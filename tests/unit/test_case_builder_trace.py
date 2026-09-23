@@ -903,6 +903,14 @@ def assert_visible_locator_trace(
 
 
 def text_holding_snapshot(value: str) -> ScreenSnapshot:
+    """一帧里确实**显示**着 ``value`` 这段文字。
+
+    必须带 TEXT 定位候选：``perception/normalizer.py`` 只在原始 ``text`` 属性非空时才产出
+    TEXT 候选，而 ``UIElement.content`` 是 ``text or description or key or item_id`` 的**合成值**。
+    只写 ``content`` 等于伪造证据——真机复盘 dc-20260923T180535Z-1bed642e 里
+    ``p2_answer_detail_page`` 节点的 ``text`` 是空串、``content`` 却等于 key，于是
+    「屏幕上有这段文字」被误判为真，放行了一个设备上永不命中的 ``BY.text(标识符)``。
+    """
     return ScreenSnapshot(
         snapshot_id="frame-1",
         run_id="run-assertion-evidence",
@@ -910,7 +918,40 @@ def text_holding_snapshot(value: str) -> ScreenSnapshot:
         image_sha256="abc",
         width=1080,
         height=2340,
-        elements=[UIElement(element_id="ui-1", key="some_key", content=value)],
+        elements=[
+            UIElement(
+                element_id="ui-1",
+                key="some_key",
+                content=value,
+                locator_candidates=[LocatorCandidate(kind=LocatorKind.TEXT, value=value, score=0.9)],
+            )
+        ],
+    )
+
+
+def key_only_snapshot(key: str) -> ScreenSnapshot:
+    """一帧里存在该 ``key``，但节点的 ``text`` 是空串（``content`` 只能合成出 key 本身）。
+
+    这正是知乎++ 的真实形态：``p2_answer_detail_page`` / ``p2_search_result_list`` 都是
+    ``text=''`` 的容器节点。此时唯一正确的选择器是 ``BY.key(...)``。
+    """
+    return ScreenSnapshot(
+        snapshot_id="frame-key",
+        run_id="run-assertion-evidence",
+        image_path=Path("screens/frame-key.png"),
+        image_sha256="abc",
+        width=1080,
+        height=2340,
+        # content 走 normalizer 的合成规则（text 为空 ⇒ 退化到 key），但**不给** TEXT 候选。
+        elements=[
+            UIElement(
+                element_id="ui-key",
+                key=key,
+                id=key,
+                content=key,
+                locator_candidates=[LocatorCandidate(kind=LocatorKind.KEY, value=key, score=1)],
+            )
+        ],
     )
 
 
@@ -945,6 +986,27 @@ def test_identifier_shaped_target_that_exists_as_literal_text_keeps_exact_text()
     assert checkpoint.locator.kind == LocatorKind.TEXT
     assert checkpoint.locator.value == "log-in"
     assert "semantic target 'log-in' fell back to exact text" in result.warnings
+
+
+def test_identifier_target_held_only_as_a_key_is_recovered_as_by_key() -> None:
+    """真机复盘 dc-20260923T180535Z-1bed642e：target 是帧里真实存在的 **key**、text 为空。
+
+    合成出来的 ``content`` 恰好等于 key，旧实现据此认定「屏幕上有这段文字」，渲染成
+    ``BY.text('p2_answer_detail_page')`` —— 设备上该节点 text 是空串，永不命中。
+    正确结果是恢复成 ``BY.key(...)``，且是**硬**检查点（断言真的能生效，不必降级 soft）。
+    """
+    target = "p2_answer_detail_page"
+    trace = assert_visible_locator_trace(target=target, snapshots=[key_only_snapshot(target)])
+
+    result = CaseBuilder().from_trace(trace, profile())
+
+    checkpoint = only_checkpoint(result)
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.KEY
+    assert checkpoint.locator.value == target
+    assert checkpoint.soft is False
+    assert f"semantic target {target!r} resolved to key:{target!r} from the captured frames" in result.warnings
+    assert f"semantic target {target!r} fell back to exact text" not in result.warnings
 
 
 def test_identifier_shaped_target_without_literal_text_is_gated() -> None:

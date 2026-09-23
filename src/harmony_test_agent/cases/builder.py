@@ -993,6 +993,7 @@ class CaseBuilder:
                 bound=bundle_for_bounds,
                 omitted=omitted,
                 profile=profile,
+                bundle_name=bundle_name,
             )
             if not produced:
                 # ``_dc_step`` 自己会为「有明确语义的省略」写 reason（例如易变定位器），
@@ -1108,6 +1109,44 @@ class CaseBuilder:
         candidates = [str(getattr(locator, "value", "") or ""), *(value or "" for value in values)]
         return {"optional": True} if is_optional_control(*candidates) else {}
 
+    def _foreign_owner_bundle(self, element: UIElement | None, bundle_name: str) -> str | None:
+        """该元素是否归属于**被测应用之外**的窗口（输入法 / 桌面 / 系统 UI）。
+
+        真机复盘 dc-20260923T180535Z-1bed642e：模型按 Enter 提交搜索（那次按键其实被
+        ``uitest`` 拒绝了，见 ``devices/base.py::ui_input_key_argument``），于是改点软键盘上的
+        搜索键，命中 ``index_keyMenu_container`` —— 它挂在 ``com.huawei.hmos.inputmethod`` 的
+        窗口下。键盘是瞬时浮层，回放时多半已经收起：写成 ``BY.key(...)`` 必然
+        ``Can't find component``，写成坐标兜底也一样（那一下只会点到键盘原本所在的空白处）。
+
+        归属信息由 ``perception/normalizer.py::walk_nodes_with_bundle`` 从窗口 root 继承下来，
+        存在 ``UIElement.metadata['bundle_name']``；``resolved_element`` 是录制当时拷的副本，
+        早于该字段的会话里没有，因此回查已采集帧（``element_id`` 是内容哈希，跨帧稳定）。
+
+        **判不了就不判**：``bundle_name`` 缺失或是占位值时不过滤（否则整份脚本会被清空），
+        查不到归属信息时也不过滤，保持既有行为。
+        """
+        if element is None or not bundle_name or bundle_name == PLACEHOLDER_BUNDLE:
+            return None
+        owner = str((element.metadata or {}).get("bundle_name") or "").strip()
+        if not owner:
+            owner = self._owner_bundle_from_snapshots(element)
+        if not owner or owner == bundle_name:
+            return None
+        return owner
+
+    def _owner_bundle_from_snapshots(self, element: UIElement) -> str:
+        """按 ``element_id`` 回查已采集帧，取该元素的归属窗口 bundle。"""
+        if not element.element_id:
+            return ""
+        for snapshot in self._snapshots:
+            for item in snapshot.elements:
+                if item.element_id != element.element_id:
+                    continue
+                owner = str((item.metadata or {}).get("bundle_name") or "").strip()
+                if owner:
+                    return owner
+        return ""
+
     def _dc_step(
         self,
         invocation: Any,
@@ -1120,6 +1159,7 @@ class CaseBuilder:
         bound: tuple[int, int] | None,
         omitted: list[dict[str, str]],
         profile: TargetAppProfile | None = None,
+        bundle_name: str = "",
     ) -> tuple[bool, bool]:
         """把一个可回放的 DC 调用转为 IR 步骤；返回 ``(是否产出内容, 是否计入 included_count)``。"""
         tool = invocation.tool
@@ -1136,6 +1176,18 @@ class CaseBuilder:
                     "reason": reason,
                 }
             )
+
+        if tool in {dc_tool_name.CLICK, dc_tool_name.INPUT_TEXT}:
+            foreign = self._foreign_owner_bundle(element, bundle_name)
+            if foreign is not None:
+                raw = (element.key or element.id or element.content) if element is not None else ""
+                omit(f"{tool.value} landed on {foreign}, which is not the app under test")
+                warnings.append(
+                    f"{invocation.invocation_id}: {tool.value} resolved to {raw!r} owned by {foreign} "
+                    f"(input method / system overlay), not the app under test {bundle_name!r}; omitted "
+                    "because that overlay is transient and will not be there on replay"
+                )
+                return False, False
 
         if tool == dc_tool_name.START_APP:
             add_step(
@@ -1238,9 +1290,10 @@ class CaseBuilder:
         if tool in {dc_tool_name.ASSERT_VISIBLE, dc_tool_name.ASSERT_NOT_VISIBLE, dc_tool_name.ASSERT_TEXT}:
             target = str(args.get("target") or args.get("text") or "")
             locator = self._dc_locator(element, target, profile, warnings)
-            # DC 侧**不另造帧恢复路径**：``_dc_locator`` 用的 ``invocation.resolved_element``
-            # 已经是帧命中的元素，``resolved_element`` 为 None 时没有别的帧可查
-            # （``_recorded_key_locator`` 依赖 trace/action，DC 侧不存在）。
+            # ``resolved_element`` 为 None（断言没有坐标，命中不了元素）时，帧恢复由
+            # ``locator_from_candidate`` 的终端兜底负责：它会拿 target 去 ``self._snapshots``
+            # 里查同名的 key/id（``_key_evidence_in_snapshots``）。``_recorded_key_locator``
+            # 那条路径依赖 trace/action，DC 侧不存在，因此不在这里另造一份。
             if tool == dc_tool_name.ASSERT_VISIBLE:
                 if locator is None:
                     locator = self.locator_from_candidate(None, target, profile, warnings)
@@ -1440,11 +1493,48 @@ class CaseBuilder:
         return wanted in {element.content.strip(), element.description.strip()}
 
     def _literal_text_in_snapshots(self, value: str) -> bool:
-        """该字面值是否真的作为某个元素的 content/description 出现在已采集帧里。"""
+        """该字面值是否真的作为**屏幕文本**出现在已采集帧里。
+
+        刻意不看 ``UIElement.content``：``perception/normalizer.py`` 把 content 合成为
+        ``text or description or key or item_id``，于是「text 为空但有 key」的节点其 content
+        恰好等于 key。用它判定会把 ``p2_answer_detail_page`` 这类**只有 key、text 是空串**的
+        节点误判成「屏幕上真有这段文字」，进而放行一个设备上永不命中的
+        ``BY.text('p2_answer_detail_page')`` 硬检查点（真机复盘 dc-20260923T180535Z-1bed642e）。
+
+        真实文本只有两个来源：``description`` 属性，以及 ``locator_candidates`` 里的 TEXT 项
+        —— 后者只在原始 ``text`` 非空时才产出。
+        """
         wanted = (value or "").strip()
         if not wanted:
             return False
-        return any(self._holds_text(element, wanted) for snapshot in self._snapshots for element in snapshot.elements)
+        for snapshot in self._snapshots:
+            for element in snapshot.elements:
+                if (element.description or "").strip() == wanted:
+                    return True
+                if any(
+                    candidate.kind == LocatorKind.TEXT and (candidate.value or "").strip() == wanted
+                    for candidate in element.locator_candidates
+                ):
+                    return True
+        return False
+
+    def _key_evidence_in_snapshots(self, value: str) -> LocatorCandidate | None:
+        """该字面值是否作为某个元素的 ``key``/``id`` 出现在已采集帧里。
+
+        断言 target 常常是 Profile / 页面摘要里的**语义名**（``p2_answer_detail_page``），
+        运行时并没有给出定位器。这种名字本来就是 key 命名空间的成员：帧里真存在就恢复成
+        ``BY.key(...)``，比降级成 soft 更有用——断言会真正生效，而不是被静默跳过。
+        """
+        wanted = (value or "").strip()
+        if not wanted:
+            return None
+        for snapshot in self._snapshots:
+            for element in snapshot.elements:
+                if element.key == wanted:
+                    return LocatorCandidate(kind=LocatorKind.KEY, value=element.key, score=1)
+                if element.id == wanted:
+                    return LocatorCandidate(kind=LocatorKind.ID, value=element.id, score=1)
+        return None
 
     @staticmethod
     def _key_id_candidate(element: UIElement) -> LocatorCandidate | None:
@@ -1688,12 +1778,26 @@ class CaseBuilder:
                 target_label=target or text or type_name,
             )
         target_text = (target or "").strip()
-        if is_identifier_shaped_target(target_text) and not self._literal_text_in_snapshots(target_text):
-            warnings.append(
-                f"ungrounded target {target!r} is identifier-shaped and appears in no captured frame; "
-                "BY.text() on it can never match"
-            )
-            return None
+        if is_identifier_shaped_target(target_text):
+            # 标识符形态的 target 本来就是 key 命名空间的成员：帧里真存在就恢复成 key/id
+            # 定位器。这比降级成 ``BY.text(标识符)`` 有用得多——后者在设备上永不命中
+            # （真机复盘 dc-20260923T180535Z-1bed642e：``p2_answer_detail_page`` 节点的
+            # ``text`` 属性是空串，只有 ``key``）。
+            recovered = self._key_evidence_in_snapshots(target_text)
+            if recovered is not None:
+                spec = self.locator_from_candidate(recovered, target, profile, warnings)
+                if spec is not None:
+                    warnings.append(
+                        f"semantic target {target!r} resolved to {recovered.kind}:{recovered.value!r} "
+                        "from the captured frames"
+                    )
+                    return spec
+            if not self._literal_text_in_snapshots(target_text):
+                warnings.append(
+                    f"ungrounded target {target!r} is identifier-shaped and appears in no captured frame; "
+                    "BY.text() on it can never match"
+                )
+                return None
         warnings.append(f"semantic target {target!r} fell back to exact text")
         return LocatorSpec(kind=LocatorKind.TEXT, value=target or "", target_label=target or "")
 

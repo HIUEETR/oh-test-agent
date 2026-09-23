@@ -32,7 +32,7 @@ from harmony_test_agent.cases.spec import (
 from harmony_test_agent.dc.generator import DcHypiumGenerator
 from harmony_test_agent.dc.models import DcToolInvocation, DcToolName, DcToolTier, utc_now
 from harmony_test_agent.generation.standalone import StandaloneEmitter
-from harmony_test_agent.models import BoundingBox, LocatorKind, ScreenSnapshot, UIElement
+from harmony_test_agent.models import BoundingBox, LocatorCandidate, LocatorKind, ScreenSnapshot, UIElement
 from harmony_test_agent.storage import ArtifactStore
 
 SESSION_ID = "dc-session-001"
@@ -792,7 +792,12 @@ def test_dc_assert_text_with_human_readable_expected_stays_hard(artifacts: Artif
 
 
 def test_dc_identifier_target_present_as_literal_text_in_a_frame_is_not_gated(artifacts: ArtifactStore) -> None:
-    """帧里确有该字面文本 ⇒ 有证据 ⇒ 保持硬检查点。"""
+    """帧里确有该字面文本 ⇒ 有证据 ⇒ 保持硬检查点。
+
+    证据必须是**真实文本**（TEXT 定位候选，``perception/normalizer.py`` 只在原始 ``text``
+    非空时才产出它），不能只写合成的 ``content`` —— 后者在 text 为空时会退化成 key，
+    拿它当证据就会放行一个设备上永不命中的 ``BY.text(标识符)``。
+    """
     frame = ScreenSnapshot(
         snapshot_id="snap-login",
         run_id=SESSION_ID,
@@ -800,7 +805,14 @@ def test_dc_identifier_target_present_as_literal_text_in_a_frame_is_not_gated(ar
         image_sha256="abc",
         width=1080,
         height=2340,
-        elements=[UIElement(element_id="ui-1", key="some_key", content="log-in")],
+        elements=[
+            UIElement(
+                element_id="ui-1",
+                key="some_key",
+                content="log-in",
+                locator_candidates=[LocatorCandidate(kind=LocatorKind.TEXT, value="log-in", score=0.9)],
+            )
+        ],
     )
 
     result = build_dc(
@@ -814,3 +826,187 @@ def test_dc_identifier_target_present_as_literal_text_in_a_frame_is_not_gated(ar
     assert checkpoint.locator is not None
     assert checkpoint.locator.kind == LocatorKind.TEXT
     assert checkpoint.locator.value == "log-in"
+
+
+def test_dc_identifier_target_held_only_as_a_key_is_recovered_as_by_key(artifacts: ArtifactStore) -> None:
+    """真机复盘 dc-20260923T180535Z-1bed642e：target 是帧里真实存在的 key、text 为空串。
+
+    ``content`` 被 normalizer 合成成 key 本身，旧实现据此误判「屏幕上有这段文字」并渲染
+    ``BY.text('p2_answer_detail_page')``；正确结果是恢复成 ``BY.key(...)`` 的**硬**检查点。
+    """
+    target = "p2_answer_detail_page"
+    frame = ScreenSnapshot(
+        snapshot_id="snap-detail",
+        run_id=SESSION_ID,
+        image_path=Path("screens/snap-detail.png"),
+        image_sha256="abc",
+        width=1320,
+        height=2232,
+        elements=[
+            UIElement(
+                element_id="ui-detail",
+                key=target,
+                id=target,
+                content=target,
+                locator_candidates=[LocatorCandidate(kind=LocatorKind.KEY, value=target, score=1)],
+            )
+        ],
+    )
+
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.ASSERT_VISIBLE, {"target": target}, invocation_id="inv-assert")],
+        snapshots=[frame],
+        bundle_name="com.github.zhuoyi233.zhplus",
+    )
+
+    checkpoint = checkpoints_of(result)[0]
+    assert checkpoint.kind == CheckpointKind.ELEMENT_EXISTS
+    assert checkpoint.soft is False
+    assert checkpoint.locator is not None
+    assert checkpoint.locator.kind == LocatorKind.KEY
+    assert checkpoint.locator.value == target
+    assert f"semantic target {target!r} resolved to key:{target!r} from the captured frames" in result.warnings
+
+
+# ---------------------------------------------------------------------------
+# 外来窗口（输入法 / 桌面 / 系统 UI）的点击不得变成硬回放步骤
+# 真机复盘 dc-20260923T180535Z-1bed642e：模型按 Enter 提交搜索失败后改点软键盘上的搜索键，
+# 命中 com.huawei.hmos.inputmethod 窗口下的 index_keyMenu_container。键盘是瞬时浮层，
+# 回放时早已收起 ⇒ BY.key(...) 必然 Can't find component，坐标兜底也一样会点到空白处。
+# ---------------------------------------------------------------------------
+
+APP_BUNDLE = "com.github.zhuoyi233.zhplus"
+IME_BUNDLE = "com.huawei.hmos.inputmethod"
+IME_KEY = "index_keyMenu_container"
+
+
+def owned_element(key: str, bundle: str) -> UIElement:
+    """带归属窗口信息的元素（``normalize_layout`` 从窗口 root 继承 bundleName 后写入 metadata）。"""
+    return UIElement(
+        element_id=f"ui-{key}",
+        key=key,
+        id=key,
+        content=key,
+        clickable=True,
+        bbox=BoundingBox(left=0, top=1443, right=1320, bottom=2097),
+        metadata={"bundle_name": bundle},
+    )
+
+
+def test_click_on_an_input_method_element_is_omitted(artifacts: ArtifactStore) -> None:
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.CLICK, {"x": 1225, "y": 1939}, resolved_element=owned_element(IME_KEY, IME_BUNDLE))],
+        bundle_name=APP_BUNDLE,
+    )
+
+    assert IME_KEY not in StandaloneEmitter().render(result.spec, run_id=SESSION_ID, device_id=DEVICE_ID).python_text
+    assert not [step for step in result.spec.steps if step.action == StepAction.CLICK]
+    assert result.omitted_actions[0]["reason"] == f"click landed on {IME_BUNDLE}, which is not the app under test"
+    assert any("input method / system overlay" in warning for warning in result.warnings)
+
+
+def test_click_on_a_foreign_element_never_falls_back_to_coordinate(artifacts: ArtifactStore) -> None:
+    """坐标兜底同样危险：那一下只会点到键盘原本所在的空白处，因此外来元素必须整条省略。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.CLICK, {"x": 1225, "y": 1939}, resolved_element=owned_element(IME_KEY, IME_BUNDLE))],
+        bundle_name=APP_BUNDLE,
+    )
+
+    assert not [step for step in result.spec.steps if step.locator is not None]
+    assert result.counts["coordinate_fallbacks"] == 0
+
+
+def test_input_text_on_a_foreign_element_is_omitted(artifacts: ArtifactStore) -> None:
+    result = build_dc(
+        artifacts,
+        [
+            invocation(
+                DcToolName.INPUT_TEXT,
+                {"text": "zcode", "coordinate": [660, 1900]},
+                resolved_element=owned_element("ime_search_box", IME_BUNDLE),
+            )
+        ],
+        bundle_name=APP_BUNDLE,
+    )
+
+    assert not [step for step in result.spec.steps if step.action == StepAction.INPUT_TEXT]
+    assert result.omitted_actions[0]["tool"] == "input_text"
+
+
+def test_click_on_the_app_under_test_is_kept(artifacts: ArtifactStore) -> None:
+    result = build_dc(
+        artifacts,
+        [
+            invocation(
+                DcToolName.CLICK,
+                {"x": 585, "y": 202},
+                resolved_element=owned_element("p2_home_titlebar_search", APP_BUNDLE),
+            )
+        ],
+        bundle_name=APP_BUNDLE,
+    )
+
+    steps = [step for step in result.spec.steps if step.action == StepAction.CLICK]
+    assert len(steps) == 1
+    assert steps[0].locator is not None
+    assert steps[0].locator.value == "p2_home_titlebar_search"
+    assert result.omitted_actions == []
+
+
+def test_element_without_ownership_metadata_is_kept(artifacts: ArtifactStore) -> None:
+    """判不了就不判：历史快照的 metadata 里没有 bundle_name，此时保持既有行为。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.CLICK, {"x": 10, "y": 20}, resolved_element=element(key="some_control"))],
+        bundle_name=APP_BUNDLE,
+    )
+
+    assert len([step for step in result.spec.steps if step.action == StepAction.CLICK]) == 1
+    assert result.omitted_actions == []
+
+
+def test_ownership_is_recovered_from_the_captured_frames(artifacts: ArtifactStore) -> None:
+    """``resolved_element`` 是录制当时拷的副本，早于 bundle_name 字段的会话要靠回查帧补齐。"""
+    stale = UIElement(
+        element_id="ui-stale",
+        key=IME_KEY,
+        id=IME_KEY,
+        content=IME_KEY,
+        clickable=True,
+        bbox=BoundingBox(left=0, top=1443, right=1320, bottom=2097),
+        metadata={"page_path": "", "hierarchy": "ROOT41,0,0,1"},
+    )
+    frame = ScreenSnapshot(
+        snapshot_id="snap-ime",
+        run_id=SESSION_ID,
+        image_path=Path("screens/snap-ime.png"),
+        image_sha256="abc",
+        width=1320,
+        height=2232,
+        elements=[owned_element(IME_KEY, IME_BUNDLE).model_copy(update={"element_id": "ui-stale"})],
+    )
+
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.CLICK, {"x": 1225, "y": 1939}, resolved_element=stale)],
+        snapshots=[frame],
+        bundle_name=APP_BUNDLE,
+    )
+
+    assert not [step for step in result.spec.steps if step.action == StepAction.CLICK]
+    assert any(IME_BUNDLE in warning for warning in result.warnings)
+
+
+def test_placeholder_bundle_disables_the_foreign_filter(artifacts: ArtifactStore) -> None:
+    """身份还是占位值时**不得**过滤：否则「什么都不等于占位 bundle」会把整份脚本清空。"""
+    result = build_dc(
+        artifacts,
+        [invocation(DcToolName.CLICK, {"x": 1225, "y": 1939}, resolved_element=owned_element(IME_KEY, IME_BUNDLE))],
+        bundle_name=PLACEHOLDER_BUNDLE,
+    )
+
+    assert len([step for step in result.spec.steps if step.action == StepAction.CLICK]) == 1
+    assert result.omitted_actions == []
