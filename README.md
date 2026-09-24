@@ -230,3 +230,18 @@ $env:RUN_LIVE_TESTS = '1'
 - 无稳定 key/id 的控件会降级为经过边界验证的坐标，并在代码、元数据和 Web 中持续告警。
 - 资产流水线降级不产出 Hypium 脚本与回放证据；需要回归脚本时仍需先完成 Profile 引导。
 - FastAPI 当前是本机开发服务，没有鉴权，不应直接暴露到不受信任网络。
+
+## 参赛提交材料（中国国际大学生创新大赛 2026 · 产业赛道企业命题组）
+
+本项目对应华为命题「面向 OpenHarmony 应用的多模态智能测试系统」（序号 24 / u-a24）。评审材料位于：
+
+| 材料 | 位置 |
+| --- | --- |
+| 解决方案 | [`docs/competition/解决方案.md`](docs/competition/解决方案.md) |
+| 验证报告（含脚本执行结果） | [`docs/competition/验证报告.md`](docs/competition/验证报告.md) |
+| 系统架构设计文档 | [`docs/competition/系统架构设计文档.md`](docs/competition/系统架构设计文档.md) |
+| 测试用例生成说明 | [`docs/competition/测试用例生成说明.md`](docs/competition/测试用例生成说明.md) |
+| 演示材料说明与关键帧截图 | [`demo/README.md`](demo/README.md) · [`docs/competition/evidence/`](docs/competition/evidence/) |
+
+> 团队：王祎豪（负责人）· 肖焱 · 罗宇豪 ｜ 指导教师：刘文果 ｜ 东莞理工学院
+> 本仓库以 Apache 2.0 协议开源（见 [LICENSE](LICENSE)）。
